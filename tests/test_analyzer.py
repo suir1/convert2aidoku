@@ -55,6 +55,84 @@ def test_analyzes_supported_encrypted_json_api() -> None:
     assert not ir.unsupported_features
 
 
+def test_analyzes_supported_triple_des_request_signing(tmp_path: Path) -> None:
+    (tmp_path / "build.gradle.kts").write_text(
+        'keiyoushi { name = "V"; versionCode = 1; source { lang = "zh"; '
+        'baseUrl { custom("https://v.example") } } }'
+    )
+    source = tmp_path / "src" / "V.kt"
+    source.parent.mkdir()
+    source.write_text(
+        """
+        abstract class V : HttpSource() {
+            fun sign() {
+                val key = javax.crypto.spec.SecretKeySpec(ByteArray(24), "DESede")
+                val iv = javax.crypto.spec.IvParameterSpec(ByteArray(8))
+                javax.crypto.Cipher.getInstance("DESede/CBC/PKCS5Padding")
+            }
+            override fun pageListRequest(chapter: SChapter): Request = TODO()
+        }
+        """
+    )
+
+    ir = analyze_path(str(tmp_path))
+
+    assert Capability.TRIPLE_DES_CBC in ir.capabilities
+    assert not ir.unsupported_features
+
+
+def test_omits_explicitly_unsupported_latest_but_detects_deep_links(tmp_path: Path) -> None:
+    (tmp_path / "build.gradle.kts").write_text(
+        'keiyoushi { name = "Links"; source { lang = "zh"; '
+        'baseUrl { custom("https://links.example") } } }'
+    )
+    source = tmp_path / "src" / "Links.kt"
+    source.parent.mkdir()
+    source.write_text(
+        """
+        abstract class Links : HttpSource() {
+            override val supportsLatest = false
+            override fun latestUpdatesRequest(page: Int) = throw UnsupportedOperationException()
+            override fun getMangaUrl(manga: SManga) = "$baseUrl/detail/${manga.url}"
+            override fun getChapterUrl(chapter: SChapter) = "$baseUrl/read/${chapter.url}"
+        }
+        """
+    )
+
+    ir = analyze_path(str(tmp_path))
+
+    assert Capability.LATEST not in ir.capabilities
+    assert Capability.DEEP_LINKS in ir.capabilities
+
+
+def test_analyzes_legacy_groovy_module_metadata(tmp_path: Path) -> None:
+    module = tmp_path / "legacy"
+    module.mkdir()
+    (module / "build.gradle").write_text(
+        "ext { extName = 'Legacy'; extClass = '.Legacy'; extVersionCode = 4; isNsfw = true }"
+    )
+    source = module / "src" / "Legacy.kt"
+    source.parent.mkdir()
+    source.write_text(
+        """
+        class Legacy : HttpSource() {
+            override val name = "Legacy Kotlin"
+            override val lang = "zh"
+            override val baseUrl = "https://legacy.example"
+            override fun popularMangaRequest(page: Int): Request = TODO()
+        }
+        """
+    )
+
+    ir = analyze_path(str(module))
+
+    assert ir.metadata.source_id == "zh.legacy"
+    assert ir.metadata.name == "Legacy"
+    assert ir.metadata.version == 4
+    assert ir.metadata.content_rating is ContentRating.NSFW
+    assert ir.metadata.base_url == "https://legacy.example"
+
+
 def test_detects_relative_manga_and_chapter_keys() -> None:
     assert _uses_relative_url_keys('manga.setUrlWithoutDomain(a.absUrl("href"))')
     assert _uses_relative_url_keys('chapter.url = "/chapters/${item.id}"')

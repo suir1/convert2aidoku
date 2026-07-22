@@ -101,6 +101,16 @@ Mapping rules:
   supported through the pinned `aes` and `cbc` crates. Preserve the exact key derivation, IV
   extraction, ciphertext encoding, and padding from the input. Use pinned `hex` or `base64` for
   decoding; never guess keys, IVs, or transformations and never execute site-provided code.
+- For a source explicitly classified with `triple_des_cbc`, preserve its exact 24-byte DESede key,
+  8-byte IV, payload ordering, timestamp units, base64 variant, and PKCS#5/PKCS#7 padding. Use the
+  pinned `des`, `cbc`, and `base64` crates. If the source creates a random alphanumeric request key,
+  generate the same length and alphabet locally; do not replace it with a fixed secret or accept
+  cryptographic material from the network.
+  `aidoku::imports::std::current_date()` is available and returns Unix seconds; multiply by 1000
+  when the Tachi source uses `System.currentTimeMillis()`. Use this live value both in the signed
+  payload and the request parameter. Never substitute `0` or another fixed timestamp.
+- To return a user-visible source error, use `aidoku::AidokuError::message(...)` (or `bail!`). The
+  pinned `RequestError` enum has no `new` constructor.
 - Preserve JSON response envelopes at every endpoint. If the Tachi input deserializes
   `ApiResponse<Payload>`, the generated Rust must deserialize `ApiResponse<Payload>` and then use
   its `results` field. Do not deserialize the raw HTTP response directly into `Payload` merely

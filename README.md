@@ -7,8 +7,9 @@ conversion report.
 
 The MVP deliberately rejects multisrc/theme sources, unsupported cryptography, and image
 scrambling instead of pretending that an unsafe or incomplete conversion succeeded. Explicit
-AES-CBC JSON sources are supported. Local extension APKs can be decompiled with JADX and converted
-in a public-reading-only scope; login, bookcase, and comment features are reported but excluded.
+AES-CBC JSON decoding and 3DES-CBC request signing are supported with pinned RustCrypto crates.
+Local extension APKs can be decompiled with JADX and converted in a public-reading-only scope;
+login, bookcase, and comment features are reported but excluded.
 
 ## Install
 
@@ -60,8 +61,9 @@ boundaries.
 
 ## Analyze and convert
 
-Inputs can be local module directories, local extension APKs, or GitHub module URLs. APK input
-requires `jadx` (`brew install jadx` on macOS):
+Inputs can be local module directories, local extension APKs, or GitHub module URLs. Both current
+`build.gradle.kts` and legacy `build.gradle` extension modules are recognized. APK input requires
+`jadx` (`brew install jadx` on macOS):
 
 ```bash
 uv run c2a analyze ./src/zh/mycomic

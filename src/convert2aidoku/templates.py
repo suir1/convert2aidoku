@@ -153,6 +153,20 @@ def builtin_templates() -> tuple[TemplateSpec, ...]:
             license_note=_LICENSE_NOTE,
         ),
         TemplateSpec(
+            template_id="triple-des-cbc-request",
+            aidoku_revision=AIDOKU_RS_REV,
+            description="3DES-CBC request-parameter signing with source-defined payload layout.",
+            required_capabilities=[Capability.TRIPLE_DES_CBC],
+            slots=[
+                _slot("key_generation", "rust", "Exact 24-byte key alphabet and generation."),
+                _slot("iv", "rust", "Exact source 8-byte IV."),
+                _slot("payload", "rust", "Exact field ordering and timestamp units."),
+                _slot("encoding", "rust", "Exact base64 and URL-query encoding behavior."),
+            ],
+            provenance=_PROVENANCE,
+            license_note=_LICENSE_NOTE,
+        ),
+        TemplateSpec(
             template_id="dynamic-base-url",
             aidoku_revision=AIDOKU_RS_REV,
             description="A settings-backed allowlisted base URL selector.",

@@ -357,6 +357,20 @@ def _capability_gaps(ir: SourceIR, manifest: GenerationManifest) -> list[str]:
             )
         if not dependencies.intersection({"base64", "hex"}):
             gaps.append("encrypted JSON source requested neither hex nor base64 decoding")
+    if Capability.TRIPLE_DES_CBC in ir.capabilities:
+        missing_crypto = sorted({"des", "cbc", "base64"} - dependencies)
+        if missing_crypto:
+            gaps.append(
+                "3DES-CBC request signing omitted required pinned dependencies: "
+                + ", ".join(missing_crypto)
+            )
+        if "current_date" not in rust_content or re.search(
+            r"\blet\s+time\s*=\s*\"0\"", rust_content
+        ):
+            gaps.append(
+                "3DES-CBC request signing uses no live millisecond Unix timestamp; "
+                "call aidoku::imports::std::current_date() and multiply its seconds by 1000"
+            )
     if Capability.DYNAMIC_BASE_URLS in ir.capabilities:
         settings = resource_contents.get("res/settings.json")
         if settings is None:

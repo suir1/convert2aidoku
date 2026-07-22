@@ -46,6 +46,11 @@ DEPENDENCY_SPECS: dict[str, dict[str, object]] = {
         "default-features": False,
         "features": [],
     },
+    "des": {
+        "version": "0.8.1",
+        "default-features": False,
+        "features": [],
+    },
     "cbc": {
         "version": "0.1.2",
         "default-features": False,

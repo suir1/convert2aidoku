@@ -82,6 +82,8 @@ def _parse_main_class(kotlin: str) -> tuple[str, list[str]]:
 
 
 def _parse_content_rating(build: str) -> ContentRating:
+    if re.search(r"\bisNsfw\s*=\s*true\b", build, re.IGNORECASE):
+        return ContentRating.NSFW
     warning = _match(r"contentWarning\s*=\s*ContentWarning\.([A-Z_]+)", build, "SAFE")
     if warning in {"NSFW", "MATURE"}:
         return ContentRating.NSFW
@@ -102,6 +104,7 @@ def _capabilities(kotlin: str) -> list[Capability]:
         (Capability.DYNAMIC_FILTERS, ("resetThemeFilter", "theme/comic/count")),
         (Capability.SETTINGS, ("setupPreferenceScreen", "ConfigurableSource")),
         (Capability.IMAGE_HEADERS, ("imageRequest", "headersBuilder")),
+        (Capability.DEEP_LINKS, ("getMangaUrl", "getChapterUrl")),
         (
             Capability.JSON_API,
             ("parseAs<", "decodeFromString<", "get_json_owned", "application/json"),
@@ -114,9 +117,19 @@ def _capabilities(kotlin: str) -> list[Capability]:
     capabilities = [
         capability for capability, markers in mapping if any(x in kotlin for x in markers)
     ]
+    if re.search(r"\bsupportsLatest\s*=\s*false\b", kotlin):
+        capabilities = [item for item in capabilities if item is not Capability.LATEST]
+    if (
+        "allCategory" in kotlin
+        and re.search(r"\bvar\s+categories\s*:", kotlin)
+        and "getFilterList" in kotlin
+    ):
+        capabilities.append(Capability.DYNAMIC_FILTERS)
     if _uses_supported_aes_cbc(kotlin):
         capabilities.append(Capability.ENCRYPTED_JSON)
-    return capabilities
+    if _uses_supported_3des_cbc(kotlin):
+        capabilities.append(Capability.TRIPLE_DES_CBC)
+    return list(dict.fromkeys(capabilities))
 
 
 def _uses_supported_aes_cbc(kotlin: str) -> bool:
@@ -124,6 +137,18 @@ def _uses_supported_aes_cbc(kotlin: str) -> bool:
     if not transformations:
         return False
     supported = {"AES/CBC/PKCS5Padding", "AES/CBC/PKCS7Padding"}
+    return (
+        all(transformation in supported for transformation in transformations)
+        and "SecretKeySpec" in kotlin
+        and "IvParameterSpec" in kotlin
+    )
+
+
+def _uses_supported_3des_cbc(kotlin: str) -> bool:
+    transformations = re.findall(r'Cipher\.getInstance\(\s*"([^"]+)"', kotlin)
+    if not transformations:
+        return False
+    supported = {"DESede/CBC/PKCS5Padding", "DESede/CBC/PKCS7Padding"}
     return (
         all(transformation in supported for transformation in transformations)
         and "SecretKeySpec" in kotlin
@@ -153,7 +178,6 @@ def _unsupported_features(build: str, kotlin: str) -> list[str]:
             "WebView",
             "loadUrl(",
             "decodeByteArray",
-            "addInterceptor",
         ),
     }
     combined = build + "\n" + kotlin
@@ -161,7 +185,8 @@ def _unsupported_features(build: str, kotlin: str) -> list[str]:
         name for name, markers in checks.items() if any(marker in combined for marker in markers)
     ]
     crypto_markers = ("javax.crypto", "Cipher.getInstance", "SecretKeySpec")
-    if any(marker in combined for marker in crypto_markers) and not _uses_supported_aes_cbc(kotlin):
+    crypto_supported = _uses_supported_aes_cbc(kotlin) or _uses_supported_3des_cbc(kotlin)
+    if any(marker in combined for marker in crypto_markers) and not crypto_supported:
         unsupported.append("cryptography")
     return unsupported
 
@@ -545,9 +570,12 @@ def analyze_source(resolved: ResolvedSource) -> SourceIR:
     if resolved.source_format == "decompiled_apk":
         return _analyze_decompiled_apk(resolved)
     files = collect_source_files(resolved)
-    build_file = next((item for item in files if item.path == "build.gradle.kts"), None)
+    build_file = next(
+        (item for item in files if item.path in {"build.gradle.kts", "build.gradle"}),
+        None,
+    )
     if build_file is None:
-        raise InputError("build.gradle.kts was not collected")
+        raise InputError("build.gradle.kts or build.gradle was not collected")
     kotlin = "\n\n".join(item.content for item in files if item.path.endswith(".kt"))
     main_class, parents = _parse_main_class(kotlin)
     unsupported = _unsupported_features(build_file.content, kotlin)
@@ -555,10 +583,16 @@ def analyze_source(resolved: ResolvedSource) -> SourceIR:
         raise UnsupportedSourceError("source is outside the MVP scope: " + ", ".join(unsupported))
 
     module_slug = re.sub(r"[^a-z0-9]+", "-", resolved.module_path.name.lower()).strip("-")
-    language = _match(r"\blang\s*=\s*\"([^\"]+)\"", build_file.content, "multi")
+    language = _match(r"\blang\s*=\s*['\"]([^'\"]+)['\"]", build_file.content)
+    if not language:
+        language = _match(r"override\s+val\s+lang\s*=\s*\"([^\"]+)\"", kotlin, "multi")
     if not re.fullmatch(r"[a-z]{2,3}(?:-[a-z0-9]+)*", language):
         raise InputError(f"unsupported or invalid source language code: {language}")
-    name = _match(r"\bname\s*=\s*\"([^\"]+)\"", build_file.content, main_class)
+    name = _match(r"\bname\s*=\s*['\"]([^'\"]+)['\"]", build_file.content)
+    if not name:
+        name = _match(r"\bextName\s*=\s*['\"]([^'\"]+)['\"]", build_file.content)
+    if not name:
+        name = _match(r"override\s+val\s+name\s*=\s*\"([^\"]+)\"", kotlin, main_class)
     base_url = _match(r"\bbaseUrl\s*=\s*\"([^\"]+)\"", build_file.content)
     if not base_url:
         base_url = _match(r"\bcustom\(\s*\"([^\"]+)\"", build_file.content)
@@ -566,12 +600,10 @@ def analyze_source(resolved: ResolvedSource) -> SourceIR:
         base_url = _match(r"override\s+val\s+baseUrl\s*=\s*\"([^\"]+)\"", kotlin)
     if not base_url:
         raise InputError("unable to extract a source base URL")
-    version_text = _match(r"\bversionCode\s*=\s*(\d+)", build_file.content, "1")
+    version_text = _match(r"\b(?:extVersionCode|versionCode)\s*=\s*(\d+)", build_file.content, "1")
 
     method_names = sorted(set(re.findall(r"override\s+(?:suspend\s+)?fun\s+(\w+)", kotlin)))
-    header_names_set = set(
-        re.findall(r"\.(?:add|set)\(\s*\"([^\"]+)\"\s*,", kotlin)
-    )
+    header_names_set = set(re.findall(r"\.(?:add|set)\(\s*\"([^\"]+)\"\s*,", kotlin))
     if "super.headersBuilder()" in kotlin:
         header_names_set.add("User-Agent")
     header_names = sorted(header_names_set)

@@ -115,13 +115,13 @@ def test_scaffold_normalizes_pinned_no_std_compatibility(tmp_path: Path) -> None
         create_scaffold(project, ir, resolved)
         manifest = _manifest()
         manifest.files[0].content += (
-            '\nfn compatibility(mut chapters: Vec<Chapter>) -> Option<i64> {\n'
+            "\nfn compatibility(mut chapters: Vec<Chapter>) -> Option<i64> {\n"
             'let _ = format!("{}", vec![1].len());\n'
-            'let _: Option<aidoku::std::filters::SelectFilter> = None;\n'
+            "let _: Option<aidoku::std::filters::SelectFilter> = None;\n"
             'let _ = format!("/comic/{comic}/group/{}//chapters", "default");\n'
-            'chapters.sort_by(|left, right| right.index.cmp(&left.index));\n'
+            "chapters.sort_by(|left, right| right.index.cmp(&left.index));\n"
             'parse_date("2025-01-01", "yyyy-MM-dd").ok()\n'
-            '}\n'
+            "}\n"
         )
 
         apply_generation_manifest(project, ir, manifest, query=None)
@@ -129,8 +129,8 @@ def test_scaffold_normalizes_pinned_no_std_compatibility(tmp_path: Path) -> None
     lib = (project / "src" / "lib.rs").read_text(encoding="utf-8")
     assert "use aidoku::alloc::format;" in lib
     assert "use aidoku::alloc::vec;" in lib
-    assert "parse_date(\"2025-01-01\", \"yyyy-MM-dd\").ok()" not in lib
-    assert "parse_date(\"2025-01-01\", \"yyyy-MM-dd\")" in lib
+    assert 'parse_date("2025-01-01", "yyyy-MM-dd").ok()' not in lib
+    assert 'parse_date("2025-01-01", "yyyy-MM-dd")' in lib
     assert "aidoku::std::filters::SelectFilter" not in lib
     assert "aidoku::SelectFilter" in lib
     assert '}//chapters"' not in lib
@@ -138,11 +138,35 @@ def test_scaffold_normalizes_pinned_no_std_compatibility(tmp_path: Path) -> None
     assert "chapters.sort_by_key(|item| core::cmp::Reverse(item.index));" in lib
 
 
+def test_scaffold_normalizes_pinned_request_error_and_borrow(tmp_path: Path) -> None:
+    manifest = _manifest()
+    manifest.files[0].content = """#![no_std]
+use aidoku::imports::net::{Request, RequestError};
+fn request() -> aidoku::Result<Request> {
+    let absolute = aidoku::alloc::string::String::from("https://example.com/image");
+    let host = absolute.as_str();
+    if host.is_empty() { return Err(RequestError::new("empty").into()); }
+    Ok(Request::get(absolute)?.header("Referer", host))
+}
+"""
+    with resolve_source(str(FIXTURE)) as resolved:
+        ir = analyze_source(resolved)
+        project = tmp_path / "project"
+        create_scaffold(project, ir, resolved)
+        apply_generation_manifest(project, ir, manifest, query=None)
+
+    lib = (project / "src" / "lib.rs").read_text(encoding="utf-8")
+    assert "RequestError::new" not in lib
+    assert "aidoku::AidokuError::message" in lib
+    assert "use aidoku::imports::net::Request;" in lib
+    assert "Request::get(absolute.clone())?" in lib
+
+
 @pytest.mark.parametrize(
     ("dependency", "version"),
-    [("aes", "0.8.4"), ("cbc", "0.1.2"), ("hex", "0.4.3")],
+    [("aes", "0.8.4"), ("des", "0.8.1"), ("cbc", "0.1.2"), ("hex", "0.4.3")],
 )
-def test_scaffold_pins_encrypted_json_dependencies(
+def test_scaffold_pins_allowed_crypto_dependencies(
     tmp_path: Path, dependency: str, version: str
 ) -> None:
     with resolve_source(str(FIXTURE)) as resolved:

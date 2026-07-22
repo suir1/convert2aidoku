@@ -850,6 +850,26 @@ def test_encrypted_json_api_dependencies_and_base_url_are_contract_gaps() -> Non
     assert "dynamic base URL source generated no validated defaults_get resolver" in gaps
 
 
+def test_triple_des_request_requires_dependencies_and_live_millisecond_time() -> None:
+    with resolve_source(str(FIXTURE)) as resolved:
+        ir = analyze_source(resolved)
+    ir = ir.model_copy(update={"capabilities": [*ir.capabilities, Capability.TRIPLE_DES_CBC]})
+    manifest = GenerationManifest(
+        source_struct="Simple",
+        files=[
+            GeneratedFile(
+                path="src/lib.rs",
+                content=RUST_SOURCE + '\nfn sign() { let time = "0"; }\n',
+            )
+        ],
+    )
+
+    gaps = _capability_gaps(ir, manifest)
+
+    assert any("base64, cbc, des" in gap for gap in gaps)
+    assert any("live millisecond Unix timestamp" in gap for gap in gaps)
+
+
 def test_blocked_validation_repairs_only_when_contract_has_gaps() -> None:
     validation = ValidationResult(build_ok=True, package_ok=True, blocked=True)
 
@@ -957,11 +977,7 @@ def test_repair_patch_cannot_edit_text_outside_supplied_excerpts() -> None:
         files=[GeneratedFile(path="src/lib.rs", content="safe();\nother();\n")],
     )
     patch = RepairPatch.model_validate(
-        {
-            "edits": [
-                {"path": "src/lib.rs", "old_text": "other();", "new_text": "changed();"}
-            ]
-        }
+        {"edits": [{"path": "src/lib.rs", "old_text": "other();", "new_text": "changed();"}]}
     )
 
     with pytest.raises(AIProviderError, match="not present in a supplied excerpt"):

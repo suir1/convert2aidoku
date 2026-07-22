@@ -51,6 +51,18 @@ def test_collects_only_module_text() -> None:
     assert [item.path for item in files] == ["build.gradle.kts", "src/example/Simple.kt"]
 
 
+def test_collects_legacy_groovy_module(tmp_path: Path) -> None:
+    (tmp_path / "build.gradle").write_text("ext { extName = 'Legacy' }")
+    source = tmp_path / "src" / "example" / "Legacy.kt"
+    source.parent.mkdir(parents=True)
+    source.write_text("class Legacy : HttpSource()")
+
+    with resolve_source(str(tmp_path)) as resolved:
+        files = collect_source_files(resolved)
+
+    assert [item.path for item in files] == ["build.gradle", "src/example/Legacy.kt"]
+
+
 def test_resolves_apk_with_mocked_jadx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     apk = tmp_path / "source.apk"
     apk.write_bytes(b"synthetic apk")

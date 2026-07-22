@@ -154,15 +154,17 @@ def _run_git(args: list[str], *, cwd: Path | None = None) -> str:
 
 
 def _find_module(path: Path) -> Path:
-    if (path / "build.gradle.kts").is_file():
+    if any((path / name).is_file() for name in ("build.gradle.kts", "build.gradle")):
         return path
     candidates = [
         candidate.parent
-        for candidate in path.rglob("build.gradle.kts")
+        for pattern in ("build.gradle.kts", "build.gradle")
+        for candidate in path.rglob(pattern)
         if len(candidate.relative_to(path).parts) <= 5
     ]
+    candidates = list(dict.fromkeys(candidates))
     if not candidates:
-        raise InputError(f"no Tachi build.gradle.kts found under {path}")
+        raise InputError(f"no Tachi build.gradle.kts or build.gradle found under {path}")
     if len(candidates) > 1:
         preview = ", ".join(str(item.relative_to(path)) for item in candidates[:8])
         raise InputError(f"multiple Tachi modules found; provide a module directory: {preview}")
@@ -484,9 +486,17 @@ def collect_source_files(
         candidates = _apk_candidate_files(resolved)
     else:
         candidates = []
-    build_file = resolved.module_path / "build.gradle.kts"
-    if resolved.source_format == "kotlin_module" and build_file.is_file():
-        candidates.append(build_file)
+    if resolved.source_format == "kotlin_module":
+        build_file = next(
+            (
+                resolved.module_path / name
+                for name in ("build.gradle.kts", "build.gradle")
+                if (resolved.module_path / name).is_file()
+            ),
+            None,
+        )
+        if build_file is not None:
+            candidates.append(build_file)
     src = resolved.module_path / "src"
     if resolved.source_format == "kotlin_module" and src.is_dir():
         candidates.extend(

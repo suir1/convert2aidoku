@@ -25,6 +25,7 @@ class Capability(StrEnum):
     DEEP_LINKS = "deep_links"
     JSON_API = "json_api"
     ENCRYPTED_JSON = "encrypted_json"
+    TRIPLE_DES_CBC = "triple_des_cbc"
     DYNAMIC_BASE_URLS = "dynamic_base_urls"
 
 

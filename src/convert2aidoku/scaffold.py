@@ -168,6 +168,15 @@ def _inject_no_std_macro_imports(content: str) -> str:
 def normalize_pinned_aidoku_rust(content: str) -> str:
     """Apply small type-safe compatibility rewrites for the pinned Aidoku/Rust APIs."""
     content = content.replace("aidoku::std::filters::SelectFilter", "aidoku::SelectFilter")
+    content = content.replace("RequestError::new(", "aidoku::AidokuError::message(")
+    if content.count("RequestError") == 1:
+        content = re.sub(
+            r"use\s+aidoku::imports::net::\{\s*Request\s*,\s*RequestError\s*\};",
+            "use aidoku::imports::net::Request;",
+            content,
+        )
+    if re.search(r"let\s+host\s*=\s*absolute\b", content):
+        content = content.replace("Request::get(absolute)?", "Request::get(absolute.clone())?")
     content = re.sub(
         r'"(?:\\.|[^"\\])*"',
         lambda match: match.group(0).replace("}//chapters", "}/chapters"),
@@ -182,9 +191,7 @@ def normalize_pinned_aidoku_rust(content: str) -> str:
     content = re.sub(
         r"\b(?P<items>[A-Za-z_]\w*)\.sort_by\(\|(?P<left>[A-Za-z_]\w*),\s*"
         r"(?P<right>[A-Za-z_]\w*)\|\s*(?P=right)\.index\.cmp\(&(?P=left)\.index\)\);",
-        lambda match: (
-            f"{match.group('items')}.sort_by_key(|item| core::cmp::Reverse(item.index));"
-        ),
+        lambda match: f"{match.group('items')}.sort_by_key(|item| core::cmp::Reverse(item.index));",
         content,
     )
     return content
