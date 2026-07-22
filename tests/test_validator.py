@@ -9,6 +9,7 @@ from convert2aidoku.models import StageKind, ValidationStage
 from convert2aidoku.toolchain import tool_environment
 from convert2aidoku.validator import (
     _blocked_site_probe,
+    _generated_safety_stage,
     _is_runner_network_failure,
     _network_environment,
     _resolve_proxy,
@@ -234,3 +235,16 @@ def test_validation_applies_clippy_fixes_before_requesting_ai(
         "generated-safety-after-clippy-fix",
     ]
     assert result.stages[5].name == "clippy"
+
+
+def test_generated_safety_ignores_tool_owned_smoke_module(tmp_path: Path) -> None:
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "lib.rs").write_text(
+        "#![no_std]\n\n#[cfg(test)]\nmod generated_smoke;\n",
+        encoding="utf-8",
+    )
+
+    stage = _generated_safety_stage(tmp_path)
+
+    assert stage.ok, stage.output

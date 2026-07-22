@@ -569,7 +569,12 @@ def analyze_source(resolved: ResolvedSource) -> SourceIR:
     version_text = _match(r"\bversionCode\s*=\s*(\d+)", build_file.content, "1")
 
     method_names = sorted(set(re.findall(r"override\s+(?:suspend\s+)?fun\s+(\w+)", kotlin)))
-    header_names = sorted(set(re.findall(r"\.(?:add|set)\(\s*\"([^\"]+)\"\s*,", kotlin)))
+    header_names_set = set(
+        re.findall(r"\.(?:add|set)\(\s*\"([^\"]+)\"\s*,", kotlin)
+    )
+    if "super.headersBuilder()" in kotlin:
+        header_names_set.add("User-Agent")
+    header_names = sorted(header_names_set)
     warnings: list[str] = []
     if "addInterceptor" in kotlin or "addNetworkInterceptor" in kotlin:
         warnings.append(

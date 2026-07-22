@@ -89,6 +89,9 @@ Mapping rules:
   errors, POST requests, or authentication operations. A suitable generic helper has the shape
   `match self.request(url.clone())?.send() { Ok(response) => response,
   Err(_) => self.request(url)?.send()? }` followed by `response.get_json_owned()`.
+- A Kotlin override that starts from `super.headersBuilder()` inherits Tachi `HttpSource`'s
+  default browser-like `User-Agent`. Preserve that inherited header in addition to every explicit
+  `.add(...)`/`.set(...)` header; do not treat only the locally visible header calls as complete.
 - When `source_ir.source_format` is `decompiled_apk`, treat the selected JADX Java as a lossy but
   behavior-bearing representation of the original Kotlin. When `feature_scope` is `public_only`,
   implement every detected public search/list/details/chapters/pages capability, but do not

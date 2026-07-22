@@ -28,6 +28,7 @@ def test_analyzes_standard_http_source() -> None:
     assert Capability.CHAPTERS in ir.capabilities
     assert Capability.PAGES in ir.capabilities
     assert "Referer" in ir.header_names
+    assert "User-Agent" in ir.header_names
     assert ir.license_text and ir.license_text.strip() == "Synthetic fixture license."
 
 

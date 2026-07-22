@@ -13,7 +13,7 @@ import httpx
 from .constants import BLOCKED_OUTPUT_MARKERS
 from .errors import InputError, SecurityError
 from .models import StageKind, ValidationResult, ValidationStage
-from .scaffold import validate_generated_content
+from .scaffold import read_generated_files, validate_generated_content
 from .toolchain import find_tool, tool_environment
 
 _BLOCKED_HTTP_STATUSES = {403, 429, 503, 521, 522, 523, 524}
@@ -165,13 +165,11 @@ def _missing_tool_stage(name: str) -> ValidationStage:
 def _generated_safety_stage(project: Path) -> ValidationStage:
     started = time.monotonic()
     try:
-        for path in sorted((project / "src").rglob("*.rs")):
-            if path.name == "generated_smoke.rs":
+        for generated in read_generated_files(project):
+            path = generated["path"]
+            if not path.endswith(".rs"):
                 continue
-            validate_generated_content(
-                path.relative_to(project).as_posix(),
-                path.read_text(encoding="utf-8"),
-            )
+            validate_generated_content(path, generated["content"])
     except (OSError, SecurityError) as exc:
         return ValidationStage(
             name="generated-safety-after-clippy-fix",
