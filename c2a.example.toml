@@ -1,0 +1,5 @@
+[ai]
+base_url = "http://localhost:50048/v1"
+model = "your-model-id"
+max_repair_rounds = 2
+timeout_seconds = 300

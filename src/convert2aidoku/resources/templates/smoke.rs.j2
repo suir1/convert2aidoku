@@ -1,0 +1,211 @@
+use super::{{ source_struct }};
+use aidoku::{PageContent, Source, alloc::{String, Vec{% if static_filter_cases or dynamic_filters %}, vec{% endif %}}{% if static_filter_cases or dynamic_filters %}, FilterValue{% endif %}{% if listing_provider %}, Listing, ListingProvider{% endif %}{% if dynamic_filters %}, DynamicFilters, FilterKind{% endif %}{% if deep_link_handler %}, DeepLinkHandler{% endif %}{% if not image_request_provider %}, imports::net::Request{% endif %}};
+use aidoku_test::aidoku_test;
+{% if image_request_provider %}use aidoku::ImageRequestProvider;{% endif %}
+
+#[aidoku_test]
+fn generated_core_live_smoke() {
+	let source = {{ source_struct }}::new();
+	{% if dynamic_filters %}
+	let dynamic_filters = source
+		.get_dynamic_filters()
+		.expect("dynamic filters request failed");
+	assert!(!dynamic_filters.is_empty(), "dynamic filters returned no filters");
+	let dynamic_case = dynamic_filters.iter().find_map(|filter| {
+		if let FilterKind::Select { ids: Some(ids), .. } = &filter.kind {
+			ids.iter()
+				.find(|value| !value.is_empty())
+				.map(|value| FilterValue::Select {
+					id: filter.id.clone().into_owned(),
+					value: value.clone().into_owned(),
+				})
+		} else {
+			None
+		}
+	});
+	if let Some(filter) = dynamic_case {
+		let baseline = source
+			.get_search_manga_list(None, 1, Vec::new())
+			.expect("dynamic filter baseline request failed");
+		let result = source
+			.get_search_manga_list(None, 1, vec![filter])
+			.expect("dynamic filter request failed");
+		assert!(!result.entries.is_empty(), "dynamic filter returned no manga");
+		let changed = result.entries.len() != baseline.entries.len()
+			|| result
+				.entries
+				.iter()
+				.zip(&baseline.entries)
+				.any(|(filtered, original)| filtered.key != original.key);
+		assert!(changed, "dynamic filter did not change manga results");
+	}
+	{% endif %}
+	let result = source
+		.get_search_manga_list({{ query_expression }}, 1, Vec::new())
+		.expect("search/list request failed");
+	assert!(!result.entries.is_empty(), "search/list returned no manga");
+	{% if listing_provider and (popular_listing or latest_listing) %}
+	let mut candidates = result.entries.into_iter().take(1).collect::<Vec<_>>();
+	{% else %}
+	let candidates = result.entries;
+	{% endif %}
+	{% if listing_provider and popular_listing %}
+	let popular_result = source
+		.get_manga_list(
+			Listing {
+				id: "popular".into(),
+				name: "Popular".into(),
+				..Default::default()
+			},
+			1,
+		)
+		.expect("popular listing request failed");
+	assert!(!popular_result.entries.is_empty(), "popular listing returned no manga");
+	candidates.extend(popular_result.entries);
+	{% endif %}
+	{% if listing_provider and latest_listing %}
+	let latest_result = source
+		.get_manga_list(
+			Listing {
+				id: "latest".into(),
+				name: "Latest".into(),
+				..Default::default()
+			},
+			1,
+		)
+		.expect("latest listing request failed");
+	assert!(!latest_result.entries.is_empty(), "latest listing returned no manga");
+	candidates.extend(latest_result.entries);
+	{% endif %}
+
+	let mut attempted = String::new();
+	let mut selected = None;
+	for candidate in candidates.into_iter().take(12) {
+		if !attempted.is_empty() {
+			attempted.push_str(", ");
+		}
+		attempted.push_str(&candidate.title);
+		attempted.push_str(" [");
+		attempted.push_str(&candidate.key);
+		attempted.push(']');
+		match source.get_manga_update(candidate, true, true) {
+			Ok(updated)
+				if !updated.title.is_empty()
+					&& matches!(
+						updated.chapters.as_ref(),
+						Some(chapters) if !chapters.is_empty()
+					) =>
+			{
+				selected = Some(updated);
+				break;
+			}
+			Ok(updated) => {
+				if updated.title.is_empty() {
+					attempted.push_str(" (empty title)");
+				} else {
+					attempted.push_str(" (no chapters)");
+				}
+			}
+			Err(_) => attempted.push_str(" (update error)"),
+		}
+	}
+	let manga = selected.unwrap_or_else(|| {
+		panic!("no readable manga candidate among: {}", attempted)
+	});
+	if let Some(cover_url) = manga.cover.clone() {
+		{% if image_request_provider %}
+		let request = source
+			.get_image_request(cover_url, None)
+			.expect("cover image request construction failed");
+		{% else %}
+		let request = Request::get(cover_url).expect("cover image request construction failed");
+		{% endif %}
+		let response = request.send().expect("cover image request failed");
+		assert!(
+			(200..400).contains(&response.status_code()),
+			"cover image returned HTTP {}",
+			response.status_code()
+		);
+	}
+	assert!(!manga.title.is_empty(), "manga title is empty");
+	let chapter = manga
+		.chapters
+		.as_ref()
+		.and_then(|chapters| chapters.first())
+		.cloned()
+		.expect("manga has no chapters");
+	{% if deep_link_handler %}
+	if let Some(url) = manga.url.clone() {
+		assert!(
+			source.handle_deep_link(url).expect("manga deep link failed").is_some(),
+			"manga deep link returned no result"
+		);
+	}
+	if let Some(url) = chapter.url.clone() {
+		assert!(
+			source.handle_deep_link(url).expect("chapter deep link failed").is_some(),
+			"chapter deep link returned no result"
+		);
+	}
+	{% endif %}
+	let pages = source
+		.get_page_list(manga.clone(), chapter)
+		.expect("page list request failed");
+	assert!(!pages.is_empty(), "chapter has no pages");
+
+	if let PageContent::Url(url, context) = &pages[0].content {
+		{% if image_request_provider %}
+		let request = source
+			.get_image_request(url.clone(), context.clone())
+			.expect("image request construction failed");
+		{% else %}
+		let request = Request::get(url.clone()).expect("image request construction failed");
+		{% endif %}
+		let response = request.send().expect("first image request failed");
+		assert!(
+			(200..400).contains(&response.status_code()),
+			"first image returned HTTP {}",
+			response.status_code()
+		);
+	} else {
+		panic!("first page is not an image URL");
+	}
+}
+{% if static_filter_cases %}
+
+#[aidoku_test]
+fn generated_static_filters_live_smoke() {
+	let source = {{ source_struct }}::new();
+	let cases: Vec<Vec<FilterValue>> = vec![
+		{% for case in static_filter_cases %}
+		vec![
+			{% if case.kind == "select" %}
+			FilterValue::Select {
+				id: {{ case.id | tojson }}.into(),
+				value: {{ case.value | tojson }}.into(),
+			},
+			{% elif case.kind == "sort" %}
+			FilterValue::Sort {
+				id: {{ case.id | tojson }}.into(),
+				index: {{ case.index }},
+				ascending: {{ "true" if case.ascending else "false" }},
+			},
+			{% endif %}
+		],
+		{% endfor %}
+	];
+	for filters in cases {
+		let result = source
+			.get_search_manga_list(None, 1, filters)
+			.expect("static filter request failed");
+		assert!(!result.entries.is_empty(), "static filter returned no manga");
+		assert!(
+			result
+				.entries
+				.iter()
+				.all(|entry| !entry.title.trim().is_empty()),
+			"static filter returned a manga with an empty title"
+		);
+	}
+}
+{% endif %}

@@ -1,0 +1,187 @@
+import json
+from pathlib import Path
+
+import httpx
+import pytest
+
+from convert2aidoku.errors import InputError
+from convert2aidoku.toolchain import tool_environment
+from convert2aidoku.validator import (
+    _blocked_site_probe,
+    _is_runner_network_failure,
+    _network_environment,
+    _resolve_proxy,
+)
+
+
+def test_blocked_site_probe_confirms_http_403(tmp_path: Path, monkeypatch) -> None:
+    resource = tmp_path / "res"
+    resource.mkdir()
+    (resource / "source.json").write_text(
+        json.dumps({"info": {"url": "https://example.com"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "convert2aidoku.validator.httpx.get",
+        lambda *_args, **_kwargs: httpx.Response(403, text="challenge"),
+    )
+
+    assert _blocked_site_probe(tmp_path) == (
+        "runner-network probe returned HTTP 403 for https://example.com; this validation process "
+        "does not share a browser session, so the result does not prove the site is unavailable "
+        "in a normal browser"
+    )
+
+
+def test_site_probe_does_not_block_normal_cloudflare_cdn_reference(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    resource = tmp_path / "res"
+    resource.mkdir()
+    (resource / "source.json").write_text(
+        json.dumps({"info": {"url": "https://example.com"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "convert2aidoku.validator.httpx.get",
+        lambda *_args, **_kwargs: httpx.Response(
+            200,
+            text='<link href="https://cdnjs.cloudflare.com/library.css"><main>Comics</main>',
+        ),
+    )
+
+    assert _blocked_site_probe(tmp_path) is None
+
+
+def test_site_probe_detects_explicit_challenge_page(tmp_path: Path, monkeypatch) -> None:
+    resource = tmp_path / "res"
+    resource.mkdir()
+    (resource / "source.json").write_text(
+        json.dumps({"info": {"url": "https://example.com"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "convert2aidoku.validator.httpx.get",
+        lambda *_args, **_kwargs: httpx.Response(
+            200,
+            text='<script src="/cdn-cgi/challenge-platform/orchestrate.js"></script>',
+        ),
+    )
+
+    assert "browser-challenge content" in (_blocked_site_probe(tmp_path) or "")
+
+
+def test_site_probe_distinguishes_runner_fingerprint_from_browser_like_httpx(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    resource = tmp_path / "res"
+    resource.mkdir()
+    (resource / "source.json").write_text(
+        json.dumps({"info": {"url": "https://example.com"}}),
+        encoding="utf-8",
+    )
+    responses = iter(
+        [
+            httpx.Response(403, text="challenge"),
+            httpx.Response(200, text="<main>Comics</main>"),
+        ]
+    )
+    monkeypatch.setattr(
+        "convert2aidoku.validator.httpx.get",
+        lambda *_args, **_kwargs: next(responses),
+    )
+
+    diagnostic = _blocked_site_probe(tmp_path) or ""
+
+    assert "browser-like HTTPX preflight returned HTTP 200" in diagnostic
+    assert "TLS/HTTP fingerprint" in diagnostic
+
+
+def test_site_probe_classifies_runner_request_error_when_httpx_succeeds(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    resource = tmp_path / "res"
+    resource.mkdir()
+    (resource / "source.json").write_text(
+        json.dumps({"info": {"url": "https://example.com"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "convert2aidoku.validator.httpx.get",
+        lambda *_args, **_kwargs: httpx.Response(200, text="<main>Comics</main>"),
+    )
+
+    diagnostic = (
+        _blocked_site_probe(
+            tmp_path,
+            runner_output="request failed: RequestError(RequestError)",
+        )
+        or ""
+    )
+
+    assert "network RequestError" in diagnostic
+    assert "proxy/TLS compatibility problem" in diagnostic
+
+
+def test_runner_assertion_failure_is_not_misclassified_as_network_failure() -> None:
+    assert not _is_runner_network_failure(
+        "panicked at src/generated_smoke.rs:94: chapter date is missing"
+    )
+    assert _is_runner_network_failure("request failed: RequestError(RequestError)")
+    assert _is_runner_network_failure("first image returned HTTP 403")
+    assert _is_runner_network_failure("popular listing returned no manga")
+
+
+def test_proxy_is_passed_to_probe_without_being_reported(tmp_path: Path, monkeypatch) -> None:
+    resource = tmp_path / "res"
+    resource.mkdir()
+    (resource / "source.json").write_text(
+        json.dumps({"info": {"url": "https://example.com"}}),
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_get(*_args: object, **kwargs: object) -> httpx.Response:
+        captured.update(kwargs)
+        return httpx.Response(403, text="blocked")
+
+    monkeypatch.setattr("convert2aidoku.validator.httpx.get", fake_get)
+    proxy = "http://user:password@127.0.0.1:7890"
+
+    diagnostic = _blocked_site_probe(tmp_path, proxy=proxy) or ""
+
+    assert captured["proxy"] == proxy
+    assert "via configured proxy" in diagnostic
+    assert proxy not in diagnostic
+    assert "password" not in diagnostic
+
+
+def test_proxy_environment_isolated_from_provider_credentials(monkeypatch) -> None:
+    monkeypatch.setenv("C2A_API_KEY", "secret")
+    proxy = "http://127.0.0.1:7890"
+
+    env = _network_environment(proxy)
+
+    assert env["HTTP_PROXY"] == proxy
+    assert env["HTTPS_PROXY"] == proxy
+    assert env["ALL_PROXY"] == proxy
+    assert "C2A_API_KEY" not in env
+
+
+def test_proxy_can_come_from_environment_and_rejects_unsupported_scheme(monkeypatch) -> None:
+    monkeypatch.setenv("C2A_PROXY", "http://127.0.0.1:7890")
+    assert _resolve_proxy(None) == "http://127.0.0.1:7890"
+
+    with pytest.raises(InputError, match=r"http\(s\) URL"):
+        _resolve_proxy("socks5://127.0.0.1:7891")
+
+
+def test_tool_environment_drops_credentials(monkeypatch) -> None:
+    monkeypatch.setenv("C2A_API_KEY", "secret")
+    monkeypatch.setenv("OTHER_TOKEN", "secret")
+    env = tool_environment()
+    assert "C2A_API_KEY" not in env
+    assert "OTHER_TOKEN" not in env

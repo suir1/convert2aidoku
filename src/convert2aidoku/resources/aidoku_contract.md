@@ -1,0 +1,202 @@
+# Aidoku source contract used by convert2aidoku
+
+Generate a current `no_std` Rust source using the pinned `aidoku` crate. The generated crate must
+compile for `wasm32-unknown-unknown` and must not use Tokio, Reqwest, std networking, filesystem,
+threads, Android APIs, or blocking OS primitives.
+
+Required implementation:
+
+```rust
+trait Source {
+    fn new() -> Self;
+    fn get_search_manga_list(
+        &self,
+        query: Option<String>,
+        page: i32,
+        filters: Vec<FilterValue>,
+    ) -> Result<MangaPageResult>;
+    fn get_manga_update(
+        &self,
+        manga: Manga,
+        needs_details: bool,
+        needs_chapters: bool,
+    ) -> Result<Manga>;
+    fn get_page_list(&self, manga: Manga, chapter: Chapter) -> Result<Vec<Page>>;
+}
+```
+
+All core data types and source traits above are re-exported directly at the `aidoku` crate root.
+Import them as `use aidoku::{Chapter, FilterValue, ImageRequestProvider, ListingProvider, ...};`.
+There is no public `aidoku::models` module and no public `aidoku::traits` module.
+
+Mapping rules:
+
+- `SManga.url` or stable site identifier becomes `Manga.key`; `SChapter.url` or stable chapter id
+  becomes `Chapter.key`.
+- Preserve canonical website links separately from stable keys. When the input provides or implies
+  a manga/chapter page URL, populate `Manga.url` and `Chapter.url` with absolute URLs even when the
+  corresponding keys remain relative.
+- Preserve all chapter metadata exposed by the input: map the title's explicit chapter/volume
+  number to `chapter_number`/`volume_number`, `date_upload` to `date_uploaded`, and `scanlator` to
+  `scanlators`. Use `aidoku::imports::std::parse_date` or `parse_local_date` for source date strings
+  instead of discarding them. For date-only values, normalize to a full midnight datetime (for
+  example `2025-01-01 00:00:00` with `yyyy-MM-dd HH:mm:ss`) so both Aidoku and the Rust test runner
+  can parse it. Do not invent metadata when the input has no corresponding value.
+- If the source exposes a reliable reading direction or country/type signal, populate
+  `Manga.viewer` with `Viewer::RightToLeft`, `Viewer::LeftToRight`, `Viewer::Vertical`, or
+  `Viewer::Webtoon`; otherwise leave it `Viewer::Unknown`.
+- Keys may remain relative (for example `/comics/123` and `/chapters/456`), but every
+  `Request::get`/`Request::post` must receive an absolute URL. Centralize an `absolute_url` helper
+  using the source base URL before fetching details, chapters, pages, or images; never pass a
+  relative `Manga.key` or `Chapter.key` directly to `Request::get`.
+- When `source_ir.relative_url_keys` is true, an `absolute_url` helper is mandatory. Use it on
+  `Manga.key`, `Chapter.key`, and relative image URLs before handing the result to a request
+  helper or to `Request::get`/`Request::post`.
+- Treat every entry in `source_ir.chapter_page_routes` as normative behavior recovered from the
+  input. Preserve its `chapter_key_template`; before requesting pages, select the matching route
+  variant, apply `strip_prefix` and each ordered string replacement, then place the normalized key
+  into `endpoint_template`. The `is_default` variant applies unless another condition matches.
+  Do not simplify `/chapter/` and `/chapter2/` into one endpoint when the IR distinguishes them.
+- `MangasPage(mangas, hasNextPage)` becomes `MangaPageResult { entries, has_next_page }`.
+- Merge Tachi's detail and chapter operations in `get_manga_update`, respecting both requested
+  booleans and avoiding unnecessary requests.
+- Create pages with `Page { content: PageContent::url(url), ..Default::default() }`.
+- Use `aidoku::imports::net::Request`; `Request::get(...)` returns a `Result`, so propagate it
+  before calling `.header(...)`. After sending, use `response.get_html()` or
+  `response.get_json_owned()`. The HTML selector methods return `Option` and element lists must be
+  iterated with `.get(index)` (or `.first()`), after unwrapping the `Option<ElementList>` (for
+  example `if let Some(list) = document.select("img") { for i in 0..list.size() { ... } }`). Only
+  individual `Element` values have `.attr()` and `.text()` methods. `get_html()` returns a
+  `Document`; convert it with `let document: Element = response.get_html()?.into()` before passing
+  it to parser helpers that accept `&Element`.
+- Use Aidoku HTML `Element` CSS selector APIs instead of Jsoup.
+- Do not copy Jsoup-only selector extensions such as `:contains`, `:containsOwn`, `:eq`, or
+  `:first`. They are not portable to the Aidoku test runner. Select a standards-compatible
+  superset, inspect `Element::text()`, and navigate with `Element::next()`/`parent()` when the
+  source locates an element by its text.
+- Use `aidoku::helpers::uri` for URL encoding where possible.
+- For JSON API sources, model the response envelope and DTOs with `aidoku::serde::Deserialize`,
+  call `response.get_json_owned()` for plain JSON, and preserve the source's page-to-offset or
+  cursor calculation exactly. Keep public unauthenticated behavior separate from optional login
+  behavior; do not manufacture credentials or silently make login mandatory.
+- Tachi `HttpSource` requests use OkHttp, whose idempotent GET path retries transient connection
+  failures. For `decompiled_apk` JSON sources, preserve that behavior with one centralized retry:
+  construct the same GET request again only when the first `.send()` returns `RequestError`, then
+  parse the successful response once. Do not retry JSON/deserialization errors, HTTP application
+  errors, POST requests, or authentication operations. A suitable generic helper has the shape
+  `match self.request(url.clone())?.send() { Ok(response) => response,
+  Err(_) => self.request(url)?.send()? }` followed by `response.get_json_owned()`.
+- When `source_ir.source_format` is `decompiled_apk`, treat the selected JADX Java as a lossy but
+  behavior-bearing representation of the original Kotlin. When `feature_scope` is `public_only`,
+  implement every detected public search/list/details/chapters/pages capability, but do not
+  implement features explicitly listed as excluded authenticated options (login, bookcase, or
+  comments). Public endpoints and headers used by those core operations remain mandatory.
+- For a source explicitly classified with `encrypted_json`, AES-CBC with PKCS#5/PKCS#7 padding is
+  supported through the pinned `aes` and `cbc` crates. Preserve the exact key derivation, IV
+  extraction, ciphertext encoding, and padding from the input. Use pinned `hex` or `base64` for
+  decoding; never guess keys, IVs, or transformations and never execute site-provided code.
+- Preserve JSON response envelopes at every endpoint. If the Tachi input deserializes
+  `ApiResponse<Payload>`, the generated Rust must deserialize `ApiResponse<Payload>` and then use
+  its `results` field. Do not deserialize the raw HTTP response directly into `Payload` merely
+  because all payload fields have serde defaults: that silently produces empty titles, keys,
+  groups, or page data while appearing to parse successfully. This applies independently to list,
+  rank, detail, chapter, page, recommendation, and dynamic-filter endpoints.
+- Dynamic base URLs must come from a finite allowlist extracted from the input. Validate the
+  selected defaults value against that allowlist before constructing requests; never accept an
+  arbitrary URL from generated settings.
+- Convert Tachi filters into `res/filters.json` and handle the resulting `FilterValue` variants.
+  Aidoku filter `options` must be an array of display-name strings, never objects. Put the
+  corresponding site values in a parallel `ids` string array of the same length. For example:
+  `{"type":"select","id":"sort","options":["Latest","Popular"],"ids":["","popular"]}`.
+  Every ids entry must be unique. Semantically duplicate Tachi options that map to the same site
+  value may be collapsed to the first label; never invent a fake site value merely to make the
+  IDs unique. Preserve the recovered default explicitly. A Tachi Filter.Sort must become an
+  Aidoku sort filter and Rust must handle FilterValue::Sort with id, index, and ascending; do not
+  flatten it into a select filter. source_ir.filter_specs, when present, is the authoritative
+  type/options/site-values/default contract.
+- If the input fetches filter options at runtime, implement `DynamicFilters` rather than replacing
+  them with a single static placeholder. Its exact method is
+  `fn get_dynamic_filters(&self) -> Result<Vec<Filter>>`. Keep the same filter ID in the Rust
+  query mapping and register `DynamicFilters` in `register_source!`. Every dynamic filter ID
+  constructed by `get_dynamic_filters` must also be read from `FilterValue` by
+  `get_search_manga_list`, and its selected site value must be sent in the actual list/search
+  request. A filter that appears in the UI but does not alter a request is unimplemented.
+  `Filter` does not implement `Deserialize`: never build dynamic filters by passing JSON to
+  `serde_json::from_str`. Build typed filters directly, for example
+  `SelectFilter { id: "theme".into(), title: Some("Theme".into()), options, ids: Some(ids),
+  ..Default::default() }.into()`, and return them in a `Vec<Filter>`. Both `options` and `ids`
+  must be `Vec<Cow<'static, str>>`; create their entries with `.into()` rather than collecting
+  `String` values.
+- If the Tachi source declares filters or settings, the corresponding resource must be non-empty
+  and preserve every user-visible option; an empty `[]` is an unimplemented capability.
+- Aidoku settings must be top-level `group` objects whose `items` contain the actual settings.
+  Select settings use parallel `titles` and `values` string arrays, not an `options` array of
+  objects. Preserve the Tachi preference key and ensure its default is one of `values`.
+- Read source settings with `aidoku::imports::defaults::defaults_get::<T>(key)`; never call the
+  private FFI function `defaults::get`.
+- Preserve compatibility branches for legacy preference values found in the Tachi source. It is
+  acceptable to normalize them while reading the setting when Aidoku has no reason to persist the
+  obsolete value back to defaults.
+- Convert image Referer or other required headers into `ImageRequestProvider`.
+- Apply image URL translations only within their recovered scope. When
+  source_ir.image_url_policy.preserve_cover_urls is true, copy API cover URLs to Manga.cover
+  unchanged. A recovered chapter resolution pattern such as
+  \d+(?=x\.(?:jpg|webp)$) may only replace the numeric segment immediately before a terminal
+  x.jpg or x.webp in chapter page URLs. It must not rewrite a cover suffix such as
+  .328x422.jpg.
+- Add `DeepLinkHandler` when stable manga/chapter paths can be mapped without a network request,
+  and register every optional trait in `register_source!`. Returned deep-link keys must use the
+  exact same ID/path/absolute-URL strategy as normal list and chapter parsing; do not return a bare
+  ID when normal keys contain `/comics/` or `/chapters/` paths.
+- `DeepLinkHandler` uses
+  `fn handle_deep_link(&self, url: String) -> Result<Option<DeepLinkResult>>`.
+  Return `DeepLinkResult::Manga { key }` or
+  `DeepLinkResult::Chapter { manga_key, key }` using normal source keys.
+- `ListingProvider` is optional but, when used, its method is
+  `fn get_manga_list(&self, listing: Listing, page: i32) -> Result<MangaPageResult>`; pass the
+  supplied `Listing` (`id`, `name`, `kind`) to the site's listing endpoint rather than inventing a
+  different signature.
+- `ImageRequestProvider` uses
+  `fn get_image_request(&self, url: String, context: Option<PageContext>) -> Result<Request>`.
+- The only valid optional trait names are `ListingProvider`, `Home`, `DynamicListings`,
+  `DynamicFilters`, `DynamicSettings`, `PageImageProcessor`, `ImageRequestProvider`,
+  `PageDescriptionProvider`, `AlternateCoverProvider`, `BaseUrlProvider`, `NotificationHandler`,
+  `DeepLinkHandler`, `BasicLoginHandler`, `WebLoginHandler`, and `MigrationHandler`. Never put
+  `Source`, `MangaProvider`, `PageProvider`, or any invented trait in `register_source!`.
+- This is a `no_std` crate. Import collections from `aidoku::alloc::{String, Vec}` (and
+  `aidoku::alloc::string::ToString` when needed), and deserialize with `aidoku::serde` if the
+  dependency is not explicitly requested. `serde_json` is not re-exported by `aidoku`; request
+  the allowlisted `serde_json` dependency when JSON parsing is needed. `Manga` uses `artists`, `authors`, `tags`, and
+  `description`; it has no `genres` field. Optional text/attributes need to be unwrapped before
+  assigning to non-optional fields, and `Chapter.date_uploaded` is `Option<i64>`. `Manga.tags`,
+  `Manga.authors`, and `Manga.chapters` are all `Option`; build a local `Vec` and assign
+  `Some(values)` rather than calling `.push()` on the option. Import the `vec!` macro explicitly
+  (`use aidoku::alloc::vec;`) when using it in a `no_std` source.
+- When borrowing a path from `manga.key` and later replacing or mutating the Manga, clone the path
+  into an owned String first. Do not keep a `&str` borrowed from `manga.key` across assignments to
+  `manga.key` or replacement of the Manga; Rust will reject that with E0506.
+- Prefer small modules when parsing and URL construction are substantial.
+- Do not invent endpoints, selectors, fields, or cryptography. Preserve the input source's network
+  behavior exactly and report anything that cannot be represented.
+- The generated smoke test calls `get_search_manga_list(None, 1, Vec::new())`. Preserve the
+  original source's no-keyword listing behavior for that call (including any default sort or
+  popular/latest endpoint); do not silently turn it into an empty `/comics` request when the
+  Tachi source uses a default listing sort.
+- In this mapping, `query: None` represents Tachi's empty query string. Run the original
+  `searchMangaRequest(page, "", filters)` behavior unless the input source itself routes an empty
+  query elsewhere; do not substitute the popular endpoint merely because the Aidoku query is
+  `None`.
+- When popular/latest capabilities are present, the smoke test calls both corresponding
+  `ListingProvider` ids and requires each to return entries; implementing the trait without
+  functional listings will fail live validation.
+- The validator runs `cargo clippy -- -D warnings`; keep generated Rust clippy-clean (prefer
+  let-chain conditions and iterator/enumerate forms over needless nested `if` blocks or indexed
+  byte loops).
+
+The tool creates Cargo metadata, source metadata, the icon, and live smoke tests. Do not generate
+those files. Only return allowed Rust files plus optional filters/settings JSON.
+Dependency requests may only use these exact names: `serde`, `serde_json`, `regex`, `base64`,
+`aes`, `cbc`, or `hex`.
+When using `#[derive(Deserialize)]`, request the allowlisted `serde` dependency as well (derive
+expansion needs the external `serde` crate even if the import uses `aidoku::serde`). JSON parsing
+additionally requires the explicit `serde_json` request and `serde_json::from_str`.
