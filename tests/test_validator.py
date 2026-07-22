@@ -5,12 +5,14 @@ import httpx
 import pytest
 
 from convert2aidoku.errors import InputError
+from convert2aidoku.models import StageKind, ValidationStage
 from convert2aidoku.toolchain import tool_environment
 from convert2aidoku.validator import (
     _blocked_site_probe,
     _is_runner_network_failure,
     _network_environment,
     _resolve_proxy,
+    validate_project,
 )
 
 
@@ -185,3 +187,50 @@ def test_tool_environment_drops_credentials(monkeypatch) -> None:
     env = tool_environment()
     assert "C2A_API_KEY" not in env
     assert "OTHER_TOKEN" not in env
+
+
+def test_validation_applies_clippy_fixes_before_requesting_ai(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+    clippy_runs = 0
+
+    def fake_find_tool(name: str) -> str | None:
+        return "/cargo" if name == "cargo" else None
+
+    def fake_run_stage(**kwargs: object) -> ValidationStage:
+        nonlocal clippy_runs
+        name = str(kwargs["name"])
+        calls.append(name)
+        ok = True
+        if name == "clippy":
+            clippy_runs += 1
+            ok = clippy_runs > 1
+        kind = kwargs["kind"]
+        assert isinstance(kind, StageKind)
+        return ValidationStage(name=name, kind=kind, ok=ok)
+
+    monkeypatch.setattr("convert2aidoku.validator.find_tool", fake_find_tool)
+    monkeypatch.setattr("convert2aidoku.validator._run_stage", fake_run_stage)
+    (tmp_path / "Cargo.lock").write_text("locked", encoding="utf-8")
+
+    result = validate_project(tmp_path, live=False)
+
+    assert result.build_ok
+    assert calls == [
+        "format",
+        "cargo-check",
+        "clippy",
+        "clippy-fix",
+        "format-after-clippy-fix",
+        "clippy",
+    ]
+    assert [stage.name for stage in result.stages[:5]] == [
+        "format",
+        "cargo-check",
+        "clippy-fix",
+        "format-after-clippy-fix",
+        "generated-safety-after-clippy-fix",
+    ]
+    assert result.stages[5].name == "clippy"

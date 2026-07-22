@@ -11,8 +11,9 @@ from urllib.parse import urlsplit
 import httpx
 
 from .constants import BLOCKED_OUTPUT_MARKERS
-from .errors import InputError
+from .errors import InputError, SecurityError
 from .models import StageKind, ValidationResult, ValidationStage
+from .scaffold import validate_generated_content
 from .toolchain import find_tool, tool_environment
 
 _BLOCKED_HTTP_STATUSES = {403, 429, 503, 521, 522, 523, 524}
@@ -161,6 +162,32 @@ def _missing_tool_stage(name: str) -> ValidationStage:
     )
 
 
+def _generated_safety_stage(project: Path) -> ValidationStage:
+    started = time.monotonic()
+    try:
+        for path in sorted((project / "src").rglob("*.rs")):
+            if path.name == "generated_smoke.rs":
+                continue
+            validate_generated_content(
+                path.relative_to(project).as_posix(),
+                path.read_text(encoding="utf-8"),
+            )
+    except (OSError, SecurityError) as exc:
+        return ValidationStage(
+            name="generated-safety-after-clippy-fix",
+            kind=StageKind.CHECK,
+            ok=False,
+            output=str(exc),
+            duration_seconds=time.monotonic() - started,
+        )
+    return ValidationStage(
+        name="generated-safety-after-clippy-fix",
+        kind=StageKind.CHECK,
+        ok=True,
+        duration_seconds=time.monotonic() - started,
+    )
+
+
 def _test_wasm(project: Path) -> Path | None:
     """Return the wasm unit-test artifact built by `cargo test --no-run`."""
     try:
@@ -283,21 +310,6 @@ def validate_project(
             [cargo, "check", "--locked", "--target", "wasm32-unknown-unknown"],
             600,
         ),
-        (
-            "clippy",
-            StageKind.CLIPPY,
-            [
-                cargo,
-                "clippy",
-                "--locked",
-                "--target",
-                "wasm32-unknown-unknown",
-                "--",
-                "-D",
-                "warnings",
-            ],
-            600,
-        ),
     ]
     if not (project / "Cargo.lock").is_file():
         lock_stage = _run_stage(
@@ -316,6 +328,72 @@ def validate_project(
         result.stages.append(stage)
         if not stage.ok:
             return result
+
+    clippy_command = [
+        cargo,
+        "clippy",
+        "--locked",
+        "--target",
+        "wasm32-unknown-unknown",
+        "--",
+        "-D",
+        "warnings",
+    ]
+    clippy_stage = _run_stage(
+        name="clippy",
+        kind=StageKind.CLIPPY,
+        command=clippy_command,
+        cwd=project,
+        timeout=600,
+    )
+    if not clippy_stage.ok:
+        fix_stage = _run_stage(
+            name="clippy-fix",
+            kind=StageKind.CLIPPY,
+            command=[
+                cargo,
+                "clippy",
+                "--fix",
+                "--allow-dirty",
+                "--allow-no-vcs",
+                "--locked",
+                "--target",
+                "wasm32-unknown-unknown",
+                "--",
+                "-D",
+                "warnings",
+            ],
+            cwd=project,
+            timeout=600,
+        )
+        if not fix_stage.ok:
+            result.stages.extend((clippy_stage, fix_stage))
+            return result
+        result.stages.append(fix_stage)
+        format_stage = _run_stage(
+            name="format-after-clippy-fix",
+            kind=StageKind.FORMAT,
+            command=[cargo, "fmt", "--all"],
+            cwd=project,
+            timeout=120,
+        )
+        result.stages.append(format_stage)
+        if not format_stage.ok:
+            return result
+        safety_stage = _generated_safety_stage(project)
+        result.stages.append(safety_stage)
+        if not safety_stage.ok:
+            return result
+        clippy_stage = _run_stage(
+            name="clippy",
+            kind=StageKind.CLIPPY,
+            command=clippy_command,
+            cwd=project,
+            timeout=600,
+        )
+    result.stages.append(clippy_stage)
+    if not clippy_stage.ok:
+        return result
     result.build_ok = True
 
     aidoku = find_tool("aidoku")

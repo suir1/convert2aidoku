@@ -108,6 +108,36 @@ def test_scaffold_injects_no_std_crate_attribute(tmp_path: Path) -> None:
     assert lib.startswith("#![no_std]\n")
 
 
+def test_scaffold_normalizes_pinned_no_std_compatibility(tmp_path: Path) -> None:
+    with resolve_source(str(FIXTURE)) as resolved:
+        ir = analyze_source(resolved)
+        project = tmp_path / "project"
+        create_scaffold(project, ir, resolved)
+        manifest = _manifest()
+        manifest.files[0].content += (
+            '\nfn compatibility(mut chapters: Vec<Chapter>) -> Option<i64> {\n'
+            'let _ = format!("{}", vec![1].len());\n'
+            'let _: Option<aidoku::std::filters::SelectFilter> = None;\n'
+            'let _ = format!("/comic/{comic}/group/{}//chapters", "default");\n'
+            'chapters.sort_by(|left, right| right.index.cmp(&left.index));\n'
+            'parse_date("2025-01-01", "yyyy-MM-dd").ok()\n'
+            '}\n'
+        )
+
+        apply_generation_manifest(project, ir, manifest, query=None)
+
+    lib = (project / "src" / "lib.rs").read_text(encoding="utf-8")
+    assert "use aidoku::alloc::format;" in lib
+    assert "use aidoku::alloc::vec;" in lib
+    assert "parse_date(\"2025-01-01\", \"yyyy-MM-dd\").ok()" not in lib
+    assert "parse_date(\"2025-01-01\", \"yyyy-MM-dd\")" in lib
+    assert "aidoku::std::filters::SelectFilter" not in lib
+    assert "aidoku::SelectFilter" in lib
+    assert '}//chapters"' not in lib
+    assert '}/chapters"' in lib
+    assert "chapters.sort_by_key(|item| core::cmp::Reverse(item.index));" in lib
+
+
 @pytest.mark.parametrize(
     ("dependency", "version"),
     [("aes", "0.8.4"), ("cbc", "0.1.2"), ("hex", "0.4.3")],
@@ -182,10 +212,12 @@ def test_smoke_requests_manga_cover_and_exercises_static_filters(tmp_path: Path)
     smoke = (project / "src" / "generated_smoke.rs").read_text(encoding="utf-8")
     assert "manga.cover" in smoke
     assert "cover image returned HTTP" in smoke
+    assert "cover image request failed after retry" in smoke
     assert 'id: "region".into()' in smoke
     assert 'value: "japan".into()' in smoke
     assert "static filter returned no manga" in smoke
     assert "static filter returned a manga with an empty title" in smoke
+    assert "first image request failed after retry" in smoke
 
 
 def test_smoke_skips_listing_entries_without_readable_chapters(tmp_path: Path) -> None:

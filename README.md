@@ -50,6 +50,14 @@ uv run c2a ai-check
 The client first requests JSON-Schema structured output. Providers that reject that feature fall
 back to plain JSON, which is still validated locally with Pydantic.
 
+For decompiled APKs, the initial prompt uses deterministic Java behavior slices instead of JADX
+boilerplate; Kotlin modules still send their complete selected source files. Compiler and Clippy
+repairs first use bounded source excerpts and exact `old_text` → `new_text` replacements. Each
+replacement must come from a supplied excerpt, match once, stay inside the generated-file
+allowlist, and pass the same Rust safety checks. Live-behavior failures retain the full repair
+context. This keeps repair prompts small without weakening path, dependency, or code-execution
+boundaries.
+
 ## Analyze and convert
 
 Inputs can be local module directories, local extension APKs, or GitHub module URLs. APK input

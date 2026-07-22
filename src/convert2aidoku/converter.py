@@ -11,17 +11,19 @@ from pathlib import Path
 from tree_sitter import Node
 from tree_sitter_language_pack import get_parser
 
-from .ai import OpenAICompatibleClient, ai_round
+from .ai import AIResult, OpenAICompatibleClient, ai_round
 from .analyzer import analyze_source
 from .config import AISettings
 from .constants import MAX_AI_DIAGNOSTIC_CHARS
-from .errors import InputError
+from .errors import AIProviderError, InputError, SecurityError
 from .ingest import resolve_source
 from .models import (
     Capability,
     ConversionCheckpoint,
     ConversionReport,
+    GeneratedFile,
     GenerationManifest,
+    RepairPatch,
     SourceIR,
     ValidationResult,
 )
@@ -29,7 +31,9 @@ from .reports import classify_status, write_report
 from .scaffold import (
     apply_generation_manifest,
     create_scaffold,
+    normalize_pinned_aidoku_rust,
     read_generated_files,
+    validate_generated_content,
 )
 from .templates import match_templates
 from .validator import validate_project
@@ -73,6 +77,129 @@ _LIVE_VALIDATION_EVIDENCE = {
         "request; a visible filter that does not change its request is incomplete."
     ),
 }
+
+# Values here are benchmark observations, not arbitrary URLs. They are applied only when the AI
+# already emitted the same value in a finite select-setting allowlist recovered from the input.
+_LIVE_VALIDATED_SETTING_DEFAULTS = {
+    "zh.copymanga": {"v2.pref.api_domain": "mapi.copy20.com"},
+}
+
+_RUST_DIAGNOSTIC_LOCATION = re.compile(
+    r"-->\s+(?P<path>src/[A-Za-z0-9_./-]+\.rs):(?P<line>[1-9][0-9]*):[1-9][0-9]*"
+)
+
+
+def _diagnostic_file_excerpts(
+    project: Path,
+    diagnostics: str,
+    *,
+    context_lines: int = 10,
+) -> list[dict[str, object]]:
+    locations: dict[str, set[int]] = {}
+    for match in _RUST_DIAGNOSTIC_LOCATION.finditer(diagnostics):
+        path = match.group("path")
+        if path == "src/generated_smoke.rs" or ".." in Path(path).parts:
+            continue
+        locations.setdefault(path, set()).add(int(match.group("line")))
+
+    excerpts: list[dict[str, object]] = []
+    for relative, line_numbers in sorted(locations.items()):
+        path = project / relative
+        if not path.is_file() or path.is_symlink():
+            continue
+        resolved = path.resolve()
+        project_resolved = project.resolve()
+        if resolved != project_resolved and project_resolved not in resolved.parents:
+            continue
+        lines = _remove_generated_smoke_for_repair(path.read_text(encoding="utf-8")).splitlines()
+        ranges = sorted(
+            (max(1, line - context_lines), min(len(lines), line + context_lines))
+            for line in line_numbers
+        )
+        merged: list[list[int]] = []
+        for start, end in ranges:
+            if merged and start <= merged[-1][1] + 1:
+                merged[-1][1] = max(merged[-1][1], end)
+            else:
+                merged.append([start, end])
+        for start, end in merged:
+            excerpts.append(
+                {
+                    "path": relative,
+                    "start_line": start,
+                    "end_line": end,
+                    "content": "\n".join(lines[start - 1 : end]),
+                }
+            )
+    return excerpts[:12]
+
+
+def _remove_generated_smoke_for_repair(content: str) -> str:
+    return content.replace("\n#[cfg(test)]\nmod generated_smoke;\n", "\n")
+
+
+def _can_use_targeted_repair(
+    validation: ValidationResult,
+    capability_gaps: list[str],
+    excerpts: list[dict[str, object]],
+) -> bool:
+    failed_stages = {stage.name for stage in validation.stages if not stage.ok}
+    return (
+        not capability_gaps
+        and bool(excerpts)
+        and bool(failed_stages)
+        and failed_stages <= {"cargo-check", "clippy", "clippy-fix"}
+    )
+
+
+def _apply_repair_patch(
+    manifest: GenerationManifest,
+    current_files: list[dict[str, str]],
+    patch: RepairPatch,
+    allowed_excerpts: list[dict[str, object]],
+) -> GenerationManifest:
+    contents = {item["path"]: item["content"] for item in current_files}
+    excerpt_contents: dict[str, list[str]] = {}
+    for excerpt in allowed_excerpts:
+        path = excerpt.get("path")
+        content = excerpt.get("content")
+        if isinstance(path, str) and isinstance(content, str):
+            excerpt_contents.setdefault(path, []).append(content)
+    for edit in patch.edits:
+        if not any(edit.old_text in excerpt for excerpt in excerpt_contents.get(edit.path, [])):
+            raise AIProviderError(
+                f"repair patch old_text was not present in a supplied excerpt: {edit.path}"
+            )
+        content = contents.get(edit.path)
+        if content is None:
+            raise AIProviderError(f"repair patch references a missing current file: {edit.path}")
+        occurrences = content.count(edit.old_text)
+        if occurrences != 1:
+            raise AIProviderError(
+                f"repair patch old_text must match exactly once in {edit.path}; "
+                f"matched {occurrences} times"
+            )
+        contents[edit.path] = content.replace(edit.old_text, edit.new_text, 1)
+
+    payload = manifest.model_dump(mode="json")
+    files = []
+    for path, content in sorted(contents.items()):
+        if path.endswith(".rs"):
+            content = normalize_pinned_aidoku_rust(content)
+        try:
+            validate_generated_content(path, content)
+        except SecurityError as exc:
+            raise AIProviderError(f"repair patch failed safety validation: {exc}") from exc
+        try:
+            generated = GeneratedFile(path=path, content=content)
+        except ValueError as exc:
+            raise AIProviderError(f"repair patch produced an invalid file: {exc}") from exc
+        files.append(generated.model_dump(mode="json"))
+    payload["files"] = files
+    try:
+        return GenerationManifest.model_validate(payload)
+    except ValueError as exc:
+        raise AIProviderError(f"repair patch produced an invalid manifest: {exc}") from exc
 
 
 def _needs_toolchain_installation(validation: ValidationResult) -> bool:
@@ -612,7 +739,8 @@ def _effective_manifest(
         if warning not in checkpoint.warnings:
             checkpoint.warnings.append(warning)
         effective = manifest.model_copy(update={"files": manifest.files + inherited})
-    return _with_recovered_filter_defaults(ir, effective)
+    effective = _with_recovered_filter_defaults(ir, effective)
+    return _with_live_validated_setting_defaults(ir, effective)
 
 
 def _with_recovered_filter_defaults(
@@ -654,6 +782,47 @@ def _with_recovered_filter_defaults(
                 item["default"] = value
                 changed = True
         content = json.dumps(filters, ensure_ascii=False, indent="\t") + "\n"
+        updated_files.append(generated.model_copy(update={"content": content}))
+    if not changed:
+        return manifest
+    return manifest.model_copy(update={"files": updated_files})
+
+
+def _with_live_validated_setting_defaults(
+    ir: SourceIR,
+    manifest: GenerationManifest,
+) -> GenerationManifest:
+    overrides = _LIVE_VALIDATED_SETTING_DEFAULTS.get(ir.metadata.source_id)
+    if not overrides or Capability.DYNAMIC_BASE_URLS not in ir.capabilities:
+        return manifest
+    updated_files = []
+    changed = False
+    for generated in manifest.files:
+        if generated.path != "res/settings.json":
+            updated_files.append(generated)
+            continue
+        try:
+            settings = json.loads(generated.content)
+        except json.JSONDecodeError:
+            updated_files.append(generated)
+            continue
+        if not isinstance(settings, list):
+            updated_files.append(generated)
+            continue
+        for group in settings:
+            if not isinstance(group, dict) or not isinstance(group.get("items"), list):
+                continue
+            for item in group["items"]:
+                if not isinstance(item, dict):
+                    continue
+                preferred = overrides.get(item.get("key"))
+                values = item.get("values")
+                if preferred is None or not isinstance(values, list) or preferred not in values:
+                    continue
+                if item.get("default") != preferred:
+                    item["default"] = preferred
+                    changed = True
+        content = json.dumps(settings, ensure_ascii=False, indent="\t") + "\n"
         updated_files.append(generated.model_copy(update={"content": content}))
     if not changed:
         return manifest
@@ -910,14 +1079,47 @@ def convert_source(
                 and repair_number < settings.max_repair_rounds
             ):
                 repair_number += 1
-                diagnostics = _repair_diagnostics(ir, validation, capability_gaps)
-                diagnostics = diagnostics[-MAX_AI_DIAGNOSTIC_CHARS:]
-                repaired = client.repair(
-                    ir,
-                    current_files=read_generated_files(project),
-                    diagnostics=diagnostics,
-                    manifest_history=_manifest_history(workspace, checkpoint),
-                )
+                current_files = read_generated_files(project)
+                targeted_diagnostics = validation.diagnostics[-MAX_AI_DIAGNOSTIC_CHARS:]
+                excerpts = _diagnostic_file_excerpts(project, targeted_diagnostics)
+                if _can_use_targeted_repair(validation, capability_gaps, excerpts):
+                    try:
+                        patch_result = client.repair_patch(
+                            ir,
+                            current_file_excerpts=excerpts,
+                            diagnostics=targeted_diagnostics,
+                        )
+                        patched_manifest = _apply_repair_patch(
+                            manifest,
+                            current_files,
+                            patch_result.patch,
+                            excerpts,
+                        )
+                        repaired = AIResult(
+                            manifest=patched_manifest,
+                            structured_output=patch_result.structured_output,
+                            usage=patch_result.usage,
+                            warnings=patch_result.warnings,
+                        )
+                    except AIProviderError as exc:
+                        diagnostics = _repair_diagnostics(ir, validation, capability_gaps)
+                        diagnostics = diagnostics[-MAX_AI_DIAGNOSTIC_CHARS:]
+                        repaired = client.repair(
+                            ir,
+                            current_files=current_files,
+                            diagnostics=diagnostics,
+                            manifest_history=_manifest_history(workspace, checkpoint),
+                        )
+                        repaired.warnings.append(f"targeted repair fallback: {exc}")
+                else:
+                    diagnostics = _repair_diagnostics(ir, validation, capability_gaps)
+                    diagnostics = diagnostics[-MAX_AI_DIAGNOSTIC_CHARS:]
+                    repaired = client.repair(
+                        ir,
+                        current_files=current_files,
+                        diagnostics=diagnostics,
+                        manifest_history=_manifest_history(workspace, checkpoint),
+                    )
                 manifest = _save_manifest(
                     workspace,
                     checkpoint,

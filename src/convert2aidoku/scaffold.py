@@ -121,7 +121,7 @@ def _validate_generated_rust_ast(path: str, content: str) -> None:
         stack.extend(reversed(node.children))
 
 
-def _validate_generated_content(path: str, content: str) -> None:
+def validate_generated_content(path: str, content: str) -> None:
     if len(content) > MAX_GENERATED_FILE_CHARS:
         raise SecurityError(f"generated file is too large: {path}")
     if path.endswith(".rs"):
@@ -139,6 +139,55 @@ def _remove_reserved_smoke_marker(content: str) -> str:
     # A repair model may echo the tool-owned marker from its current-files
     # context. Strip exactly that marker; any other test module is rejected.
     return content.replace(f"\n{_SMOKE_MARKER}\n", "\n").replace(f"\n{_SMOKE_MARKER}", "\n")
+
+
+def _alloc_macro_is_imported(content: str, name: str) -> bool:
+    return any(
+        re.search(rf"\b{re.escape(name)}\b", statement.group(0))
+        for statement in re.finditer(r"\buse\s+aidoku::alloc\b[^;]*;", content)
+    )
+
+
+def _inject_no_std_macro_imports(content: str) -> str:
+    missing = [
+        name
+        for name in ("format", "vec")
+        if re.search(rf"(?<![:\w]){name}!\s*[\(\[\{{]", content)
+        and not _alloc_macro_is_imported(content, name)
+    ]
+    if not missing:
+        return content
+    imports = "\n".join(f"use aidoku::alloc::{name};" for name in missing)
+    crate_attributes = re.match(r"(?:\s*#!\[[^\n]*\]\s*\n)+", content)
+    if crate_attributes is None:
+        return imports + "\n\n" + content.lstrip()
+    boundary = crate_attributes.end()
+    return content[:boundary] + "\n" + imports + "\n" + content[boundary:].lstrip("\n")
+
+
+def normalize_pinned_aidoku_rust(content: str) -> str:
+    """Apply small type-safe compatibility rewrites for the pinned Aidoku/Rust APIs."""
+    content = content.replace("aidoku::std::filters::SelectFilter", "aidoku::SelectFilter")
+    content = re.sub(
+        r'"(?:\\.|[^"\\])*"',
+        lambda match: match.group(0).replace("}//chapters", "}/chapters"),
+        content,
+    )
+    content = _inject_no_std_macro_imports(content)
+    content = re.sub(
+        r"(\bparse_(?:local_)?date\s*\([^;]{0,800}?\))\s*\.ok\(\)",
+        r"\1",
+        content,
+    )
+    content = re.sub(
+        r"\b(?P<items>[A-Za-z_]\w*)\.sort_by\(\|(?P<left>[A-Za-z_]\w*),\s*"
+        r"(?P<right>[A-Za-z_]\w*)\|\s*(?P=right)\.index\.cmp\(&(?P=left)\.index\)\);",
+        lambda match: (
+            f"{match.group('items')}.sort_by_key(|item| core::cmp::Reverse(item.index));"
+        ),
+        content,
+    )
+    return content
 
 
 def _environment() -> Environment:
@@ -352,7 +401,8 @@ def apply_generation_manifest(
             content = _remove_reserved_smoke_marker(content)
             if not re.match(r"\s*#!\[no_std\]", content):
                 content = "#![no_std]\n\n" + content.lstrip()
-        _validate_generated_content(generated.path, content)
+            content = normalize_pinned_aidoku_rust(content)
+        validate_generated_content(generated.path, content)
         target = _safe_destination(destination, generated.path)
         target.write_text(content.rstrip() + "\n", encoding="utf-8")
         generated_paths.append(generated.path)

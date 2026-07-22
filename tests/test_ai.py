@@ -178,6 +178,45 @@ def test_transient_provider_errors_are_retried_with_backoff() -> None:
     assert delays == [5.0, 15.0]
 
 
+def test_generate_sends_deterministic_source_evidence_instead_of_raw_files() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        system_prompt = payload["messages"][0]["content"]
+        generation_payload = json.loads(payload["messages"][1]["content"].split("\n\n", 1)[1])
+        assert "FilterValue::Select { id: String, value: String }" in system_prompt
+        assert "Option<&'a str>" in system_prompt
+        assert "source_files" not in generation_payload
+        assert generation_payload["source_evidence"][0]["path"] == "src/Example.kt"
+        assert generation_payload["context_stats"]["mode"] == "complete_kotlin_source"
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(_manifest())}}]},
+        )
+
+    settings = AISettings(
+        base_url="http://local/v1",
+        model="test",
+        api_key=SecretStr("secret"),
+    )
+    ir = SourceIR(
+        input_ref="fixture",
+        metadata=SourceMetadata(
+            source_id="en.example",
+            package_name="example",
+            name="Example",
+            language="en",
+            base_url="https://example.com",
+        ),
+        main_class="Example",
+        files=[SourceFile(path="src/Example.kt", content="class Example", sha256="0")],
+    )
+
+    with OpenAICompatibleClient(settings, transport=httpx.MockTransport(handler)) as client:
+        result = client.generate(ir)
+
+    assert result.manifest.source_struct == "Example"
+
+
 def test_repair_uses_compact_context_without_original_source_bodies() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
@@ -239,3 +278,63 @@ def test_repair_uses_compact_context_without_original_source_bodies() -> None:
             ],
         )
     assert result.manifest.source_struct == "Example"
+
+
+def test_compiler_repair_sends_only_excerpts_and_returns_exact_edits() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["response_format"]["json_schema"]["name"] == "aidoku_repair_patch"
+        repair_payload = json.loads(payload["messages"][1]["content"])
+        assert "current_files" not in repair_payload
+        assert "source_ir" not in repair_payload
+        assert repair_payload["current_file_excerpts"][0]["start_line"] == 10
+        assert len(request.content) < 12_000
+        patch = {
+            "edits": [
+                {
+                    "path": "src/lib.rs",
+                    "old_text": "title,",
+                    "new_text": "title: Some(title),",
+                }
+            ]
+        }
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": json.dumps(patch)}}],
+                "usage": {"prompt_tokens": 900, "completion_tokens": 80, "total_tokens": 980},
+            },
+        )
+
+    settings = AISettings(
+        base_url="http://local/v1",
+        model="test",
+        api_key=SecretStr("secret"),
+    )
+    ir = SourceIR(
+        input_ref="fixture",
+        metadata=SourceMetadata(
+            source_id="en.example",
+            package_name="example",
+            name="Example",
+            language="en",
+            base_url="https://example.com",
+        ),
+        main_class="Example",
+    )
+    with OpenAICompatibleClient(settings, transport=httpx.MockTransport(handler)) as client:
+        result = client.repair_patch(
+            ir,
+            current_file_excerpts=[
+                {
+                    "path": "src/lib.rs",
+                    "start_line": 10,
+                    "end_line": 20,
+                    "content": "Chapter { title, ..Default::default() }",
+                }
+            ],
+            diagnostics="error[E0308]: mismatched types",
+        )
+
+    assert result.patch.edits[0].new_text == "title: Some(title),"
+    assert result.usage and result.usage.total_tokens == 980

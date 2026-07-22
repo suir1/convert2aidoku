@@ -49,6 +49,9 @@ Mapping rules:
   `Request::get`/`Request::post` must receive an absolute URL. Centralize an `absolute_url` helper
   using the source base URL before fetching details, chapters, pages, or images; never pass a
   relative `Manga.key` or `Chapter.key` directly to `Request::get`.
+- Preserve recovered path separators exactly around interpolated segments. In particular, a route
+  ending a placeholder with `}` followed by `/chapters` must not become `}//chapters`; duplicate
+  separators change the endpoint on APIs that do not normalize paths.
 - When `source_ir.relative_url_keys` is true, an `absolute_url` helper is mandatory. Use it on
   `Manga.key`, `Chapter.key`, and relative image URLs before handing the result to a request
   helper or to `Request::get`/`Request::post`.
@@ -108,6 +111,14 @@ Mapping rules:
   Aidoku filter `options` must be an array of display-name strings, never objects. Put the
   corresponding site values in a parallel `ids` string array of the same length. For example:
   `{"type":"select","id":"sort","options":["Latest","Popular"],"ids":["","popular"]}`.
+  At the pinned Aidoku revision, the configured select variant is exactly
+  `FilterValue::Select { id: String, value: String }`: `value` is the selected site ID from
+  `ids`, not a numeric option index. Use the string directly in the request, or map it back to an
+  index with `values.iter().position(...)` only when the endpoint logic genuinely needs an index.
+  A helper returning a borrowed selected value must tie the return lifetime only to `filters`, for
+  example
+  `fn selected_value<'a>(filters: &'a [FilterValue], id: &str) -> Option<&'a str>`; cloning the
+  selected `String` is also valid. `FilterValue::Sort.index` remains an `i32`, not a `usize`.
   Every ids entry must be unique. Semantically duplicate Tachi options that map to the same site
   value may be collapsed to the first label; never invent a fake site value merely to make the
   IDs unique. Preserve the recovered default explicitly. A Tachi Filter.Sort must become an

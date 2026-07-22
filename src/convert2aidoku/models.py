@@ -444,6 +444,39 @@ class GenerationManifest(BaseModel):
         return self
 
 
+class RepairEdit(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+    old_text: str = Field(min_length=1, max_length=24_000)
+    new_text: str = Field(max_length=32_000)
+
+    @field_validator("path")
+    @classmethod
+    def path_is_safe(cls, value: str) -> str:
+        return validate_generated_path(value)
+
+    @model_validator(mode="after")
+    def replacement_must_change_content(self) -> RepairEdit:
+        if self.old_text == self.new_text:
+            raise ValueError("repair replacement must change the matched text")
+        return self
+
+
+class RepairPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    edits: list[RepairEdit] = Field(min_length=1, max_length=12)
+
+    @field_validator("edits")
+    @classmethod
+    def edits_are_unique(cls, edits: list[RepairEdit]) -> list[RepairEdit]:
+        identities = [(edit.path, edit.old_text) for edit in edits]
+        if len(identities) != len(set(identities)):
+            raise ValueError("repair edits must have unique path/old_text pairs")
+        return edits
+
+
 class StageKind(StrEnum):
     TOOLCHAIN = "toolchain"
     FORMAT = "format"

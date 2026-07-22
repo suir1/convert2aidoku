@@ -115,12 +115,25 @@ fn generated_core_live_smoke() {
 	if let Some(cover_url) = manga.cover.clone() {
 		{% if image_request_provider %}
 		let request = source
-			.get_image_request(cover_url, None)
+			.get_image_request(cover_url.clone(), None)
 			.expect("cover image request construction failed");
 		{% else %}
-		let request = Request::get(cover_url).expect("cover image request construction failed");
+		let request = Request::get(cover_url.clone()).expect("cover image request construction failed");
 		{% endif %}
-		let response = request.send().expect("cover image request failed");
+		let response = match request.send() {
+			Ok(response) => response,
+			Err(_) => {
+				{% if image_request_provider %}
+				let retry = source
+					.get_image_request(cover_url, None)
+					.expect("cover image retry request construction failed");
+				{% else %}
+				let retry = Request::get(cover_url)
+					.expect("cover image retry request construction failed");
+				{% endif %}
+				retry.send().expect("cover image request failed after retry")
+			}
+		};
 		assert!(
 			(200..400).contains(&response.status_code()),
 			"cover image returned HTTP {}",
@@ -161,7 +174,20 @@ fn generated_core_live_smoke() {
 		{% else %}
 		let request = Request::get(url.clone()).expect("image request construction failed");
 		{% endif %}
-		let response = request.send().expect("first image request failed");
+		let response = match request.send() {
+			Ok(response) => response,
+			Err(_) => {
+				{% if image_request_provider %}
+				let retry = source
+					.get_image_request(url.clone(), context.clone())
+					.expect("image retry request construction failed");
+				{% else %}
+				let retry = Request::get(url.clone())
+					.expect("image retry request construction failed");
+				{% endif %}
+				retry.send().expect("first image request failed after retry")
+			}
+		};
 		assert!(
 			(200..400).contains(&response.status_code()),
 			"first image returned HTTP {}",
