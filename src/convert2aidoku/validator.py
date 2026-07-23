@@ -5,6 +5,8 @@ import os
 import subprocess
 import time
 import tomllib
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -57,6 +59,9 @@ _RUNNER_NETWORK_FAILURE_MARKERS = (
     "timed out",
     "timeout",
 )
+type _StageRunner = Callable[
+    [str, StageKind, list[str], Path, int, dict[str, str] | None], ValidationStage
+]
 
 
 def _trim_output(value: str, limit: int = 40_000) -> str:
@@ -110,7 +115,6 @@ def _network_environment(proxy: str | None) -> dict[str, str]:
 
 
 def _run_stage(
-    *,
     name: str,
     kind: StageKind,
     command: list[str],
@@ -151,15 +155,6 @@ def _run_stage(
             duration_seconds=time.monotonic() - started,
             blocked=name == "core-live-smoke" and _is_blocked(output),
         )
-
-
-def _missing_tool_stage(name: str) -> ValidationStage:
-    return ValidationStage(
-        name="toolchain",
-        kind=StageKind.TOOLCHAIN,
-        ok=False,
-        output=f"required tool is not installed: {name}",
-    )
 
 
 def _generated_safety_stage(project: Path) -> ValidationStage:
@@ -287,6 +282,82 @@ def _blocked_site_probe(
     return None
 
 
+@dataclass
+class _ValidationPlan:
+    project: Path
+    run_stage: _StageRunner
+    result: ValidationResult = field(default_factory=ValidationResult)
+
+    def command(
+        self,
+        name: str,
+        kind: StageKind,
+        command: list[str],
+        timeout: int,
+        *,
+        environment: dict[str, str] | None = None,
+        record: bool = True,
+    ) -> ValidationStage:
+        stage = self.run_stage(name, kind, command, self.project, timeout, environment)
+        return self.record(stage) if record else stage
+
+    def record(self, stage: ValidationStage) -> ValidationStage:
+        self.result.stages.append(stage)
+        return stage
+
+    def clippy(self, cargo: str) -> bool:
+        command = [
+            cargo,
+            "clippy",
+            "--locked",
+            "--target",
+            "wasm32-unknown-unknown",
+            "--",
+            "-D",
+            "warnings",
+        ]
+        initial = self.command("clippy", StageKind.CLIPPY, command, 600, record=False)
+        if initial.ok:
+            return self.record(initial).ok
+        fix = self.command(
+            "clippy-fix",
+            StageKind.CLIPPY,
+            [
+                cargo,
+                "clippy",
+                "--fix",
+                "--allow-dirty",
+                "--allow-no-vcs",
+                *command[2:],
+            ],
+            600,
+            record=False,
+        )
+        if not fix.ok:
+            self.record(initial)
+            self.record(fix)
+            return False
+        self.record(fix)
+        if not self.command(
+            "format-after-clippy-fix", StageKind.FORMAT, [cargo, "fmt", "--all"], 120
+        ).ok:
+            return False
+        if not self.record(_generated_safety_stage(self.project)).ok:
+            return False
+        return self.record(self.command("clippy", StageKind.CLIPPY, command, 600, record=False)).ok
+
+    def missing(self, name: str) -> ValidationResult:
+        self.record(
+            ValidationStage(
+                name="toolchain",
+                kind=StageKind.TOOLCHAIN,
+                ok=False,
+                output=f"required tool is not installed: {name}",
+            )
+        )
+        return self.result
+
+
 def validate_project(
     project: Path,
     *,
@@ -294,11 +365,11 @@ def validate_project(
     proxy: str | None = None,
 ) -> ValidationResult:
     proxy = _resolve_proxy(proxy)
-    result = ValidationResult()
+    plan = _ValidationPlan(project, _run_stage)
+    result = plan.result
     cargo = find_tool("cargo")
     if cargo is None:
-        result.stages.append(_missing_tool_stage("cargo"))
-        return result
+        return plan.missing("cargo")
 
     commands: list[tuple[str, StageKind, list[str], int]] = [
         ("format", StageKind.FORMAT, [cargo, "fmt", "--all"], 120),
@@ -310,127 +381,37 @@ def validate_project(
         ),
     ]
     if not (project / "Cargo.lock").is_file():
-        lock_stage = _run_stage(
-            name="cargo-lock",
-            kind=StageKind.CHECK,
-            command=[cargo, "generate-lockfile"],
-            cwd=project,
-            timeout=600,
-        )
-        result.stages.append(lock_stage)
-        if not lock_stage.ok:
-            return result
+        commands.insert(0, ("cargo-lock", StageKind.CHECK, [cargo, "generate-lockfile"], 600))
 
     for name, kind, command, timeout in commands:
-        stage = _run_stage(name=name, kind=kind, command=command, cwd=project, timeout=timeout)
-        result.stages.append(stage)
-        if not stage.ok:
+        if not plan.command(name, kind, command, timeout).ok:
             return result
 
-    clippy_command = [
-        cargo,
-        "clippy",
-        "--locked",
-        "--target",
-        "wasm32-unknown-unknown",
-        "--",
-        "-D",
-        "warnings",
-    ]
-    clippy_stage = _run_stage(
-        name="clippy",
-        kind=StageKind.CLIPPY,
-        command=clippy_command,
-        cwd=project,
-        timeout=600,
-    )
-    if not clippy_stage.ok:
-        fix_stage = _run_stage(
-            name="clippy-fix",
-            kind=StageKind.CLIPPY,
-            command=[
-                cargo,
-                "clippy",
-                "--fix",
-                "--allow-dirty",
-                "--allow-no-vcs",
-                "--locked",
-                "--target",
-                "wasm32-unknown-unknown",
-                "--",
-                "-D",
-                "warnings",
-            ],
-            cwd=project,
-            timeout=600,
-        )
-        if not fix_stage.ok:
-            result.stages.extend((clippy_stage, fix_stage))
-            return result
-        result.stages.append(fix_stage)
-        format_stage = _run_stage(
-            name="format-after-clippy-fix",
-            kind=StageKind.FORMAT,
-            command=[cargo, "fmt", "--all"],
-            cwd=project,
-            timeout=120,
-        )
-        result.stages.append(format_stage)
-        if not format_stage.ok:
-            return result
-        safety_stage = _generated_safety_stage(project)
-        result.stages.append(safety_stage)
-        if not safety_stage.ok:
-            return result
-        clippy_stage = _run_stage(
-            name="clippy",
-            kind=StageKind.CLIPPY,
-            command=clippy_command,
-            cwd=project,
-            timeout=600,
-        )
-    result.stages.append(clippy_stage)
-    if not clippy_stage.ok:
+    if not plan.clippy(cargo):
         return result
     result.build_ok = True
 
     aidoku = find_tool("aidoku")
     if aidoku is None:
-        result.stages.append(_missing_tool_stage("aidoku"))
-        return result
-    package_stage = _run_stage(
-        name="aidoku-package",
-        kind=StageKind.PACKAGE,
-        command=[aidoku, "package", "."],
-        cwd=project,
-        timeout=900,
-    )
-    result.stages.append(package_stage)
-    if not package_stage.ok:
+        return plan.missing("aidoku")
+    if not plan.command("aidoku-package", StageKind.PACKAGE, [aidoku, "package", "."], 900).ok:
         return result
     result.package_ok = (project / "package.aix").is_file()
 
-    verify_stage = _run_stage(
-        name="aidoku-verify",
-        kind=StageKind.VERIFY,
-        command=[aidoku, "verify", "package.aix"],
-        cwd=project,
-        timeout=180,
-    )
-    result.stages.append(verify_stage)
-    if not verify_stage.ok:
+    if not plan.command(
+        "aidoku-verify", StageKind.VERIFY, [aidoku, "verify", "package.aix"], 180
+    ).ok:
         result.package_ok = False
         return result
 
     if live:
         runner = find_tool("aidoku-test-runner")
         if runner is None:
-            result.stages.append(_missing_tool_stage("aidoku-test-runner"))
-            return result
-        test_build = _run_stage(
-            name="aidoku-test-build",
-            kind=StageKind.LIVE_TEST,
-            command=[
+            return plan.missing("aidoku-test-runner")
+        test_build = plan.command(
+            "aidoku-test-build",
+            StageKind.LIVE_TEST,
+            [
                 cargo,
                 "test",
                 "--locked",
@@ -438,16 +419,14 @@ def validate_project(
                 "wasm32-unknown-unknown",
                 "--no-run",
             ],
-            cwd=project,
-            timeout=600,
+            600,
         )
-        result.stages.append(test_build)
         result.blocked = test_build.blocked
         if not test_build.ok:
             return result
         test_wasm = _test_wasm(project)
         if test_wasm is None:
-            result.stages.append(
+            plan.record(
                 ValidationStage(
                     name="core-live-smoke",
                     kind=StageKind.LIVE_TEST,
@@ -456,15 +435,13 @@ def validate_project(
                 )
             )
             return result
-        live_stage = _run_stage(
-            name="core-live-smoke",
-            kind=StageKind.LIVE_TEST,
-            command=[runner, str(test_wasm), "--nocapture"],
-            cwd=project,
-            timeout=900,
+        live_stage = plan.command(
+            "core-live-smoke",
+            StageKind.LIVE_TEST,
+            [runner, str(test_wasm), "--nocapture"],
+            900,
             environment=_network_environment(proxy),
         )
-        result.stages.append(live_stage)
         if (
             not live_stage.ok
             and not live_stage.blocked

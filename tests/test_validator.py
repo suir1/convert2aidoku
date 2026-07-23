@@ -168,6 +168,40 @@ def test_tool_environment_drops_credentials(monkeypatch) -> None:
     assert "OTHER_TOKEN" not in env
 
 
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        ("cargo-check", ["format", "cargo-check"]),
+        ("clippy-fix", ["format", "cargo-check", "clippy", "clippy-fix"]),
+    ],
+)
+def test_validation_plan_stops_and_records_at_first_unrepaired_failure(
+    tmp_path: Path,
+    monkeypatch,
+    failure: str,
+    expected: list[str],
+) -> None:
+    calls: list[str] = []
+
+    def fake_run_stage(name: str, kind: StageKind, *_args: object) -> ValidationStage:
+        calls.append(name)
+        fails = {failure} | ({"clippy"} if failure == "clippy-fix" else set())
+        return ValidationStage(name=name, kind=kind, ok=name not in fails)
+
+    monkeypatch.setattr(
+        "convert2aidoku.validator.find_tool",
+        lambda name: "/cargo" if name == "cargo" else None,
+    )
+    monkeypatch.setattr("convert2aidoku.validator._run_stage", fake_run_stage)
+    (tmp_path / "Cargo.lock").write_text("locked", encoding="utf-8")
+
+    result = validate_project(tmp_path, live=False)
+
+    assert calls == expected
+    assert [stage.name for stage in result.stages] == expected
+    assert not result.build_ok
+
+
 def test_validation_applies_clippy_fixes_before_requesting_ai(
     tmp_path: Path,
     monkeypatch,
@@ -178,16 +212,13 @@ def test_validation_applies_clippy_fixes_before_requesting_ai(
     def fake_find_tool(name: str) -> str | None:
         return "/cargo" if name == "cargo" else None
 
-    def fake_run_stage(**kwargs: object) -> ValidationStage:
+    def fake_run_stage(name: str, kind: StageKind, *_args: object) -> ValidationStage:
         nonlocal clippy_runs
-        name = str(kwargs["name"])
         calls.append(name)
         ok = True
         if name == "clippy":
             clippy_runs += 1
             ok = clippy_runs > 1
-        kind = kwargs["kind"]
-        assert isinstance(kind, StageKind)
         return ValidationStage(name=name, kind=kind, ok=ok)
 
     monkeypatch.setattr("convert2aidoku.validator.find_tool", fake_find_tool)
