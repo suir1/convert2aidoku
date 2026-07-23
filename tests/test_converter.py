@@ -1110,6 +1110,68 @@ def test_decompiled_json_source_requires_idempotent_get_retry() -> None:
     assert not any("one-retry helper" in gap for gap in good_gaps)
 
 
+def test_kotlin_http_source_requires_idempotent_get_retry() -> None:
+    with resolve_source(str(FIXTURE)) as resolved:
+        ir = analyze_source(resolved)
+    without_retry = GenerationManifest(
+        source_struct="Simple",
+        files=[
+            GeneratedFile(
+                path="src/lib.rs",
+                content=(
+                    "fn fetch(&self, url: String) -> Result<Response> {\n"
+                    "Request::get(url)?.send()\n}\n"
+                ),
+            )
+        ],
+    )
+    with_retry = without_retry.model_copy(
+        update={
+            "files": [
+                GeneratedFile(
+                    path="src/lib.rs",
+                    content=(
+                        "fn fetch(&self, url: String) -> Result<Response> {\n"
+                        "let response = match Request::get(url.clone())?.send() {\n"
+                        "Ok(response) => response,\n"
+                        "Err(_) => Request::get(url)?.send()?,\n};\n"
+                        "Ok(response)\n}\n"
+                    ),
+                )
+            ]
+        }
+    )
+
+    bad_gaps = _capability_gaps(ir, without_retry)
+    good_gaps = _capability_gaps(ir, with_retry)
+
+    assert any("Kotlin HttpSource" in gap and "one-retry" in gap for gap in bad_gaps)
+    assert not any("Kotlin HttpSource" in gap and "one-retry" in gap for gap in good_gaps)
+
+
+def test_chapter_parser_cannot_compile_regex_on_every_request() -> None:
+    with resolve_source(str(FIXTURE)) as resolved:
+        ir = analyze_source(resolved)
+    manifest = GenerationManifest(
+        source_struct="Simple",
+        dependencies=[DependencyRequest(name="regex")],
+        files=[
+            GeneratedFile(
+                path="src/lib.rs",
+                content=(
+                    "fn parse_chapters(&self, data: &str) {\n"
+                    'let expression = Regex::new(r"chapters: \\[\\{{.*?\\}}\\]").unwrap();\n'
+                    "let _ = expression.find(data);\n}\n"
+                ),
+            )
+        ],
+    )
+
+    gaps = _capability_gaps(ir, manifest)
+
+    assert any("compiles Regex::new on every chapter parse" in gap for gap in gaps)
+
+
 def test_chapter_metadata_and_legacy_settings_are_contract_gaps() -> None:
     with resolve_source(str(FIXTURE)) as resolved:
         ir = analyze_source(resolved).model_copy(

@@ -453,6 +453,26 @@ def _capability_gaps(ir: SourceIR, manifest: GenerationManifest) -> list[str]:
             "transient idempotent GET RequestError; reconstruct and resend the same request "
             "once, then deserialize only the successful response"
         )
+    if (
+        ir.source_format == "kotlin_module"
+        and "HttpSource" in ir.parent_classes
+        and "Request::get" in rust_content
+        and ".send()" in rust_content
+        and not any(_has_idempotent_get_retry(item.content) for item in rust_files)
+    ):
+        gaps.append(
+            "standard Kotlin HttpSource generated no centralized one-retry helper for "
+            "transient idempotent GET RequestError; reconstruct and resend the same request "
+            "once, then parse only the successful response"
+        )
+    if Capability.CHAPTERS in ir.capabilities and any(
+        _rust_chapter_parser_compiles_regex(item.content) for item in rust_files
+    ):
+        gaps.append(
+            "generated code compiles Regex::new on every chapter parse; for fixed embedded-JSON "
+            "delimiters or numeric chapter labels, use bounded string scanning so each update "
+            "does not compile a regex and pull regex runtime cost into the WASM hot path"
+        )
     if Capability.ENCRYPTED_JSON in ir.capabilities:
         missing_crypto = sorted({"aes", "cbc", "serde", "serde_json"} - dependencies)
         if missing_crypto:
@@ -692,6 +712,18 @@ def _has_idempotent_get_retry(content: str) -> bool:
         if compact.count(".send()") >= 2 and (
             "match" in compact or "or_else" in compact or "ifletErr" in compact
         ):
+            return True
+    return False
+
+
+def _rust_chapter_parser_compiles_regex(content: str) -> bool:
+    for node in _walk_rust(content):
+        if node.type != "function_item":
+            continue
+        identifier = node.child_by_field_name("name")
+        if identifier is None or "chapter" not in identifier.text.decode("utf-8").lower():
+            continue
+        if "Regex::new" in node.text.decode("utf-8", errors="replace"):
             return True
     return False
 

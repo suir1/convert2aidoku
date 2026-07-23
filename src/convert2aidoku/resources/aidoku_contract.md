@@ -83,12 +83,17 @@ Mapping rules:
   cursor calculation exactly. Keep public unauthenticated behavior separate from optional login
   behavior; do not manufacture credentials or silently make login mandatory.
 - Tachi `HttpSource` requests use OkHttp, whose idempotent GET path retries transient connection
-  failures. For `decompiled_apk` JSON sources, preserve that behavior with one centralized retry:
-  construct the same GET request again only when the first `.send()` returns `RequestError`, then
-  parse the successful response once. Do not retry JSON/deserialization errors, HTTP application
-  errors, POST requests, or authentication operations. A suitable generic helper has the shape
+  failures. For both standard Kotlin modules and `decompiled_apk` JSON sources, preserve that
+  behavior with one centralized retry: construct the same GET request again only when the first
+  `.send()` returns `RequestError`, then parse the successful response once. Do not retry
+  HTML/JSON parsing errors, HTTP application errors, POST requests, or authentication operations.
+  A suitable generic helper has the shape
   `match self.request(url.clone())?.send() { Ok(response) => response,
   Err(_) => self.request(url)?.send()? }` followed by `response.get_json_owned()`.
+- Do not call `Regex::new` inside chapter/list/detail/page parsing paths for fixed embedded-JSON
+  delimiters or simple numeric labels. Those functions run per request (and often once per
+  chapter), so compiling a regex there increases latency and WASM size. Prefer bounded
+  `find`/slice scans for fixed delimiters and an ASCII digit/decimal scan for chapter numbers.
 - A Kotlin override that starts from `super.headersBuilder()` inherits Tachi `HttpSource`'s
   default browser-like `User-Agent`. Preserve that inherited header in addition to every explicit
   `.add(...)`/`.set(...)` header; do not treat only the locally visible header calls as complete.
