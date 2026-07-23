@@ -971,6 +971,62 @@ def test_manga_update_query_must_respect_requested_data_flags() -> None:
     assert not any("only the data requested" in gap for gap in resolved_gaps)
 
 
+def test_rest_chapter_helper_cannot_repeat_the_detail_request() -> None:
+    with resolve_source(str(FIXTURE)) as resolved:
+        ir = analyze_source(resolved).model_copy(
+            update={
+                "capabilities": [
+                    Capability.JSON_API,
+                    Capability.DETAILS,
+                    Capability.CHAPTERS,
+                ]
+            }
+        )
+    repeated = GenerationManifest(
+        source_struct="Simple",
+        dependencies=[DependencyRequest(name="serde")],
+        files=[
+            GeneratedFile(
+                path="src/lib.rs",
+                content=(
+                    "fn fetch_chapters(&self, id: &str) {\n"
+                    'self.get(format!("/comic2/{id}"));\n}\n'
+                    "fn get_manga_update(&self, needs_details: bool, needs_chapters: bool) {\n"
+                    'if needs_details { self.get(format!("/comic2/{id}")); }\n'
+                    "if needs_chapters { self.fetch_chapters(id); }\n}\n"
+                ),
+            )
+        ],
+    )
+    reused = repeated.model_copy(
+        update={
+            "files": [
+                GeneratedFile(
+                    path="src/lib.rs",
+                    content=(
+                        "fn fetch_chapters(&self, detail: &Detail) { parse(detail); }\n"
+                        "fn get_manga_update(\n"
+                        "    &self, needs_details: bool, needs_chapters: bool,\n"
+                        ") {\n"
+                        "let detail = if needs_details || needs_chapters {\n"
+                        'Some(self.get(format!("/comic2/{id}")))\n'
+                        "} else { None };\n"
+                        "if needs_details { apply(detail.as_ref().unwrap()); }\n"
+                        "if needs_chapters { "
+                        "self.fetch_chapters(detail.as_ref().unwrap()); }\n}\n"
+                    ),
+                )
+            ]
+        }
+    )
+
+    repeated_gaps = _capability_gaps(ir, repeated)
+    reused_gaps = _capability_gaps(ir, reused)
+
+    assert any("same REST detail route twice" in gap for gap in repeated_gaps)
+    assert not any("same REST detail route twice" in gap for gap in reused_gaps)
+
+
 def test_dynamic_filter_ids_must_be_read_in_search_mapping() -> None:
     with resolve_source(str(FIXTURE)) as resolved:
         ir = analyze_source(resolved).model_copy(

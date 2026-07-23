@@ -204,6 +204,11 @@ Mapping rules:
   flags. For GraphQL sources, provide details-only and chapters-only projections and retain a
   combined projection when both are true. Do not always download both payloads after checking only
   that at least one flag is true.
+- For REST sources whose chapter traversal needs group or collection metadata from the same detail
+  endpoint used by `needs_details`, fetch and decode that detail response at most once per
+  `get_manga_update` call. When both flags are true, pass the decoded detail value into the chapter
+  helper instead of letting the helper repeat the identical detail request. A chapters-only call
+  may still fetch the detail endpoint once when it is required to discover chapter groups.
 - The only valid optional trait names are `ListingProvider`, `Home`, `DynamicListings`,
   `DynamicFilters`, `DynamicSettings`, `PageImageProcessor`, `ImageRequestProvider`,
   `PageDescriptionProvider`, `AlternateCoverProvider`, `BaseUrlProvider`, `NotificationHandler`,

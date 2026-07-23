@@ -415,6 +415,34 @@ def _capability_gaps(ir: SourceIR, manifest: GenerationManifest) -> list[str]:
             "query; choose details-only, chapters-only, or combined queries so each call fetches "
             "only the data requested by needs_details and needs_chapters"
         )
+    if Capability.DETAILS in ir.capabilities and Capability.CHAPTERS in ir.capabilities:
+        repeated_detail_routes: set[str] = set()
+        for item in rust_files:
+            if not (
+                _rust_function_contains(item.content, "get_manga_update", "needs_details")
+                and _rust_function_contains(item.content, "get_manga_update", "needs_chapters")
+            ):
+                continue
+            update_routes = _rust_function_route_literals(item.content, "get_manga_update")
+            chapter_helpers = {
+                name
+                for name in _rust_function_calls(item.content, "get_manga_update")
+                if "chapter" in name.lower()
+            }
+            for helper in chapter_helpers:
+                helper_routes = {
+                    route
+                    for rust_file in rust_files
+                    for route in _rust_function_route_literals(rust_file.content, helper)
+                }
+                repeated_detail_routes.update(update_routes & helper_routes)
+        if repeated_detail_routes:
+            gaps.append(
+                "get_manga_update and its chapter helper fetch the same REST detail route twice "
+                "when details and chapters are both requested; fetch it once and pass the "
+                "decoded detail response into the chapter helper: "
+                + ", ".join(sorted(repeated_detail_routes))
+            )
     if (
         ir.source_format == "decompiled_apk"
         and Capability.JSON_API in ir.capabilities
@@ -575,6 +603,30 @@ def _rust_function_has_header(content: str, name: str, header: str) -> bool:
             continue
         return pattern.search(node.text.decode("utf-8", errors="replace")) is not None
     return False
+
+
+def _rust_function_calls(content: str, name: str) -> set[str]:
+    for node in _walk_rust(content):
+        if node.type != "function_item":
+            continue
+        identifier = node.child_by_field_name("name")
+        if identifier is None or identifier.text.decode("utf-8") != name:
+            continue
+        text = node.text.decode("utf-8", errors="replace")
+        return set(re.findall(r"\b(?:self\.)?([A-Za-z_][A-Za-z0-9_]*)\s*\(", text))
+    return set()
+
+
+def _rust_function_route_literals(content: str, name: str) -> set[str]:
+    for node in _walk_rust(content):
+        if node.type != "function_item":
+            continue
+        identifier = node.child_by_field_name("name")
+        if identifier is None or identifier.text.decode("utf-8") != name:
+            continue
+        text = node.text.decode("utf-8", errors="replace")
+        return set(re.findall(r'"(/[^"\\]*(?:\\.[^"\\]*)*)"', text))
+    return set()
 
 
 def _dynamic_filter_ids_missing_from_query_mapping(content: str) -> set[str]:
