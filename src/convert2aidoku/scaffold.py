@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 
 from jinja2 import Environment, StrictUndefined
-from tree_sitter_language_pack import get_parser
 
 from .constants import (
     AIDOKU_RS_REPOSITORY,
@@ -25,6 +24,7 @@ from .models import (
     SourceIR,
     validate_generated_path,
 )
+from .rust_inspection import RustInspection
 
 _FORBIDDEN_GENERATED_TOKENS = (
     "unsafe",
@@ -84,22 +84,14 @@ def _first_rust_identifier(node: Any) -> str | None:
     return None
 
 
-def _compact_rust_node(node: Any) -> str:
-    text = node.text.decode("utf-8", errors="replace")
-    text = re.sub(r"/\*[\s\S]*?\*/|//[^\r\n]*", "", text)
-    return "".join(text.split())
-
-
 def _validate_generated_rust_ast(path: str, content: str) -> None:
     """Reject compile-time I/O and ways to bypass the tool-owned smoke tests."""
-    tree = get_parser("rust").parse(content.encode("utf-8"))
-    stack = [tree.root_node]
-    while stack:
-        node = stack.pop()
-
+    inspection = RustInspection.from_content(content)
+    for node in inspection.nodes():
         identifier = _rust_identifier(node)
         if identifier == "std" and not (
-            node.parent is not None and _compact_rust_node(node.parent) == "aidoku::imports::std"
+            node.parent is not None
+            and RustInspection.compact_node(node.parent) == "aidoku::imports::std"
         ):
             raise SecurityError(f"generated Rust uses std, which is forbidden: {path}")
         if identifier == "generated_smoke":
@@ -123,8 +115,6 @@ def _validate_generated_rust_ast(path: str, content: str) -> None:
         # including variants separated from adjacent tokens by comments.
         if node.type in {"unsafe", "unsafe_block"}:
             raise SecurityError(f"generated Rust uses forbidden unsafe code: {path}")
-
-        stack.extend(reversed(node.children))
 
 
 def validate_generated_content(path: str, content: str) -> None:

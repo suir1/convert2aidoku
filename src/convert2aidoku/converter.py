@@ -8,9 +8,6 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from tree_sitter import Node
-from tree_sitter_language_pack import get_parser
-
 from .ai import AIResult, OpenAICompatibleClient, ai_round
 from .analyzer import analyze_source
 from .config import AISettings
@@ -29,6 +26,7 @@ from .models import (
     ValidationResult,
 )
 from .reports import classify_status, write_report
+from .rust_inspection import RustInspection
 from .scaffold import (
     apply_generation_manifest,
     create_scaffold,
@@ -150,12 +148,11 @@ def _contract_gap_file_excerpts(
             continue
         content = path.read_text(encoding="utf-8")
         relative = path.relative_to(project).as_posix()
-        for node in _walk_rust(content):
-            if node.type != "function_item":
-                continue
-            identifier = node.child_by_field_name("name")
-            name = identifier.text.decode("utf-8") if identifier is not None else ""
-            text = node.text.decode("utf-8", errors="replace")
+        inspection = RustInspection.from_content(content)
+        for function in inspection.functions:
+            node = function.node
+            name = function.name
+            text = function.text
             include = (needs_retry and ".send()" in text) or (
                 needs_chapter_scan and "chapter" in name.lower() and "Regex::new" in text
             )
@@ -262,6 +259,7 @@ def _capability_gaps(ir: SourceIR, manifest: GenerationManifest) -> list[str]:
     dependencies = {item.name for item in manifest.dependencies}
     rust_files = [item for item in manifest.files if item.path.endswith(".rs")]
     rust_content = "\n".join(item.content for item in rust_files)
+    rust = RustInspection(item.content for item in rust_files)
     input_content = "\n".join(item.content for item in ir.files)
     gaps: list[str] = []
     if (Capability.POPULAR in ir.capabilities or Capability.LATEST in ir.capabilities) and (
@@ -281,28 +279,26 @@ def _capability_gaps(ir: SourceIR, manifest: GenerationManifest) -> list[str]:
         )
     if Capability.DYNAMIC_FILTERS in ir.capabilities and "DynamicFilters" not in traits:
         gaps.append("source fetches dynamic filters but generated no DynamicFilters provider")
-    if Capability.DYNAMIC_FILTERS in ir.capabilities and any(
-        _rust_function_contains(item.content, "get_dynamic_filters", "serde_json::from_str")
-        for item in rust_files
+    if Capability.DYNAMIC_FILTERS in ir.capabilities and rust.function_contains(
+        "get_dynamic_filters", "serde_json::from_str"
     ):
         gaps.append(
             "get_dynamic_filters attempts to deserialize aidoku::Filter with serde_json; "
             "construct typed SelectFilter/Filter values directly because Filter is not "
             "Deserialize"
         )
-    if Capability.DYNAMIC_FILTERS in ir.capabilities and any(
-        _rust_function_contains(item.content, "get_dynamic_filters", "listing_query")
-        for item in rust_files
+    if Capability.DYNAMIC_FILTERS in ir.capabilities and rust.function_contains(
+        "get_dynamic_filters", "listing_query"
     ):
         gaps.append(
             "get_dynamic_filters performs a full manga listing request; use a dedicated "
             "options-only request (for GraphQL, query only the recovered option field) "
             "instead of downloading manga entries"
         )
-    if Capability.JSON_API in ir.capabilities and any(
-        _rust_function_contains(item.content, "listing_query", "description")
-        and _rust_function_contains(item.content, "listing_query", "allCategory")
-        for item in rust_files
+    if (
+        Capability.JSON_API in ir.capabilities
+        and rust.function_contains("listing_query", "description")
+        and rust.function_contains("listing_query", "allCategory")
     ):
         gaps.append(
             "GraphQL listing requests include detail-only fields and dynamic-filter metadata; "
@@ -310,13 +306,7 @@ def _capability_gaps(ir: SourceIR, manifest: GenerationManifest) -> list[str]:
             "allCategory only in the dedicated dynamic-filter request"
         )
     if Capability.DYNAMIC_FILTERS in ir.capabilities:
-        for filter_id in sorted(
-            {
-                filter_id
-                for item in rust_files
-                for filter_id in _dynamic_filter_ids_missing_from_query_mapping(item.content)
-            }
-        ):
+        for filter_id in sorted(_dynamic_filter_ids_missing_from_query_mapping(rust)):
             gaps.append(
                 f"dynamic filter {filter_id!r} is never read by get_search_manga_list; "
                 "read its FilterValue using the same id and send the selected site value "
@@ -331,11 +321,8 @@ def _capability_gaps(ir: SourceIR, manifest: GenerationManifest) -> list[str]:
         gaps.append("source declares image headers but generated no ImageRequestProvider")
     if (
         Capability.IMAGE_HEADERS in ir.capabilities
-        and any(
-            _rust_function_contains(item.content, "get_image_request", "context")
-            and _rust_function_contains(item.content, "get_image_request", "referer")
-            for item in rust_files
-        )
+        and rust.function_contains("get_image_request", "context")
+        and rust.function_contains("get_image_request", "referer")
         and "PageContent::url_context" not in rust_content
     ):
         gaps.append(
@@ -349,13 +336,8 @@ def _capability_gaps(ir: SourceIR, manifest: GenerationManifest) -> list[str]:
     )
     if source_uses_cookie_jar:
         has_cookie_setting = resources.contains_text(GeneratedResources.SETTINGS, "cookie")
-        has_api_cookie_header = any(
-            _rust_function_has_header(item.content, "post_query", "cookie") for item in rust_files
-        )
-        has_image_cookie_header = any(
-            _rust_function_has_header(item.content, "get_image_request", "cookie")
-            for item in rust_files
-        )
+        has_api_cookie_header = rust.function_has_header("post_query", "cookie")
+        has_image_cookie_header = rust.function_has_header("get_image_request", "cookie")
         if not has_cookie_setting or not has_api_cookie_header or not has_image_cookie_header:
             gaps.append(
                 "input public requests depend on a Cookie session, but the generated source "
@@ -366,17 +348,14 @@ def _capability_gaps(ir: SourceIR, manifest: GenerationManifest) -> list[str]:
         gaps.append("source declares deep links but generated no DeepLinkHandler")
     if Capability.JSON_API in ir.capabilities and "serde" not in dependencies:
         gaps.append("JSON API source generated no pinned serde dependency")
-    update_uses_combined_helper = any(
-        _rust_function_contains(item.content, "get_manga_update", "needs_details")
-        and _rust_function_contains(item.content, "get_manga_update", "needs_chapters")
-        and _rust_function_contains(item.content, "get_manga_update", "manga_query")
-        for item in rust_files
+    update_uses_combined_helper = (
+        rust.function_contains("get_manga_update", "needs_details")
+        and rust.function_contains("get_manga_update", "needs_chapters")
+        and rust.function_contains("get_manga_update", "manga_query")
     )
-    helper_selects_requested_projection = any(
-        _rust_function_contains(item.content, "manga_query", "(true, false)")
-        and _rust_function_contains(item.content, "manga_query", "(false, true)")
-        for item in rust_files
-    )
+    helper_selects_requested_projection = rust.function_contains(
+        "manga_query", "(true, false)"
+    ) and rust.function_contains("manga_query", "(false, true)")
     if (
         Capability.DETAILS in ir.capabilities
         and Capability.CHAPTERS in ir.capabilities
@@ -392,25 +371,15 @@ def _capability_gaps(ir: SourceIR, manifest: GenerationManifest) -> list[str]:
         )
     if Capability.DETAILS in ir.capabilities and Capability.CHAPTERS in ir.capabilities:
         repeated_detail_routes: set[str] = set()
-        for item in rust_files:
-            if not (
-                _rust_function_contains(item.content, "get_manga_update", "needs_details")
-                and _rust_function_contains(item.content, "get_manga_update", "needs_chapters")
-            ):
-                continue
-            update_routes = _rust_function_route_literals(item.content, "get_manga_update")
+        if rust.function_contains("get_manga_update", "needs_details") and rust.function_contains(
+            "get_manga_update", "needs_chapters"
+        ):
+            update_routes = rust.route_literals("get_manga_update")
             chapter_helpers = {
-                name
-                for name in _rust_function_calls(item.content, "get_manga_update")
-                if "chapter" in name.lower()
+                name for name in rust.calls("get_manga_update") if "chapter" in name.lower()
             }
             for helper in chapter_helpers:
-                helper_routes = {
-                    route
-                    for rust_file in rust_files
-                    for route in _rust_function_route_literals(rust_file.content, helper)
-                }
-                repeated_detail_routes.update(update_routes & helper_routes)
+                repeated_detail_routes.update(update_routes & rust.route_literals(helper))
         if repeated_detail_routes:
             gaps.append(
                 "get_manga_update and its chapter helper fetch the same REST detail route twice "
@@ -421,7 +390,7 @@ def _capability_gaps(ir: SourceIR, manifest: GenerationManifest) -> list[str]:
     if (
         ir.source_format == "decompiled_apk"
         and Capability.JSON_API in ir.capabilities
-        and not any(_has_idempotent_get_retry(item.content) for item in rust_files)
+        and not _has_idempotent_get_retry(rust)
     ):
         gaps.append(
             "decompiled Tachi JSON source generated no centralized one-retry helper for "
@@ -431,17 +400,15 @@ def _capability_gaps(ir: SourceIR, manifest: GenerationManifest) -> list[str]:
     if (
         ir.source_format == "kotlin_module"
         and "HttpSource" in ir.parent_classes
-        and _has_get_send_path(rust_content)
-        and not any(_has_idempotent_get_retry(item.content) for item in rust_files)
+        and _has_get_send_path(rust)
+        and not _has_idempotent_get_retry(rust)
     ):
         gaps.append(
             "standard Kotlin HttpSource generated no centralized one-retry helper for "
             "transient idempotent GET RequestError; reconstruct and resend the same request "
             "once, then parse only the successful response"
         )
-    if Capability.CHAPTERS in ir.capabilities and any(
-        _rust_chapter_parser_compiles_regex(item.content) for item in rust_files
-    ):
+    if Capability.CHAPTERS in ir.capabilities and _rust_chapter_parser_compiles_regex(rust):
         gaps.append(
             "generated code compiles Regex::new on every chapter parse; for fixed embedded-JSON "
             "delimiters or numeric chapter labels, use bounded string scanning so each update "
@@ -476,11 +443,11 @@ def _capability_gaps(ir: SourceIR, manifest: GenerationManifest) -> list[str]:
         if "defaults_get" not in rust_content:
             gaps.append("dynamic base URL source generated no validated defaults_get resolver")
     if ir.relative_url_keys:
-        if not any(_has_rust_function(item.content, "absolute_url") for item in rust_files):
+        if not rust.has_function("absolute_url"):
             gaps.append(
                 "source emits relative manga/chapter keys but generated no absolute_url helper"
             )
-        if any(_passes_relative_key_to_request(item.content) for item in rust_files):
+        if _passes_relative_key_to_request(rust):
             gaps.append(
                 "generated code passes Manga.key or Chapter.key to a request without absolute_url"
             )
@@ -535,7 +502,7 @@ def _capability_gaps(ir: SourceIR, manifest: GenerationManifest) -> list[str]:
         r"ApiResponse\.class[\s\S]{0,300}?"
         r"Reflection\.typeOf\(ComicDetailResult\.class\)",
         input_content,
-    ) and any(_detail_helper_skips_api_envelope(item.content) for item in rust_files):
+    ) and _detail_helper_skips_api_envelope(rust):
         gaps.append(
             "detail endpoint is wrapped in ApiResponse<ComicDetailResult>, but generated detail "
             "helper deserializes the HTTP response directly into DetailResult; deserialize "
@@ -557,85 +524,8 @@ def _capability_gaps(ir: SourceIR, manifest: GenerationManifest) -> list[str]:
     return gaps
 
 
-def _walk_rust(content: str):
-    stack = [get_parser("rust").parse(content.encode("utf-8")).root_node]
-    while stack:
-        node = stack.pop()
-        yield node
-        stack.extend(reversed(node.children))
-
-
-def _has_rust_function(content: str, name: str) -> bool:
-    for node in _walk_rust(content):
-        if node.type != "function_item":
-            continue
-        identifier = node.child_by_field_name("name")
-        if identifier is not None and identifier.text.decode("utf-8") == name:
-            return True
-    return False
-
-
-def _rust_function_contains(content: str, name: str, needle: str) -> bool:
-    for node in _walk_rust(content):
-        if node.type != "function_item":
-            continue
-        identifier = node.child_by_field_name("name")
-        if identifier is None or identifier.text.decode("utf-8") != name:
-            continue
-        return needle in node.text.decode("utf-8", errors="replace")
-    return False
-
-
-def _rust_function_has_header(content: str, name: str, header: str) -> bool:
-    pattern = re.compile(rf'\.header\s*\(\s*"{re.escape(header)}"', re.IGNORECASE)
-    for node in _walk_rust(content):
-        if node.type != "function_item":
-            continue
-        identifier = node.child_by_field_name("name")
-        if identifier is None or identifier.text.decode("utf-8") != name:
-            continue
-        return pattern.search(node.text.decode("utf-8", errors="replace")) is not None
-    return False
-
-
-def _rust_function_calls(content: str, name: str) -> set[str]:
-    for node in _walk_rust(content):
-        if node.type != "function_item":
-            continue
-        identifier = node.child_by_field_name("name")
-        if identifier is None or identifier.text.decode("utf-8") != name:
-            continue
-        text = node.text.decode("utf-8", errors="replace")
-        return set(re.findall(r"\b(?:self\.)?([A-Za-z_][A-Za-z0-9_]*)\s*\(", text))
-    return set()
-
-
-def _rust_function_route_literals(content: str, name: str) -> set[str]:
-    for node in _walk_rust(content):
-        if node.type != "function_item":
-            continue
-        identifier = node.child_by_field_name("name")
-        if identifier is None or identifier.text.decode("utf-8") != name:
-            continue
-        text = node.text.decode("utf-8", errors="replace")
-        return set(re.findall(r'"(/[^"\\]*(?:\\.[^"\\]*)*)"', text))
-    return set()
-
-
-def _dynamic_filter_ids_missing_from_query_mapping(content: str) -> set[str]:
-    dynamic_texts: list[str] = []
-    functions: dict[str, list[str]] = {}
-    for node in _walk_rust(content):
-        if node.type != "function_item":
-            continue
-        identifier = node.child_by_field_name("name")
-        if identifier is None:
-            continue
-        name = identifier.text.decode("utf-8")
-        text = node.text.decode("utf-8", errors="replace")
-        functions.setdefault(name, []).append(text)
-        if name == "get_dynamic_filters":
-            dynamic_texts.append(text)
+def _dynamic_filter_ids_missing_from_query_mapping(rust: RustInspection) -> set[str]:
+    dynamic_texts = [function.text for function in rust.named("get_dynamic_filters")]
     dynamic_ids = {
         match.group(1)
         for text in dynamic_texts
@@ -644,29 +534,16 @@ def _dynamic_filter_ids_missing_from_query_mapping(content: str) -> set[str]:
             text,
         )
     }
-    reachable = {"get_search_manga_list"}
-    pending = ["get_search_manga_list"]
-    while pending:
-        current = pending.pop()
-        current_text = "\n".join(functions.get(current, []))
-        for candidate in functions:
-            if candidate in reachable:
-                continue
-            if re.search(rf"\b{re.escape(candidate)}\s*\(", current_text):
-                reachable.add(candidate)
-                pending.append(candidate)
-    query_mapping = "\n".join(text for name in reachable for text in functions.get(name, []))
+    reachable = rust.reachable_functions("get_search_manga_list")
+    query_mapping = "\n".join(function.text for name in reachable for function in rust.named(name))
     return {filter_id for filter_id in dynamic_ids if f'"{filter_id}"' not in query_mapping}
 
 
-def _detail_helper_skips_api_envelope(content: str) -> bool:
-    for node in _walk_rust(content):
-        if node.type != "function_item":
+def _detail_helper_skips_api_envelope(rust: RustInspection) -> bool:
+    for function in rust.functions:
+        if "detail" not in function.name.lower():
             continue
-        identifier = node.child_by_field_name("name")
-        if identifier is None or "detail" not in identifier.text.decode("utf-8").lower():
-            continue
-        text = node.text.decode("utf-8", errors="replace")
+        text = function.text
         signature = text.split("{", 1)[0]
         if (
             re.search(r"Result<(?:Comic)?DetailResult>", signature)
@@ -677,11 +554,9 @@ def _detail_helper_skips_api_envelope(content: str) -> bool:
     return False
 
 
-def _has_idempotent_get_retry(content: str) -> bool:
-    for node in _walk_rust(content):
-        if node.type != "function_item":
-            continue
-        compact = _compact_rust_node(node)
+def _has_idempotent_get_retry(rust: RustInspection) -> bool:
+    for function in rust.functions:
+        compact = RustInspection.compact_node(function.node)
         if compact.count(".send()") >= 2 and (
             "match" in compact or "or_else" in compact or "ifletErr" in compact
         ):
@@ -689,62 +564,39 @@ def _has_idempotent_get_retry(content: str) -> bool:
     return False
 
 
-def _has_get_send_path(content: str) -> bool:
-    functions: dict[str, str] = {}
-    calls: dict[str, set[str]] = {}
-    for node in _walk_rust(content):
-        if node.type != "function_item":
-            continue
-        identifier = node.child_by_field_name("name")
-        if identifier is None:
-            continue
-        name = identifier.text.decode("utf-8")
-        text = node.text.decode("utf-8", errors="replace")
-        functions[name] = text
-        calls[name] = set(re.findall(r"\b(?:self\.)?([A-Za-z_][A-Za-z0-9_]*)\s*\(", text))
-    get_paths = {name for name, text in functions.items() if "Request::get" in text}
+def _has_get_send_path(rust: RustInspection) -> bool:
+    get_paths = {function.name for function in rust.functions if "Request::get" in function.text}
     changed = True
     while changed:
         changed = False
-        for name, called in calls.items():
-            if name not in get_paths and called & get_paths:
-                get_paths.add(name)
+        for function in rust.functions:
+            if function.name not in get_paths and function.calls & get_paths:
+                get_paths.add(function.name)
                 changed = True
-    return any(".send()" in functions[name] for name in get_paths)
+    return any(
+        ".send()" in function.text for function in rust.functions if function.name in get_paths
+    )
 
 
-def _rust_chapter_parser_compiles_regex(content: str) -> bool:
-    for node in _walk_rust(content):
-        if node.type != "function_item":
-            continue
-        identifier = node.child_by_field_name("name")
-        if identifier is None or "chapter" not in identifier.text.decode("utf-8").lower():
-            continue
-        if "Regex::new" in node.text.decode("utf-8", errors="replace"):
-            return True
-    return False
+def _rust_chapter_parser_compiles_regex(rust: RustInspection) -> bool:
+    return any(
+        "chapter" in function.name.lower() and "Regex::new" in function.text
+        for function in rust.functions
+    )
 
 
-def _compact_rust_node(node: Node) -> str:
-    text = node.text.decode("utf-8", errors="replace")
-    text = re.sub(r"/\*[\s\S]*?\*/|//[^\r\n]*", "", text)
-    return "".join(text.split())
-
-
-def _passes_relative_key_to_request(content: str) -> bool:
-    for node in _walk_rust(content):
-        if node.type != "call_expression":
-            continue
+def _passes_relative_key_to_request(rust: RustInspection) -> bool:
+    for node in rust.nodes("call_expression"):
         function = node.child_by_field_name("function")
         arguments = node.child_by_field_name("arguments")
         if function is None or arguments is None:
             continue
-        called = _compact_rust_node(function)
+        called = RustInspection.compact_node(function)
         if not (
             called in {"Request::get", "Request::post", "request"} or called.endswith(".request")
         ):
             continue
-        values = _compact_rust_node(arguments)
+        values = RustInspection.compact_node(arguments)
         has_relative_key = "manga.key" in values or "chapter.key" in values
         if has_relative_key and "absolute_url" not in values:
             return True
