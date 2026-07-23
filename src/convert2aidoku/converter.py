@@ -308,6 +308,25 @@ def _capability_gaps(ir: SourceIR, manifest: GenerationManifest) -> list[str]:
             "construct typed SelectFilter/Filter values directly because Filter is not "
             "Deserialize"
         )
+    if Capability.DYNAMIC_FILTERS in ir.capabilities and any(
+        _rust_function_contains(item.content, "get_dynamic_filters", "listing_query")
+        for item in rust_files
+    ):
+        gaps.append(
+            "get_dynamic_filters performs a full manga listing request; use a dedicated "
+            "options-only request (for GraphQL, query only the recovered option field) "
+            "instead of downloading manga entries"
+        )
+    if Capability.JSON_API in ir.capabilities and any(
+        _rust_function_contains(item.content, "listing_query", "description")
+        and _rust_function_contains(item.content, "listing_query", "allCategory")
+        for item in rust_files
+    ):
+        gaps.append(
+            "GraphQL listing requests include detail-only fields and dynamic-filter metadata; "
+            "keep the source page size but omit description from list projections and fetch "
+            "allCategory only in the dedicated dynamic-filter request"
+        )
     if Capability.DYNAMIC_FILTERS in ir.capabilities:
         for filter_id in sorted(
             {
@@ -334,10 +353,68 @@ def _capability_gaps(ir: SourceIR, manifest: GenerationManifest) -> list[str]:
                 gaps.append("source declares settings but generated an empty res/settings.json")
     if Capability.IMAGE_HEADERS in ir.capabilities and "ImageRequestProvider" not in traits:
         gaps.append("source declares image headers but generated no ImageRequestProvider")
+    if (
+        Capability.IMAGE_HEADERS in ir.capabilities
+        and any(
+            _rust_function_contains(item.content, "get_image_request", "context")
+            and _rust_function_contains(item.content, "get_image_request", "referer")
+            for item in rust_files
+        )
+        and "PageContent::url_context" not in rust_content
+    ):
+        gaps.append(
+            "get_image_request reads a Referer from PageContext but generated pages never use "
+            "PageContent::url_context; attach the exact chapter/page Referer to every page URL "
+            "and use the site base URL as the cover-image fallback"
+        )
+    source_uses_cookie_jar = any(
+        marker in input_content
+        for marker in ("cookieJar.loadForRequest", "cookieJar.saveFromResponse")
+    )
+    if source_uses_cookie_jar:
+        settings_content = resource_contents.get("res/settings.json", "")
+        has_cookie_setting = "cookie" in settings_content.lower()
+        has_api_cookie_header = any(
+            _rust_function_has_header(item.content, "post_query", "cookie") for item in rust_files
+        )
+        has_image_cookie_header = any(
+            _rust_function_has_header(item.content, "get_image_request", "cookie")
+            for item in rust_files
+        )
+        if not has_cookie_setting or not has_api_cookie_header or not has_image_cookie_header:
+            gaps.append(
+                "input public requests depend on a Cookie session, but the generated source "
+                "does not expose an optional cookie setting and apply its Cookie header to both "
+                "API and image requests"
+            )
     if Capability.DEEP_LINKS in ir.capabilities and "DeepLinkHandler" not in traits:
         gaps.append("source declares deep links but generated no DeepLinkHandler")
     if Capability.JSON_API in ir.capabilities and "serde" not in dependencies:
         gaps.append("JSON API source generated no pinned serde dependency")
+    update_uses_combined_helper = any(
+        _rust_function_contains(item.content, "get_manga_update", "needs_details")
+        and _rust_function_contains(item.content, "get_manga_update", "needs_chapters")
+        and _rust_function_contains(item.content, "get_manga_update", "manga_query")
+        for item in rust_files
+    )
+    helper_selects_requested_projection = any(
+        _rust_function_contains(item.content, "manga_query", "(true, false)")
+        and _rust_function_contains(item.content, "manga_query", "(false, true)")
+        for item in rust_files
+    )
+    if (
+        Capability.DETAILS in ir.capabilities
+        and Capability.CHAPTERS in ir.capabilities
+        and update_uses_combined_helper
+        and not helper_selects_requested_projection
+        and "comicById" in rust_content
+        and "chaptersByComicId" in rust_content
+    ):
+        gaps.append(
+            "get_manga_update unconditionally fetches a combined details-and-chapters GraphQL "
+            "query; choose details-only, chapters-only, or combined queries so each call fetches "
+            "only the data requested by needs_details and needs_chapters"
+        )
     if (
         ir.source_format == "decompiled_apk"
         and Capability.JSON_API in ir.capabilities
@@ -485,6 +562,18 @@ def _rust_function_contains(content: str, name: str, needle: str) -> bool:
         if identifier is None or identifier.text.decode("utf-8") != name:
             continue
         return needle in node.text.decode("utf-8", errors="replace")
+    return False
+
+
+def _rust_function_has_header(content: str, name: str, header: str) -> bool:
+    pattern = re.compile(rf'\.header\s*\(\s*"{re.escape(header)}"', re.IGNORECASE)
+    for node in _walk_rust(content):
+        if node.type != "function_item":
+            continue
+        identifier = node.child_by_field_name("name")
+        if identifier is None or identifier.text.decode("utf-8") != name:
+            continue
+        return pattern.search(node.text.decode("utf-8", errors="replace")) is not None
     return False
 
 

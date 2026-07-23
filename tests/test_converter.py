@@ -717,6 +717,260 @@ def test_dynamic_filters_cannot_deserialize_aidoku_filter_from_json() -> None:
     assert any("Filter is not Deserialize" in gap for gap in gaps)
 
 
+def test_graphql_dynamic_filters_cannot_repeat_a_full_listing_request() -> None:
+    with resolve_source(str(FIXTURE)) as resolved:
+        ir = analyze_source(resolved).model_copy(
+            update={"capabilities": [Capability.DYNAMIC_FILTERS, Capability.JSON_API]}
+        )
+    manifest = GenerationManifest(
+        source_struct="Simple",
+        implemented_traits=["DynamicFilters"],
+        dependencies=[DependencyRequest(name="serde")],
+        files=[
+            GeneratedFile(
+                path="src/lib.rs",
+                content=(
+                    'fn listing_query(&self) { let query = "query comics { comics { '
+                    'id title description } allCategory { id name } }"; }\n'
+                    "fn get_dynamic_filters(&self) { self.listing_query(); }\n"
+                    "fn get_search_manga_list(&self) { self.listing_query(); }\n"
+                ),
+            )
+        ],
+    )
+
+    gaps = _capability_gaps(ir, manifest)
+
+    assert any("full manga listing" in gap for gap in gaps)
+    assert any("detail-only fields" in gap for gap in gaps)
+
+
+def test_context_dependent_image_headers_require_page_context() -> None:
+    with resolve_source(str(FIXTURE)) as resolved:
+        ir = analyze_source(resolved).model_copy(
+            update={"capabilities": [Capability.IMAGE_HEADERS]}
+        )
+    manifest = GenerationManifest(
+        source_struct="Simple",
+        implemented_traits=["ImageRequestProvider"],
+        files=[
+            GeneratedFile(
+                path="src/lib.rs",
+                content=(
+                    "fn get_page_list(&self) { PageContent::url(image_url); }\n"
+                    "fn get_image_request(&self, context: Option<PageContext>) {\n"
+                    'if let Some(context) = context { context.get("referer"); }\n'
+                    "}\n"
+                ),
+            )
+        ],
+    )
+
+    gaps = _capability_gaps(ir, manifest)
+
+    assert any("PageContent::url_context" in gap for gap in gaps)
+
+
+def test_cookie_jar_input_requires_a_representable_cookie_session() -> None:
+    with resolve_source(str(FIXTURE)) as resolved:
+        ir = analyze_source(resolved).model_copy(
+            update={
+                "capabilities": [Capability.SETTINGS, Capability.IMAGE_HEADERS],
+                "files": [
+                    SourceFile(
+                        path="src/Source.kt",
+                        sha256="0",
+                        content=(
+                            "client.cookieJar.loadForRequest(url).find { it.name == "
+                            '"komiic-access-token" }'
+                        ),
+                    )
+                ],
+            }
+        )
+    manifest = GenerationManifest(
+        source_struct="Simple",
+        implemented_traits=["ImageRequestProvider"],
+        files=[
+            GeneratedFile(path="src/lib.rs", content="fn request() {}"),
+            GeneratedFile(
+                path="res/settings.json",
+                content='[{"type":"group","title":"Source","items":[]}]',
+            ),
+        ],
+    )
+
+    gaps = _capability_gaps(ir, manifest)
+
+    assert any("Cookie session" in gap for gap in gaps)
+
+
+@pytest.mark.parametrize("missing_request", ["api", "image"])
+def test_cookie_session_must_cover_api_and_image_requests(missing_request: str) -> None:
+    with resolve_source(str(FIXTURE)) as resolved:
+        ir = analyze_source(resolved).model_copy(
+            update={
+                "capabilities": [Capability.SETTINGS, Capability.IMAGE_HEADERS],
+                "files": [
+                    SourceFile(
+                        path="src/Source.kt",
+                        sha256="0",
+                        content="client.cookieJar.loadForRequest(url)",
+                    )
+                ],
+            }
+        )
+    api_header = "" if missing_request == "api" else '.header("Cookie", cookie)'
+    image_header = "" if missing_request == "image" else '.header("Cookie", cookie)'
+    manifest = GenerationManifest(
+        source_struct="Simple",
+        implemented_traits=["ImageRequestProvider"],
+        files=[
+            GeneratedFile(
+                path="src/lib.rs",
+                content=(
+                    f"fn post_query(&self) {{ Request::post(url){api_header}; }}\n"
+                    "fn get_image_request(&self) { "
+                    f"Request::get(url){image_header}; }}\n"
+                ),
+            ),
+            GeneratedFile(
+                path="res/settings.json",
+                content=(
+                    '[{"type":"group","title":"Source","items":'
+                    '[{"type":"text","key":"cookie","title":"Cookie"}]}]'
+                ),
+            ),
+        ],
+    )
+
+    gaps = _capability_gaps(ir, manifest)
+
+    assert any("Cookie session" in gap for gap in gaps)
+
+
+def test_optimized_graphql_manifest_has_no_performance_contract_gaps() -> None:
+    with resolve_source(str(FIXTURE)) as resolved:
+        ir = analyze_source(resolved).model_copy(
+            update={
+                "capabilities": [
+                    Capability.DYNAMIC_FILTERS,
+                    Capability.JSON_API,
+                    Capability.SETTINGS,
+                    Capability.IMAGE_HEADERS,
+                    Capability.DETAILS,
+                    Capability.CHAPTERS,
+                ],
+                "files": [
+                    SourceFile(
+                        path="src/Source.kt",
+                        sha256="0",
+                        content="client.cookieJar.loadForRequest(url)",
+                    )
+                ],
+            }
+        )
+    manifest = GenerationManifest(
+        source_struct="Simple",
+        implemented_traits=["DynamicFilters", "ImageRequestProvider"],
+        dependencies=[DependencyRequest(name="serde")],
+        files=[
+            GeneratedFile(
+                path="src/lib.rs",
+                content=(
+                    'fn listing_query(&self) { "query { comics { id title } }"; }\n'
+                    'fn category_query(&self) { "query { allCategory { id name } }"; }\n'
+                    "fn get_dynamic_filters(&self) { self.category_query(); }\n"
+                    "fn get_search_manga_list(&self) { self.listing_query(); }\n"
+                    'fn post_query(&self) { Request::post(url).header("Cookie", cookie); }\n'
+                    "fn get_page_list(&self) { "
+                    "PageContent::url_context(image_url, context); }\n"
+                    "fn get_image_request(&self, context: Option<PageContext>) { "
+                    'context.get("referer"); '
+                    'Request::get(url).header("Cookie", cookie); }\n'
+                    "fn manga_query(&self, needs_details: bool, needs_chapters: bool) {\n"
+                    "match (needs_details, needs_chapters) {\n"
+                    '(true, true) => "comicById chaptersByComicId",\n'
+                    '(true, false) => "comicById",\n'
+                    '(false, true) => "chaptersByComicId",\n'
+                    '_ => "",\n}\n}\n'
+                    "fn get_manga_update(&self, needs_details: bool, needs_chapters: bool) {\n"
+                    "self.manga_query(needs_details, needs_chapters);\n}\n"
+                ),
+            ),
+            GeneratedFile(
+                path="res/settings.json",
+                content=(
+                    '[{"type":"group","title":"Source","items":'
+                    '[{"type":"text","key":"cookie","title":"Cookie"}]}]'
+                ),
+            ),
+        ],
+    )
+
+    gaps = _capability_gaps(ir, manifest)
+
+    performance_markers = (
+        "full manga listing",
+        "detail-only fields",
+        "PageContent::url_context",
+        "Cookie session",
+        "only the data requested",
+    )
+    assert not [gap for gap in gaps if any(marker in gap for marker in performance_markers)]
+
+
+def test_manga_update_query_must_respect_requested_data_flags() -> None:
+    with resolve_source(str(FIXTURE)) as resolved:
+        ir = analyze_source(resolved).model_copy(
+            update={"capabilities": [Capability.DETAILS, Capability.CHAPTERS]}
+        )
+    manifest = GenerationManifest(
+        source_struct="Simple",
+        files=[
+            GeneratedFile(
+                path="src/lib.rs",
+                content=(
+                    'fn manga_query(&self) { let query = "query { comicById { id } '
+                    'chaptersByComicId { id } }"; }\n'
+                    "fn get_manga_update(&self, needs_details: bool, needs_chapters: bool) {\n"
+                    "if !needs_details && !needs_chapters { return; }\n"
+                    "self.manga_query();\n"
+                    "}\n"
+                ),
+            )
+        ],
+    )
+
+    gaps = _capability_gaps(ir, manifest)
+
+    assert any("only the data requested" in gap for gap in gaps)
+
+    conditional = manifest.model_copy(
+        update={
+            "files": [
+                GeneratedFile(
+                    path="src/lib.rs",
+                    content=(
+                        "fn manga_query(&self, needs_details: bool, needs_chapters: bool) {\n"
+                        "match (needs_details, needs_chapters) {\n"
+                        '(true, true) => "comicById chaptersByComicId",\n'
+                        '(true, false) => "comicById",\n'
+                        '(false, true) => "chaptersByComicId",\n'
+                        '_ => "",\n}\n}\n'
+                        "fn get_manga_update(&self, needs_details: bool, needs_chapters: bool) {\n"
+                        "self.manga_query(needs_details, needs_chapters);\n}\n"
+                    ),
+                )
+            ]
+        }
+    )
+
+    resolved_gaps = _capability_gaps(ir, conditional)
+
+    assert not any("only the data requested" in gap for gap in resolved_gaps)
+
+
 def test_dynamic_filter_ids_must_be_read_in_search_mapping() -> None:
     with resolve_source(str(FIXTURE)) as resolved:
         ir = analyze_source(resolved).model_copy(

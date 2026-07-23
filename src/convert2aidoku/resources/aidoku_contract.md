@@ -151,6 +151,15 @@ Mapping rules:
   ..Default::default() }.into()`, and return them in a `Vec<Filter>`. Both `options` and `ids`
   must be `Vec<Cow<'static, str>>`; create their entries with `.into()` rather than collecting
   `String` values.
+  Fetch dynamic options with the narrowest request the input contract permits. For GraphQL, query
+  only the already-recovered option field (for example `allCategory { id name }`); never call a
+  full manga-list helper from `get_dynamic_filters` or download manga entries merely to populate
+  filter labels. Remove the dynamic-option field from normal list/search projections afterward.
+- Keep the input source's page size and pagination semantics. For GraphQL list/search operations,
+  request only fields needed to construct list entries; defer detail-only fields such as a long
+  `description` to the detail query. Reusing one oversized GraphQL fragment for list, detail, and
+  chapter operations is not behavior preservation when narrower projections return the same
+  user-visible result.
 - If the Tachi source declares filters or settings, the corresponding resource must be non-empty
   and preserve every user-visible option; an empty `[]` is an unimplemented capability.
 - Aidoku settings must be top-level `group` objects whose `items` contain the actual settings.
@@ -161,7 +170,16 @@ Mapping rules:
 - Preserve compatibility branches for legacy preference values found in the Tachi source. It is
   acceptable to normalize them while reading the setting when Aidoku has no reason to persist the
   obsolete value back to defaults.
-- Convert image Referer or other required headers into `ImageRequestProvider`.
+- Convert image Referer or other required headers into `ImageRequestProvider`. If a header depends
+  on the originating manga/chapter/page URL, construct page content with
+  `PageContent::url_context(image_url, context)` and store the exact Referer in that context; a
+  provider branch that reads context is incomplete when every page uses `PageContent::url`.
+  Cover images have no page context, so preserve the input's site/base Referer as their fallback.
+- If public requests inspect or refresh an existing cookie-jar session, expose an optional text
+  setting for a user-supplied Cookie value when the pinned Aidoku API cannot inspect the jar.
+  Apply a non-empty value as the `Cookie` header to both API and image requests. This represents
+  the input's existing session behavior; it must not add a login flow, embed credentials, or make
+  authenticated-only features part of a public-only conversion.
 - Apply image URL translations only within their recovered scope. When
   source_ir.image_url_policy.preserve_cover_urls is true, copy API cover URLs to Manga.cover
   unchanged. A recovered chapter resolution pattern such as
@@ -182,6 +200,10 @@ Mapping rules:
   different signature.
 - `ImageRequestProvider` uses
   `fn get_image_request(&self, url: String, context: Option<PageContext>) -> Result<Request>`.
+- Current `Source::get_manga_update` supplies independent `needs_details` and `needs_chapters`
+  flags. For GraphQL sources, provide details-only and chapters-only projections and retain a
+  combined projection when both are true. Do not always download both payloads after checking only
+  that at least one flag is true.
 - The only valid optional trait names are `ListingProvider`, `Home`, `DynamicListings`,
   `DynamicFilters`, `DynamicSettings`, `PageImageProcessor`, `ImageRequestProvider`,
   `PageDescriptionProvider`, `AlternateCoverProvider`, `BaseUrlProvider`, `NotificationHandler`,
