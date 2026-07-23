@@ -32,6 +32,15 @@ def test_accepts_safe_manifest() -> None:
     assert manifest.files[0].path == "src/lib.rs"
 
 
+def test_manifest_rejects_unknown_optional_trait() -> None:
+    with pytest.raises(ValidationError, match="ListingProvider"):
+        GenerationManifest(
+            source_struct="Source",
+            implemented_traits=["MangaProvider"],
+            files=[GeneratedFile(path="src/lib.rs", content="#![no_std]")],
+        )
+
+
 def test_filter_object_options_are_normalized_to_parallel_arrays() -> None:
     generated = GeneratedFile(
         path="res/filters.json",

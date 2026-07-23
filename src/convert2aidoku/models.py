@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from enum import StrEnum
 from pathlib import PurePosixPath
 from typing import Any, Literal
@@ -401,31 +402,6 @@ class GenerationManifest(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     unsupported_features: list[str] = Field(default_factory=list)
 
-    @field_validator("implemented_traits")
-    @classmethod
-    def optional_traits_are_known(cls, values: list[str]) -> list[str]:
-        allowed = {
-            "ListingProvider",
-            "Home",
-            "DynamicListings",
-            "DynamicFilters",
-            "DynamicSettings",
-            "PageImageProcessor",
-            "ImageRequestProvider",
-            "PageDescriptionProvider",
-            "AlternateCoverProvider",
-            "BaseUrlProvider",
-            "NotificationHandler",
-            "DeepLinkHandler",
-            "BasicLoginHandler",
-            "WebLoginHandler",
-            "MigrationHandler",
-        }
-        invalid = sorted(set(values) - allowed)
-        if invalid:
-            raise ValueError("unknown or non-registerable optional traits: " + ", ".join(invalid))
-        return values
-
     @field_validator("files")
     @classmethod
     def requires_lib_rs_and_unique_paths(cls, files: list[GeneratedFile]) -> list[GeneratedFile]:
@@ -443,6 +419,203 @@ class GenerationManifest(BaseModel):
                 f"generated file contents exceed the {MAX_GENERATED_TOTAL_CHARS:,} character limit"
             )
         return self
+
+
+class GeneratedResources:
+    """Parsed filters/settings with deterministic transformations behind one interface."""
+
+    FILTERS = "res/filters.json"
+    SETTINGS = "res/settings.json"
+
+    def __init__(self, manifest: GenerationManifest):
+        self._manifest = manifest
+        self._data: dict[str, list[Any]] = {}
+        for generated in manifest.files:
+            if generated.path not in {self.FILTERS, self.SETTINGS}:
+                continue
+            data = json.loads(generated.content)
+            if isinstance(data, list):
+                self._data[generated.path] = data
+
+    def has(self, path: str) -> bool:
+        return path in self._data
+
+    def is_empty(self, path: str) -> bool:
+        return not self._data.get(path)
+
+    def contains_text(self, path: str, needle: str) -> bool:
+        lowered = needle.lower()
+
+        def contains(value: Any) -> bool:
+            if isinstance(value, str):
+                return lowered in value.lower()
+            if isinstance(value, list):
+                return any(contains(item) for item in value)
+            if isinstance(value, dict):
+                return any(contains(key) or contains(item) for key, item in value.items())
+            return False
+
+        return contains(self._data.get(path, []))
+
+    def filter_contract_gaps(
+        self,
+        specs: list[SourceFilterSpec],
+        *,
+        has_sort_mapping: bool,
+    ) -> list[str]:
+        raw_filters = self._data.get(self.FILTERS)
+        if not specs or raw_filters is None:
+            return []
+        filters = {
+            item.get("id"): item
+            for item in raw_filters
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        }
+        gaps: list[str] = []
+        for spec in specs:
+            item = filters.get(spec.id)
+            if item is None:
+                gaps.append(
+                    f"recovered Tachi filter {spec.source_class} is missing Aidoku id {spec.id!r}"
+                )
+                continue
+            if item.get("type") != spec.kind:
+                gaps.append(
+                    f"filter {spec.id!r} has type {item.get('type')!r}; "
+                    f"recovered Tachi {spec.source_class} requires {spec.kind!r}"
+                )
+            expected_titles = [option.title for option in spec.options]
+            expected_values = [option.value for option in spec.options]
+            if item.get("options") != expected_titles:
+                gaps.append(
+                    f"filter {spec.id!r} does not preserve recovered display options "
+                    f"{expected_titles!r}"
+                )
+            if spec.kind == "select":
+                if item.get("ids") != expected_values:
+                    gaps.append(f"filter {spec.id!r} site values must be {expected_values!r}")
+                expected_default: Any = expected_values[spec.default_index]
+                if item.get("default") != expected_default:
+                    gaps.append(
+                        f"filter {spec.id!r} default must be recovered site value "
+                        f"{expected_default!r}"
+                    )
+            else:
+                expected_default = {
+                    "index": spec.default_index,
+                    "ascending": bool(spec.default_ascending),
+                }
+                if item.get("default") != expected_default:
+                    gaps.append(f"filter {spec.id!r} default must be {expected_default!r}")
+                if not has_sort_mapping:
+                    gaps.append(
+                        f"filter {spec.id!r} requires a FilterValue::Sort index/ascending mapping"
+                    )
+        return gaps
+
+    def with_defaults(
+        self,
+        *,
+        filter_specs: list[SourceFilterSpec] | None = None,
+        setting_overrides: dict[str, str] | None = None,
+    ) -> GenerationManifest:
+        specs = {spec.id: spec for spec in filter_specs or []}
+        overrides = setting_overrides or {}
+        updated_files: list[GeneratedFile] = []
+        changed = False
+        for generated in self._manifest.files:
+            data = deepcopy(self._data.get(generated.path))
+            if generated.path == self.FILTERS and data is not None and specs:
+                for item in data:
+                    if not isinstance(item, dict):
+                        continue
+                    spec = specs.get(item.get("id"))
+                    if spec is None:
+                        continue
+                    if spec.kind == "select":
+                        value: Any = spec.options[spec.default_index].value
+                    else:
+                        value = {
+                            "index": spec.default_index,
+                            "ascending": bool(spec.default_ascending),
+                        }
+                        item.setdefault("canAscend", True)
+                    item["default"] = value
+            elif generated.path == self.SETTINGS and data is not None and overrides:
+                for group in data:
+                    if not isinstance(group, dict) or not isinstance(group.get("items"), list):
+                        continue
+                    for item in group["items"]:
+                        if not isinstance(item, dict):
+                            continue
+                        preferred = overrides.get(item.get("key"))
+                        values = item.get("values")
+                        if (
+                            preferred is not None
+                            and isinstance(values, list)
+                            and preferred in values
+                        ):
+                            item["default"] = preferred
+            if data is None:
+                updated_files.append(generated)
+                continue
+            content = json.dumps(data, ensure_ascii=False, indent="\t") + "\n"
+            if content != generated.content:
+                changed = True
+                updated_files.append(generated.model_copy(update={"content": content}))
+            else:
+                updated_files.append(generated)
+        if not changed:
+            return self._manifest
+        return self._manifest.model_copy(update={"files": updated_files})
+
+    def static_filter_cases(self) -> list[dict[str, Any]]:
+        filters = self._data.get(self.FILTERS)
+        if filters is None:
+            return []
+        cases: list[dict[str, Any]] = []
+        for raw_filter in filters:
+            if not isinstance(raw_filter, dict):
+                continue
+            filter_type = raw_filter.get("type")
+            filter_id = raw_filter.get("id") or raw_filter.get("title") or filter_type
+            if not isinstance(filter_id, str):
+                continue
+            if filter_type == "select":
+                options = raw_filter.get("options")
+                ids = raw_filter.get("ids", options)
+                if not isinstance(ids, list) or not all(isinstance(value, str) for value in ids):
+                    continue
+                default = raw_filter.get("default")
+                if isinstance(default, str) and default in ids:
+                    value = next(
+                        (candidate for candidate in ids if candidate and candidate != default),
+                        default,
+                    )
+                else:
+                    value = next(
+                        (candidate for candidate in ids if candidate),
+                        ids[0] if ids else None,
+                    )
+                if value is not None:
+                    cases.append({"kind": "select", "id": filter_id, "value": value})
+            elif filter_type == "sort":
+                options = raw_filter.get("options")
+                if not isinstance(options, list) or not options:
+                    continue
+                default = raw_filter.get("default")
+                index = default.get("index", 0) if isinstance(default, dict) else 0
+                ascending = default.get("ascending", False) if isinstance(default, dict) else False
+                if isinstance(index, int) and isinstance(ascending, bool):
+                    cases.append(
+                        {
+                            "kind": "sort",
+                            "id": filter_id,
+                            "index": max(0, min(index, len(options) - 1)),
+                            "ascending": ascending,
+                        }
+                    )
+        return cases
 
 
 class RepairEdit(BaseModel):

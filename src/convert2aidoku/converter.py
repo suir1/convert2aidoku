@@ -22,6 +22,7 @@ from .models import (
     ConversionCheckpoint,
     ConversionReport,
     GeneratedFile,
+    GeneratedResources,
     GenerationManifest,
     RepairPatch,
     SourceIR,
@@ -255,69 +256,8 @@ def _needs_toolchain_installation(validation: ValidationResult) -> bool:
     return any(stage.kind.value == "toolchain" for stage in validation.stages)
 
 
-def _recovered_filter_gaps(
-    ir: SourceIR,
-    *,
-    filters_content: str | None,
-    rust_content: str,
-) -> list[str]:
-    if not ir.filter_specs or filters_content is None:
-        return []
-    try:
-        raw_filters = json.loads(filters_content)
-    except json.JSONDecodeError:
-        return []
-    if not isinstance(raw_filters, list):
-        return []
-    filters = {
-        item.get("id"): item
-        for item in raw_filters
-        if isinstance(item, dict) and isinstance(item.get("id"), str)
-    }
-    gaps: list[str] = []
-    for spec in ir.filter_specs:
-        item = filters.get(spec.id)
-        if item is None:
-            gaps.append(
-                f"recovered Tachi filter {spec.source_class} is missing Aidoku id {spec.id!r}"
-            )
-            continue
-        if item.get("type") != spec.kind:
-            gaps.append(
-                f"filter {spec.id!r} has type {item.get('type')!r}; "
-                f"recovered Tachi {spec.source_class} requires {spec.kind!r}"
-            )
-        expected_titles = [option.title for option in spec.options]
-        expected_values = [option.value for option in spec.options]
-        if item.get("options") != expected_titles:
-            gaps.append(
-                f"filter {spec.id!r} does not preserve recovered display options "
-                f"{expected_titles!r}"
-            )
-        if spec.kind == "select":
-            if item.get("ids") != expected_values:
-                gaps.append(f"filter {spec.id!r} site values must be {expected_values!r}")
-            expected_default = expected_values[spec.default_index]
-            if item.get("default") != expected_default:
-                gaps.append(
-                    f"filter {spec.id!r} default must be recovered site value {expected_default!r}"
-                )
-        else:
-            expected_default = {
-                "index": spec.default_index,
-                "ascending": bool(spec.default_ascending),
-            }
-            if item.get("default") != expected_default:
-                gaps.append(f"filter {spec.id!r} default must be {expected_default!r}")
-            if "FilterValue::Sort" not in rust_content:
-                gaps.append(
-                    f"filter {spec.id!r} requires a FilterValue::Sort index/ascending mapping"
-                )
-    return gaps
-
-
 def _capability_gaps(ir: SourceIR, manifest: GenerationManifest) -> list[str]:
-    resource_contents = {item.path: item.content for item in manifest.files}
+    resources = GeneratedResources(manifest)
     traits = set(manifest.implemented_traits)
     dependencies = {item.name for item in manifest.dependencies}
     rust_files = [item for item in manifest.files if item.path.endswith(".rs")]
@@ -329,21 +269,14 @@ def _capability_gaps(ir: SourceIR, manifest: GenerationManifest) -> list[str]:
     ):
         gaps.append("source declares popular/latest listings but generated no ListingProvider")
     if Capability.FILTERS in ir.capabilities:
-        filters = resource_contents.get("res/filters.json")
-        if filters is None:
+        if not resources.has(GeneratedResources.FILTERS):
             gaps.append("source declares filters but generated no res/filters.json")
-        else:
-            try:
-                filters_empty = not json.loads(filters)
-            except json.JSONDecodeError:
-                filters_empty = False
-            if filters_empty:
-                gaps.append("source declares filters but generated an empty res/filters.json")
+        elif resources.is_empty(GeneratedResources.FILTERS):
+            gaps.append("source declares filters but generated an empty res/filters.json")
         gaps.extend(
-            _recovered_filter_gaps(
-                ir,
-                filters_content=filters,
-                rust_content=rust_content,
+            resources.filter_contract_gaps(
+                ir.filter_specs,
+                has_sort_mapping="FilterValue::Sort" in rust_content,
             )
         )
     if Capability.DYNAMIC_FILTERS in ir.capabilities and "DynamicFilters" not in traits:
@@ -390,16 +323,10 @@ def _capability_gaps(ir: SourceIR, manifest: GenerationManifest) -> list[str]:
                 "in the list/search request"
             )
     if Capability.SETTINGS in ir.capabilities:
-        settings = resource_contents.get("res/settings.json")
-        if settings is None:
+        if not resources.has(GeneratedResources.SETTINGS):
             gaps.append("source declares settings but generated no res/settings.json")
-        else:
-            try:
-                settings_empty = not json.loads(settings)
-            except json.JSONDecodeError:
-                settings_empty = False
-            if settings_empty:
-                gaps.append("source declares settings but generated an empty res/settings.json")
+        elif resources.is_empty(GeneratedResources.SETTINGS):
+            gaps.append("source declares settings but generated an empty res/settings.json")
     if Capability.IMAGE_HEADERS in ir.capabilities and "ImageRequestProvider" not in traits:
         gaps.append("source declares image headers but generated no ImageRequestProvider")
     if (
@@ -421,8 +348,7 @@ def _capability_gaps(ir: SourceIR, manifest: GenerationManifest) -> list[str]:
         for marker in ("cookieJar.loadForRequest", "cookieJar.saveFromResponse")
     )
     if source_uses_cookie_jar:
-        settings_content = resource_contents.get("res/settings.json", "")
-        has_cookie_setting = "cookie" in settings_content.lower()
+        has_cookie_setting = resources.contains_text(GeneratedResources.SETTINGS, "cookie")
         has_api_cookie_header = any(
             _rust_function_has_header(item.content, "post_query", "cookie") for item in rust_files
         )
@@ -545,8 +471,7 @@ def _capability_gaps(ir: SourceIR, manifest: GenerationManifest) -> list[str]:
                 "call aidoku::imports::std::current_date() and multiply its seconds by 1000"
             )
     if Capability.DYNAMIC_BASE_URLS in ir.capabilities:
-        settings = resource_contents.get("res/settings.json")
-        if settings is None:
+        if not resources.has(GeneratedResources.SETTINGS):
             gaps.append("dynamic base URL source generated no res/settings.json")
         if "defaults_get" not in rust_content:
             gaps.append("dynamic base URL source generated no validated defaults_get resolver")
@@ -998,94 +923,15 @@ def _effective_manifest(
         if warning not in checkpoint.warnings:
             checkpoint.warnings.append(warning)
         effective = manifest.model_copy(update={"files": manifest.files + inherited})
-    effective = _with_recovered_filter_defaults(ir, effective)
-    return _with_live_validated_setting_defaults(ir, effective)
-
-
-def _with_recovered_filter_defaults(
-    ir: SourceIR,
-    manifest: GenerationManifest,
-) -> GenerationManifest:
-    if not ir.filter_specs:
-        return manifest
-    specs = {spec.id: spec for spec in ir.filter_specs}
-    updated_files = []
-    changed = False
-    for generated in manifest.files:
-        if generated.path != "res/filters.json":
-            updated_files.append(generated)
-            continue
-        try:
-            filters = json.loads(generated.content)
-        except json.JSONDecodeError:
-            updated_files.append(generated)
-            continue
-        if not isinstance(filters, list):
-            updated_files.append(generated)
-            continue
-        for item in filters:
-            if not isinstance(item, dict):
-                continue
-            spec = specs.get(item.get("id"))
-            if spec is None:
-                continue
-            if spec.kind == "select":
-                value = spec.options[spec.default_index].value
-            else:
-                value = {
-                    "index": spec.default_index,
-                    "ascending": bool(spec.default_ascending),
-                }
-                item.setdefault("canAscend", True)
-            if item.get("default") != value:
-                item["default"] = value
-                changed = True
-        content = json.dumps(filters, ensure_ascii=False, indent="\t") + "\n"
-        updated_files.append(generated.model_copy(update={"content": content}))
-    if not changed:
-        return manifest
-    return manifest.model_copy(update={"files": updated_files})
-
-
-def _with_live_validated_setting_defaults(
-    ir: SourceIR,
-    manifest: GenerationManifest,
-) -> GenerationManifest:
-    overrides = _LIVE_VALIDATED_SETTING_DEFAULTS.get(ir.metadata.source_id)
-    if not overrides or Capability.DYNAMIC_BASE_URLS not in ir.capabilities:
-        return manifest
-    updated_files = []
-    changed = False
-    for generated in manifest.files:
-        if generated.path != "res/settings.json":
-            updated_files.append(generated)
-            continue
-        try:
-            settings = json.loads(generated.content)
-        except json.JSONDecodeError:
-            updated_files.append(generated)
-            continue
-        if not isinstance(settings, list):
-            updated_files.append(generated)
-            continue
-        for group in settings:
-            if not isinstance(group, dict) or not isinstance(group.get("items"), list):
-                continue
-            for item in group["items"]:
-                if not isinstance(item, dict):
-                    continue
-                preferred = overrides.get(item.get("key"))
-                values = item.get("values")
-                if preferred is None or not isinstance(values, list) or preferred not in values:
-                    continue
-                if item.get("default") != preferred:
-                    item["default"] = preferred
-                    changed = True
-        content = json.dumps(settings, ensure_ascii=False, indent="\t") + "\n"
-        updated_files.append(generated.model_copy(update={"content": content}))
-    if not changed:
-        return manifest
-    return manifest.model_copy(update={"files": updated_files})
+    setting_overrides = (
+        _LIVE_VALIDATED_SETTING_DEFAULTS.get(ir.metadata.source_id)
+        if Capability.DYNAMIC_BASE_URLS in ir.capabilities
+        else None
+    )
+    return GeneratedResources(effective).with_defaults(
+        filter_specs=ir.filter_specs,
+        setting_overrides=setting_overrides,
+    )
 
 
 def _restore_installed_workspace(output: Path, workspace: Path) -> None:

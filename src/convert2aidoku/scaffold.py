@@ -18,7 +18,13 @@ from .constants import (
 from .errors import SecurityError
 from .icons import create_aidoku_icon
 from .ingest import ResolvedSource, copy_input_license, find_icon
-from .models import Capability, GenerationManifest, SourceIR, validate_generated_path
+from .models import (
+    Capability,
+    GeneratedResources,
+    GenerationManifest,
+    SourceIR,
+    validate_generated_path,
+)
 
 _FORBIDDEN_GENERATED_TOKENS = (
     "unsafe",
@@ -255,64 +261,6 @@ def _source_json(ir: SourceIR) -> dict[str, Any]:
     }
 
 
-def _static_filter_cases(manifest: GenerationManifest) -> list[dict[str, Any]]:
-    resource = next(
-        (item for item in manifest.files if item.path == "res/filters.json"),
-        None,
-    )
-    if resource is None:
-        return []
-    try:
-        filters = json.loads(resource.content)
-    except json.JSONDecodeError:
-        return []
-    if not isinstance(filters, list):
-        return []
-    cases: list[dict[str, Any]] = []
-    for raw_filter in filters:
-        if not isinstance(raw_filter, dict):
-            continue
-        filter_type = raw_filter.get("type")
-        filter_id = raw_filter.get("id") or raw_filter.get("title") or filter_type
-        if not isinstance(filter_id, str):
-            continue
-        if filter_type == "select":
-            options = raw_filter.get("options")
-            ids = raw_filter.get("ids", options)
-            if not isinstance(ids, list) or not all(isinstance(value, str) for value in ids):
-                continue
-            default = raw_filter.get("default")
-            if isinstance(default, str) and default in ids:
-                value = next(
-                    (candidate for candidate in ids if candidate and candidate != default),
-                    default,
-                )
-            else:
-                value = next(
-                    (candidate for candidate in ids if candidate),
-                    ids[0] if ids else None,
-                )
-            if value is not None:
-                cases.append({"kind": "select", "id": filter_id, "value": value})
-        elif filter_type == "sort":
-            options = raw_filter.get("options")
-            if not isinstance(options, list) or not options:
-                continue
-            default = raw_filter.get("default")
-            index = default.get("index", 0) if isinstance(default, dict) else 0
-            ascending = default.get("ascending", False) if isinstance(default, dict) else False
-            if isinstance(index, int) and isinstance(ascending, bool):
-                cases.append(
-                    {
-                        "kind": "sort",
-                        "id": filter_id,
-                        "index": max(0, min(index, len(options) - 1)),
-                        "ascending": ascending,
-                    }
-                )
-    return cases
-
-
 def _update_min_app_version(destination: Path, manifest: GenerationManifest) -> None:
     """Keep tool-owned metadata compatible with host imports used by generated Rust."""
     rust = "\n".join(item.content for item in manifest.files if item.path.endswith(".rs"))
@@ -433,22 +381,10 @@ def apply_generation_manifest(
             popular_listing=Capability.POPULAR in ir.capabilities,
             latest_listing=Capability.LATEST in ir.capabilities,
             query_expression=(f"Some({json.dumps(query)}.into())" if query else "None"),
-            static_filter_cases=_static_filter_cases(manifest),
+            static_filter_cases=GeneratedResources(manifest).static_filter_cases(),
         )
     )
     (destination / "src" / "generated_smoke.rs").write_text(smoke, encoding="utf-8")
-
-    for optional_json in ("filters.json", "settings.json"):
-        path = destination / "res" / optional_json
-        if path.exists():
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError as exc:
-                raise SecurityError(f"generated {optional_json} is not valid JSON: {exc}") from exc
-            path.write_text(
-                json.dumps(data, ensure_ascii=False, indent="\t") + "\n",
-                encoding="utf-8",
-            )
     return sorted(generated_paths + ["src/generated_smoke.rs"])
 
 

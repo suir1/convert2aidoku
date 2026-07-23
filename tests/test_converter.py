@@ -14,8 +14,6 @@ from convert2aidoku.converter import (
     _diagnostic_file_excerpts,
     _repair_diagnostics,
     _should_repair,
-    _with_live_validated_setting_defaults,
-    _with_recovered_filter_defaults,
     convert_source,
     validate_existing,
 )
@@ -28,6 +26,7 @@ from convert2aidoku.models import (
     ConversionStatus,
     DependencyRequest,
     GeneratedFile,
+    GeneratedResources,
     GenerationManifest,
     ImageUrlPolicy,
     RepairPatch,
@@ -651,10 +650,14 @@ def test_recovered_filter_defaults_are_injected_deterministically() -> None:
         ],
     )
 
-    effective = _with_recovered_filter_defaults(ir, manifest)
+    effective = GeneratedResources(manifest).with_defaults(filter_specs=ir.filter_specs)
     filters_file = next(item for item in effective.files if item.path == "res/filters.json")
     filters = json.loads(filters_file.content)
+    original_filters = json.loads(
+        next(item.content for item in manifest.files if item.path == "res/filters.json")
+    )
 
+    assert all("default" not in item for item in original_filters)
     assert filters[0]["default"] == "male"
     assert filters[1]["default"] == {"index": 1, "ascending": True}
     assert filters[1]["canAscend"] is True
@@ -1450,13 +1453,12 @@ def test_live_validated_setting_default_stays_inside_generated_allowlist() -> No
             ],
         )
 
-    allowed = _with_live_validated_setting_defaults(
-        ir,
-        manifest(["api.mangacopy.com", "mapi.copy20.com"]),
+    overrides = {"v2.pref.api_domain": "mapi.copy20.com"}
+    allowed = GeneratedResources(manifest(["api.mangacopy.com", "mapi.copy20.com"])).with_defaults(
+        setting_overrides=overrides
     )
-    rejected = _with_live_validated_setting_defaults(
-        ir,
-        manifest(["api.mangacopy.com"]),
+    rejected = GeneratedResources(manifest(["api.mangacopy.com"])).with_defaults(
+        setting_overrides=overrides
     )
 
     allowed_settings = json.loads(next(x.content for x in allowed.files if x.path.endswith("json")))

@@ -1,0 +1,55 @@
+# Source Conversion
+
+This context describes how convert2aidoku turns one Tachi input into an auditable Aidoku package.
+
+## Language
+
+**Input Source**:
+A standalone Tachi/Mihon module or decompiled public-reading APK supplied to a conversion.
+_Avoid_: Source
+
+**SourceIR**:
+The deterministic, provider-independent description recovered from an **Input Source**.
+_Avoid_: Parsed source, analysis result
+
+**Generation Manifest**:
+One AI round's complete declaration of controlled Rust files, **Generated Resources**, traits, dependencies, and warnings.
+_Avoid_: AI output, generated files
+
+**Generated Resources**:
+The parsed and normalized Aidoku `filters.json` and `settings.json` owned by a **Generation Manifest**.
+_Avoid_: Resource strings, JSON blobs
+
+**Checkpoint**:
+The resumable record of conversion phase, AI rounds, current manifest, diagnostics, and validation state.
+_Avoid_: Cache, session file
+
+**Generated Source**:
+The staged or installed Aidoku project materialized from an effective **Generation Manifest**.
+_Avoid_: Source
+
+**Validation Result**:
+The stage-by-stage build, package, contract, and live-test evidence for a **Generated Source**.
+_Avoid_: Test result
+
+**Conversion Report**:
+The user-facing status and provenance summary produced from a **Checkpoint** and **Validation Result**.
+_Avoid_: Log
+
+## Relationships
+
+- One **Input Source** produces one **SourceIR** per conversion.
+- One **Checkpoint** records one or more **Generation Manifests** and identifies exactly one current manifest.
+- One **Generation Manifest** owns zero or one filter resource and zero or one settings resource as **Generated Resources**.
+- One effective **Generation Manifest** materializes one **Generated Source**.
+- One **Validation Result** evaluates one materialized **Generated Source**.
+- One **Conversion Report** summarizes one conversion attempt without storing provider credentials.
+
+## Example dialogue
+
+> **Developer:** "Should the recovered filter default be written back into the raw **Generation Manifest**?"
+> **Domain expert:** "No. Preserve the raw manifest for audit, apply the default through **Generated Resources**, and materialize the effective manifest into the **Generated Source**."
+
+## Flagged ambiguities
+
+- "source" previously meant both the Tachi input and Aidoku output; use **Input Source** and **Generated Source** respectively.
