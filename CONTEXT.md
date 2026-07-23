@@ -16,6 +16,10 @@ _Avoid_: Parsed source, analysis result
 One AI round's complete declaration of controlled Rust files, **Generated Resources**, traits, dependencies, and warnings.
 _Avoid_: AI output, generated files
 
+**Generation Manifest Contract**:
+The structured diagnostics, targeted-repair scope, and user-readable rendering produced by evaluating one **Generation Manifest** against its **SourceIR**.
+_Avoid_: Capability gap strings, repair keywords
+
 **Generated Resources**:
 The parsed and normalized Aidoku `filters.json` and `settings.json` owned by a **Generation Manifest**.
 _Avoid_: Resource strings, JSON blobs
@@ -62,6 +66,7 @@ _Avoid_: Log
 - One **Checkpoint** records one or more **Generation Manifests** and identifies exactly one current manifest.
 - One **Generation Manifest** owns zero or one filter resource and zero or one settings resource as **Generated Resources**.
 - One **Generation Manifest** yields one **Rust Inspection** of its controlled Rust files during contract evaluation.
+- One **Generation Manifest Contract** evaluates one **Generation Manifest** against one **SourceIR** and may expose a targeted repair only when every diagnostic has a supported repair kind and a relevant Rust excerpt.
 - Each AI round is produced by one successful **Typed AI Exchange**.
 - Each **Conversion Round** evaluates one effective **Generation Manifest** and records its generated files, contract gaps, and **Validation Result** in the **Checkpoint**.
 - Each **Test Scenario** creates new objects and directories so one test cannot mutate another test's defaults.

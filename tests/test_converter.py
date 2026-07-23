@@ -8,8 +8,6 @@ from convert2aidoku.analyzer import analyze_source
 from convert2aidoku.config import AISettings
 from convert2aidoku.converter import (
     _apply_repair_patch,
-    _capability_gaps,
-    _contract_gap_file_excerpts,
     _diagnostic_file_excerpts,
     _repair_diagnostics,
     _should_repair,
@@ -18,6 +16,11 @@ from convert2aidoku.converter import (
 )
 from convert2aidoku.errors import AIProviderError
 from convert2aidoku.ingest import resolve_source
+from convert2aidoku.manifest_contract import (
+    ContractDiagnostic,
+    ContractEvaluation,
+    evaluate_manifest_contract,
+)
 from convert2aidoku.models import (
     Capability,
     ChapterPageRoute,
@@ -41,6 +44,10 @@ from tests.scenarios import conversion_settings, scaffold_project
 
 FIXTURE = Path(__file__).parent / "fixtures" / "simple"
 ENCRYPTED_API_FIXTURE = Path(__file__).parent / "fixtures" / "encrypted_api"
+
+
+def _contract_messages(ir, manifest) -> list[str]:
+    return evaluate_manifest_contract(ir, manifest).messages
 
 
 RUST_SOURCE = """#![no_std]
@@ -223,6 +230,51 @@ class PatchFallbackClient(FakeClient):
         )
 
 
+class ContractPatchFallbackClient(PatchFallbackClient):
+    def generate(self, _ir: object) -> AIResult:
+        result = FakeClient.generate(self, _ir)
+        files = [
+            item.model_copy(
+                update={
+                    "content": (
+                        item.content
+                        + "\nfn fetch(url: String) -> Result<Response> {\n"
+                        + "Request::get(url)?.send()\n}\n"
+                    )
+                }
+            )
+            if item.path == "src/lib.rs"
+            else item
+            for item in result.value.files
+        ]
+        return result.with_value(result.value.model_copy(update={"files": files}))
+
+    def repair_patch(
+        self,
+        _ir: object,
+        *,
+        current_file_excerpts: object,
+        diagnostics: str,
+        scope: str = "compiler",
+    ) -> AIResult:
+        type(self).patch_calls += 1
+        assert scope == "contract"
+        assert "standard Kotlin HttpSource" in diagnostics
+        assert current_file_excerpts
+        raise AIProviderError("synthetic invalid contract patch")
+
+    def repair(
+        self,
+        _ir: object,
+        *,
+        current_files: object,
+        diagnostics: str,
+        manifest_history: object | None = None,
+    ) -> AIResult:
+        type(self).full_repair_calls += 1
+        return FakeClient.generate(self, _ir)
+
+
 def test_conversion_orchestrates_atomic_output(
     tmp_path: Path,
     monkeypatch,
@@ -377,6 +429,40 @@ def test_targeted_patch_failure_falls_back_to_full_repair(
     assert checkpoint.current_manifest == "manifests/round-02.json"
 
 
+def test_contract_patch_failure_keeps_warning_and_round_order(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    ContractPatchFallbackClient.patch_calls = 0
+    ContractPatchFallbackClient.full_repair_calls = 0
+    monkeypatch.setattr(
+        "convert2aidoku.converter.OpenAICompatibleClient",
+        ContractPatchFallbackClient,
+    )
+    monkeypatch.setattr(
+        "convert2aidoku.converter.validate_project",
+        lambda *_args, **_kwargs: ValidationResult(
+            build_ok=True,
+            package_ok=True,
+            live_ok=True,
+        ),
+    )
+    settings = conversion_settings(max_repair_rounds=1)
+
+    outcome = convert_source(
+        str(FIXTURE),
+        output=tmp_path / "generated" / "en.simple",
+        settings=settings,
+        live=True,
+    )
+
+    assert outcome.report.status is ConversionStatus.VERIFIED
+    assert ContractPatchFallbackClient.patch_calls == 1
+    assert ContractPatchFallbackClient.full_repair_calls == 1
+    assert [round_.purpose for round_ in outcome.report.ai_rounds] == ["generate", "repair"]
+    assert any("contract patch fallback" in warning for warning in outcome.report.warnings)
+
+
 def test_forced_failed_conversion_preserves_existing_output(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("convert2aidoku.converter.OpenAICompatibleClient", FakeClient)
     monkeypatch.setattr(
@@ -409,8 +495,10 @@ def test_contract_incomplete_build_stays_in_resumable_workspace(
         ),
     )
     monkeypatch.setattr(
-        "convert2aidoku.converter._capability_gaps",
-        lambda *_args, **_kwargs: ["synthetic missing capability"],
+        "convert2aidoku.converter.evaluate_manifest_contract",
+        lambda *_args, **_kwargs: ContractEvaluation(
+            (ContractDiagnostic("synthetic missing capability"),)
+        ),
     )
     settings = conversion_settings(max_repair_rounds=0)
     output = tmp_path / "generated" / "en.simple"
@@ -490,7 +578,7 @@ def test_relative_key_requests_are_contract_gaps() -> None:
         ],
     )
 
-    gaps = _capability_gaps(ir, manifest)
+    gaps = _contract_messages(ir, manifest)
 
     assert any("absolute_url helper" in gap for gap in gaps)
     assert any("passes Manga.key" in gap for gap in gaps)
@@ -528,7 +616,7 @@ def test_chapter_page_route_replacement_is_a_contract_gap() -> None:
         ],
     )
 
-    gaps = _capability_gaps(ir, manifest)
+    gaps = _contract_messages(ir, manifest)
 
     assert any("'/chapter/' -> '/chapter2/'" in gap for gap in gaps)
 
@@ -558,7 +646,7 @@ def test_cover_urls_and_chapter_resolution_scope_are_contract_gaps() -> None:
         ],
     )
 
-    gaps = _capability_gaps(ir, manifest)
+    gaps = _contract_messages(ir, manifest)
 
     assert any("cover URL" in gap for gap in gaps)
     assert any("chapter image resolution" in gap for gap in gaps)
@@ -617,7 +705,7 @@ def test_recovered_filter_contract_rejects_wrong_types_values_and_defaults() -> 
         ],
     )
 
-    gaps = _capability_gaps(ir, manifest)
+    gaps = _contract_messages(ir, manifest)
 
     assert any("audience" in gap and "site values" in gap for gap in gaps)
     assert any("audience" in gap and "default" in gap for gap in gaps)
@@ -655,7 +743,7 @@ def test_detail_api_response_envelope_is_a_contract_gap() -> None:
         ],
     )
 
-    gaps = _capability_gaps(ir, manifest)
+    gaps = _contract_messages(ir, manifest)
 
     assert any("ApiResponse<ComicDetailResult>" in gap for gap in gaps)
     assert any("response.results" in gap for gap in gaps)
@@ -732,7 +820,7 @@ def test_empty_declared_resources_are_contract_gaps() -> None:
         ],
     )
 
-    gaps = _capability_gaps(ir, manifest)
+    gaps = _contract_messages(ir, manifest)
 
     assert "source declares filters but generated an empty res/filters.json" in gaps
     assert "source declares settings but generated an empty res/settings.json" in gaps
@@ -748,7 +836,7 @@ def test_declared_dynamic_filters_and_deep_links_require_providers() -> None:
         files=[GeneratedFile(path="src/lib.rs", content=RUST_SOURCE)],
     )
 
-    gaps = _capability_gaps(ir, manifest)
+    gaps = _contract_messages(ir, manifest)
 
     assert "source fetches dynamic filters but generated no DynamicFilters provider" in gaps
     assert "source declares deep links but generated no DeepLinkHandler" in gaps
@@ -773,7 +861,7 @@ def test_dynamic_filters_cannot_deserialize_aidoku_filter_from_json() -> None:
         ],
     )
 
-    gaps = _capability_gaps(ir, manifest)
+    gaps = _contract_messages(ir, manifest)
 
     assert any("Filter is not Deserialize" in gap for gap in gaps)
 
@@ -800,7 +888,7 @@ def test_graphql_dynamic_filters_cannot_repeat_a_full_listing_request() -> None:
         ],
     )
 
-    gaps = _capability_gaps(ir, manifest)
+    gaps = _contract_messages(ir, manifest)
 
     assert any("full manga listing" in gap for gap in gaps)
     assert any("detail-only fields" in gap for gap in gaps)
@@ -827,7 +915,7 @@ def test_context_dependent_image_headers_require_page_context() -> None:
         ],
     )
 
-    gaps = _capability_gaps(ir, manifest)
+    gaps = _contract_messages(ir, manifest)
 
     assert any("PageContent::url_context" in gap for gap in gaps)
 
@@ -861,7 +949,7 @@ def test_cookie_jar_input_requires_a_representable_cookie_session() -> None:
         ],
     )
 
-    gaps = _capability_gaps(ir, manifest)
+    gaps = _contract_messages(ir, manifest)
 
     assert any("Cookie session" in gap for gap in gaps)
 
@@ -905,7 +993,7 @@ def test_cookie_session_must_cover_api_and_image_requests(missing_request: str) 
         ],
     )
 
-    gaps = _capability_gaps(ir, manifest)
+    gaps = _contract_messages(ir, manifest)
 
     assert any("Cookie session" in gap for gap in gaps)
 
@@ -969,7 +1057,7 @@ def test_optimized_graphql_manifest_has_no_performance_contract_gaps() -> None:
         ],
     )
 
-    gaps = _capability_gaps(ir, manifest)
+    gaps = _contract_messages(ir, manifest)
 
     performance_markers = (
         "full manga listing",
@@ -1003,7 +1091,7 @@ def test_manga_update_query_must_respect_requested_data_flags() -> None:
         ],
     )
 
-    gaps = _capability_gaps(ir, manifest)
+    gaps = _contract_messages(ir, manifest)
 
     assert any("only the data requested" in gap for gap in gaps)
 
@@ -1027,7 +1115,7 @@ def test_manga_update_query_must_respect_requested_data_flags() -> None:
         }
     )
 
-    resolved_gaps = _capability_gaps(ir, conditional)
+    resolved_gaps = _contract_messages(ir, conditional)
 
     assert not any("only the data requested" in gap for gap in resolved_gaps)
 
@@ -1081,8 +1169,8 @@ def test_rest_chapter_helper_cannot_repeat_the_detail_request() -> None:
         }
     )
 
-    repeated_gaps = _capability_gaps(ir, repeated)
-    reused_gaps = _capability_gaps(ir, reused)
+    repeated_gaps = _contract_messages(ir, repeated)
+    reused_gaps = _contract_messages(ir, reused)
 
     assert any("same REST detail route twice" in gap for gap in repeated_gaps)
     assert not any("same REST detail route twice" in gap for gap in reused_gaps)
@@ -1127,8 +1215,8 @@ def test_dynamic_filter_ids_must_be_read_in_search_mapping() -> None:
         }
     )
 
-    bad_gaps = _capability_gaps(ir, without_mapping)
-    good_gaps = _capability_gaps(ir, with_mapping)
+    bad_gaps = _contract_messages(ir, without_mapping)
+    good_gaps = _contract_messages(ir, with_mapping)
 
     assert any("dynamic filter 'theme' is never read" in gap for gap in bad_gaps)
     assert not any("dynamic filter 'theme' is never read" in gap for gap in good_gaps)
@@ -1164,8 +1252,8 @@ def test_decompiled_json_source_requires_idempotent_get_retry() -> None:
         }
     )
 
-    bad_gaps = _capability_gaps(ir, without_retry)
-    good_gaps = _capability_gaps(ir, with_retry)
+    bad_gaps = _contract_messages(ir, without_retry)
+    good_gaps = _contract_messages(ir, with_retry)
 
     assert any("one-retry helper" in gap for gap in bad_gaps)
     assert not any("one-retry helper" in gap for gap in good_gaps)
@@ -1203,8 +1291,8 @@ def test_kotlin_http_source_requires_idempotent_get_retry() -> None:
         }
     )
 
-    bad_gaps = _capability_gaps(ir, without_retry)
-    good_gaps = _capability_gaps(ir, with_retry)
+    bad_gaps = _contract_messages(ir, without_retry)
+    good_gaps = _contract_messages(ir, with_retry)
 
     assert any("Kotlin HttpSource" in gap and "one-retry" in gap for gap in bad_gaps)
     assert not any("Kotlin HttpSource" in gap and "one-retry" in gap for gap in good_gaps)
@@ -1229,7 +1317,7 @@ def test_post_api_does_not_inherit_get_retry_requirement_from_image_provider() -
         ],
     )
 
-    gaps = _capability_gaps(ir, manifest)
+    gaps = _contract_messages(ir, manifest)
 
     assert not any("Kotlin HttpSource" in gap and "one-retry" in gap for gap in gaps)
 
@@ -1252,7 +1340,7 @@ def test_chapter_parser_cannot_compile_regex_on_every_request() -> None:
         ],
     )
 
-    gaps = _capability_gaps(ir, manifest)
+    gaps = _contract_messages(ir, manifest)
 
     assert any("compiles Regex::new on every chapter parse" in gap for gap in gaps)
 
@@ -1280,7 +1368,7 @@ def test_chapter_metadata_and_legacy_settings_are_contract_gaps() -> None:
         files=[GeneratedFile(path="src/lib.rs", content=RUST_SOURCE)],
     )
 
-    gaps = _capability_gaps(ir, manifest)
+    gaps = _contract_messages(ir, manifest)
 
     assert any("date_uploaded" in gap for gap in gaps)
     assert any("scanlators" in gap for gap in gaps)
@@ -1298,7 +1386,7 @@ def test_encrypted_json_api_dependencies_and_base_url_are_contract_gaps() -> Non
         files=[GeneratedFile(path="src/lib.rs", content=RUST_SOURCE)],
     )
 
-    gaps = _capability_gaps(ir, manifest)
+    gaps = _contract_messages(ir, manifest)
 
     assert "JSON API source generated no pinned serde dependency" in gaps
     assert any("aes, cbc, serde, serde_json" in gap for gap in gaps)
@@ -1321,7 +1409,7 @@ def test_triple_des_request_requires_dependencies_and_live_millisecond_time() ->
         ],
     )
 
-    gaps = _capability_gaps(ir, manifest)
+    gaps = _contract_messages(ir, manifest)
 
     assert any("base64, cbc, des" in gap for gap in gaps)
     assert any("live millisecond Unix timestamp" in gap for gap in gaps)
@@ -1388,34 +1476,6 @@ def test_compiler_diagnostics_produce_bounded_source_excerpts(tmp_path: Path) ->
             "content": "\n".join(lines[16:27]),
         }
     ]
-
-
-def test_contract_repair_excerpts_include_only_relevant_functions(tmp_path: Path) -> None:
-    source = tmp_path / "src"
-    source.mkdir()
-    (source / "lib.rs").write_text(
-        (
-            "fn request(&self) { build_request(); }\n"
-            "fn fetch(&self) { self.request().send(); }\n"
-            'fn parse_chapters(&self) { Regex::new("chapters"); }\n'
-            "fn unrelated(&self) { preserve_everything_here(); }\n"
-        ),
-        encoding="utf-8",
-    )
-
-    excerpts = _contract_gap_file_excerpts(
-        tmp_path,
-        [
-            "standard Kotlin HttpSource generated no centralized one-retry helper",
-            "generated code compiles Regex::new on every chapter parse",
-        ],
-    )
-
-    assert [item["start_line"] for item in excerpts] == [2, 3]
-    combined = "\n".join(str(item["content"]) for item in excerpts)
-    assert "self.request().send()" in combined
-    assert "Regex::new" in combined
-    assert "preserve_everything_here" not in combined
 
 
 def test_repair_patch_requires_one_exact_match_and_preserves_manifest_metadata() -> None:

@@ -14,6 +14,7 @@ from .config import AISettings
 from .constants import MAX_AI_DIAGNOSTIC_CHARS
 from .errors import AIProviderError, InputError, SecurityError
 from .ingest import resolve_source
+from .manifest_contract import ContractEvaluation, evaluate_manifest_contract
 from .models import (
     Capability,
     ConversionCheckpoint,
@@ -26,7 +27,6 @@ from .models import (
     ValidationResult,
 )
 from .reports import classify_status, write_report
-from .rust_inspection import RustInspection
 from .scaffold import (
     apply_generation_manifest,
     create_scaffold,
@@ -133,42 +133,6 @@ def _diagnostic_file_excerpts(
     return excerpts[:12]
 
 
-def _contract_gap_file_excerpts(
-    project: Path,
-    capability_gaps: list[str],
-) -> list[dict[str, object]]:
-    needs_retry = any("one-retry" in gap for gap in capability_gaps)
-    needs_chapter_scan = any("Regex::new" in gap for gap in capability_gaps)
-    if not needs_retry and not needs_chapter_scan:
-        return []
-    excerpts: list[dict[str, object]] = []
-    source_root = project / "src"
-    for path in sorted(source_root.rglob("*.rs")):
-        if path.name == "generated_smoke.rs" or path.is_symlink():
-            continue
-        content = path.read_text(encoding="utf-8")
-        relative = path.relative_to(project).as_posix()
-        inspection = RustInspection.from_content(content)
-        for function in inspection.functions:
-            node = function.node
-            name = function.name
-            text = function.text
-            include = (needs_retry and ".send()" in text) or (
-                needs_chapter_scan and "chapter" in name.lower() and "Regex::new" in text
-            )
-            if not include:
-                continue
-            excerpts.append(
-                {
-                    "path": relative,
-                    "start_line": node.start_point[0] + 1,
-                    "end_line": node.end_point[0] + 1,
-                    "content": text,
-                }
-            )
-    return excerpts[:8]
-
-
 def _remove_generated_smoke_for_repair(content: str) -> str:
     return content.replace("\n#[cfg(test)]\nmod generated_smoke;\n", "\n")
 
@@ -225,356 +189,6 @@ def _apply_repair_patch(
 
 def _needs_toolchain_installation(validation: ValidationResult) -> bool:
     return any(stage.kind.value == "toolchain" for stage in validation.stages)
-
-
-def _capability_gaps(ir: SourceIR, manifest: GenerationManifest) -> list[str]:
-    resources = GeneratedResources(manifest)
-    traits = set(manifest.implemented_traits)
-    dependencies = {item.name for item in manifest.dependencies}
-    rust_files = [item for item in manifest.files if item.path.endswith(".rs")]
-    rust_content = "\n".join(item.content for item in rust_files)
-    rust = RustInspection(item.content for item in rust_files)
-    input_content = "\n".join(item.content for item in ir.files)
-    gaps: list[str] = []
-    if (Capability.POPULAR in ir.capabilities or Capability.LATEST in ir.capabilities) and (
-        "ListingProvider" not in traits
-    ):
-        gaps.append("source declares popular/latest listings but generated no ListingProvider")
-    if Capability.FILTERS in ir.capabilities:
-        if not resources.has(GeneratedResources.FILTERS):
-            gaps.append("source declares filters but generated no res/filters.json")
-        elif resources.is_empty(GeneratedResources.FILTERS):
-            gaps.append("source declares filters but generated an empty res/filters.json")
-        gaps.extend(
-            resources.filter_contract_gaps(
-                ir.filter_specs,
-                has_sort_mapping="FilterValue::Sort" in rust_content,
-            )
-        )
-    if Capability.DYNAMIC_FILTERS in ir.capabilities and "DynamicFilters" not in traits:
-        gaps.append("source fetches dynamic filters but generated no DynamicFilters provider")
-    if Capability.DYNAMIC_FILTERS in ir.capabilities and rust.function_contains(
-        "get_dynamic_filters", "serde_json::from_str"
-    ):
-        gaps.append(
-            "get_dynamic_filters attempts to deserialize aidoku::Filter with serde_json; "
-            "construct typed SelectFilter/Filter values directly because Filter is not "
-            "Deserialize"
-        )
-    if Capability.DYNAMIC_FILTERS in ir.capabilities and rust.function_contains(
-        "get_dynamic_filters", "listing_query"
-    ):
-        gaps.append(
-            "get_dynamic_filters performs a full manga listing request; use a dedicated "
-            "options-only request (for GraphQL, query only the recovered option field) "
-            "instead of downloading manga entries"
-        )
-    if (
-        Capability.JSON_API in ir.capabilities
-        and rust.function_contains("listing_query", "description")
-        and rust.function_contains("listing_query", "allCategory")
-    ):
-        gaps.append(
-            "GraphQL listing requests include detail-only fields and dynamic-filter metadata; "
-            "keep the source page size but omit description from list projections and fetch "
-            "allCategory only in the dedicated dynamic-filter request"
-        )
-    if Capability.DYNAMIC_FILTERS in ir.capabilities:
-        for filter_id in sorted(_dynamic_filter_ids_missing_from_query_mapping(rust)):
-            gaps.append(
-                f"dynamic filter {filter_id!r} is never read by get_search_manga_list; "
-                "read its FilterValue using the same id and send the selected site value "
-                "in the list/search request"
-            )
-    if Capability.SETTINGS in ir.capabilities:
-        if not resources.has(GeneratedResources.SETTINGS):
-            gaps.append("source declares settings but generated no res/settings.json")
-        elif resources.is_empty(GeneratedResources.SETTINGS):
-            gaps.append("source declares settings but generated an empty res/settings.json")
-    if Capability.IMAGE_HEADERS in ir.capabilities and "ImageRequestProvider" not in traits:
-        gaps.append("source declares image headers but generated no ImageRequestProvider")
-    if (
-        Capability.IMAGE_HEADERS in ir.capabilities
-        and rust.function_contains("get_image_request", "context")
-        and rust.function_contains("get_image_request", "referer")
-        and "PageContent::url_context" not in rust_content
-    ):
-        gaps.append(
-            "get_image_request reads a Referer from PageContext but generated pages never use "
-            "PageContent::url_context; attach the exact chapter/page Referer to every page URL "
-            "and use the site base URL as the cover-image fallback"
-        )
-    source_uses_cookie_jar = any(
-        marker in input_content
-        for marker in ("cookieJar.loadForRequest", "cookieJar.saveFromResponse")
-    )
-    if source_uses_cookie_jar:
-        has_cookie_setting = resources.contains_text(GeneratedResources.SETTINGS, "cookie")
-        has_api_cookie_header = rust.function_has_header("post_query", "cookie")
-        has_image_cookie_header = rust.function_has_header("get_image_request", "cookie")
-        if not has_cookie_setting or not has_api_cookie_header or not has_image_cookie_header:
-            gaps.append(
-                "input public requests depend on a Cookie session, but the generated source "
-                "does not expose an optional cookie setting and apply its Cookie header to both "
-                "API and image requests"
-            )
-    if Capability.DEEP_LINKS in ir.capabilities and "DeepLinkHandler" not in traits:
-        gaps.append("source declares deep links but generated no DeepLinkHandler")
-    if Capability.JSON_API in ir.capabilities and "serde" not in dependencies:
-        gaps.append("JSON API source generated no pinned serde dependency")
-    update_uses_combined_helper = (
-        rust.function_contains("get_manga_update", "needs_details")
-        and rust.function_contains("get_manga_update", "needs_chapters")
-        and rust.function_contains("get_manga_update", "manga_query")
-    )
-    helper_selects_requested_projection = rust.function_contains(
-        "manga_query", "(true, false)"
-    ) and rust.function_contains("manga_query", "(false, true)")
-    if (
-        Capability.DETAILS in ir.capabilities
-        and Capability.CHAPTERS in ir.capabilities
-        and update_uses_combined_helper
-        and not helper_selects_requested_projection
-        and "comicById" in rust_content
-        and "chaptersByComicId" in rust_content
-    ):
-        gaps.append(
-            "get_manga_update unconditionally fetches a combined details-and-chapters GraphQL "
-            "query; choose details-only, chapters-only, or combined queries so each call fetches "
-            "only the data requested by needs_details and needs_chapters"
-        )
-    if Capability.DETAILS in ir.capabilities and Capability.CHAPTERS in ir.capabilities:
-        repeated_detail_routes: set[str] = set()
-        if rust.function_contains("get_manga_update", "needs_details") and rust.function_contains(
-            "get_manga_update", "needs_chapters"
-        ):
-            update_routes = rust.route_literals("get_manga_update")
-            chapter_helpers = {
-                name for name in rust.calls("get_manga_update") if "chapter" in name.lower()
-            }
-            for helper in chapter_helpers:
-                repeated_detail_routes.update(update_routes & rust.route_literals(helper))
-        if repeated_detail_routes:
-            gaps.append(
-                "get_manga_update and its chapter helper fetch the same REST detail route twice "
-                "when details and chapters are both requested; fetch it once and pass the "
-                "decoded detail response into the chapter helper: "
-                + ", ".join(sorted(repeated_detail_routes))
-            )
-    if (
-        ir.source_format == "decompiled_apk"
-        and Capability.JSON_API in ir.capabilities
-        and not _has_idempotent_get_retry(rust)
-    ):
-        gaps.append(
-            "decompiled Tachi JSON source generated no centralized one-retry helper for "
-            "transient idempotent GET RequestError; reconstruct and resend the same request "
-            "once, then deserialize only the successful response"
-        )
-    if (
-        ir.source_format == "kotlin_module"
-        and "HttpSource" in ir.parent_classes
-        and _has_get_send_path(rust)
-        and not _has_idempotent_get_retry(rust)
-    ):
-        gaps.append(
-            "standard Kotlin HttpSource generated no centralized one-retry helper for "
-            "transient idempotent GET RequestError; reconstruct and resend the same request "
-            "once, then parse only the successful response"
-        )
-    if Capability.CHAPTERS in ir.capabilities and _rust_chapter_parser_compiles_regex(rust):
-        gaps.append(
-            "generated code compiles Regex::new on every chapter parse; for fixed embedded-JSON "
-            "delimiters or numeric chapter labels, use bounded string scanning so each update "
-            "does not compile a regex and pull regex runtime cost into the WASM hot path"
-        )
-    if Capability.ENCRYPTED_JSON in ir.capabilities:
-        missing_crypto = sorted({"aes", "cbc", "serde", "serde_json"} - dependencies)
-        if missing_crypto:
-            gaps.append(
-                "encrypted JSON source omitted required pinned dependencies: "
-                + ", ".join(missing_crypto)
-            )
-        if not dependencies.intersection({"base64", "hex"}):
-            gaps.append("encrypted JSON source requested neither hex nor base64 decoding")
-    if Capability.TRIPLE_DES_CBC in ir.capabilities:
-        missing_crypto = sorted({"des", "cbc", "base64"} - dependencies)
-        if missing_crypto:
-            gaps.append(
-                "3DES-CBC request signing omitted required pinned dependencies: "
-                + ", ".join(missing_crypto)
-            )
-        if "current_date" not in rust_content or re.search(
-            r"\blet\s+time\s*=\s*\"0\"", rust_content
-        ):
-            gaps.append(
-                "3DES-CBC request signing uses no live millisecond Unix timestamp; "
-                "call aidoku::imports::std::current_date() and multiply its seconds by 1000"
-            )
-    if Capability.DYNAMIC_BASE_URLS in ir.capabilities:
-        if not resources.has(GeneratedResources.SETTINGS):
-            gaps.append("dynamic base URL source generated no res/settings.json")
-        if "defaults_get" not in rust_content:
-            gaps.append("dynamic base URL source generated no validated defaults_get resolver")
-    if ir.relative_url_keys:
-        if not rust.has_function("absolute_url"):
-            gaps.append(
-                "source emits relative manga/chapter keys but generated no absolute_url helper"
-            )
-        if _passes_relative_key_to_request(rust):
-            gaps.append(
-                "generated code passes Manga.key or Chapter.key to a request without absolute_url"
-            )
-    for route in ir.chapter_page_routes:
-        default_variant = next(variant for variant in route.variants if variant.is_default)
-        if default_variant.strip_prefix and default_variant.strip_prefix not in rust_content:
-            gaps.append(
-                "chapter page route omits required key prefix removal: "
-                + repr(default_variant.strip_prefix)
-            )
-        for replacement in default_variant.replacements:
-            if replacement.new not in rust_content:
-                gaps.append(
-                    "chapter page route omits required default replacement "
-                    f"{replacement.old!r} -> {replacement.new!r} for "
-                    f"{route.endpoint_template!r}"
-                )
-    image_policy = ir.image_url_policy
-    if image_policy is not None:
-        if image_policy.preserve_cover_urls and re.search(
-            r"\bcover\s*:[\s\S]{0,500}?\b(?:image_)?resolution\s*\(",
-            rust_content,
-        ):
-            gaps.append(
-                "source image policy requires preserving each cover URL exactly; "
-                "generated code applies a chapter-resolution transform to a cover URL"
-            )
-        if image_policy.chapter_resolution_regex and not (
-            re.search(r'(?:ends_with|strip_suffix)\(\s*"x?\.jpg"', rust_content)
-            and re.search(r'(?:ends_with|strip_suffix)\(\s*"x?\.webp"', rust_content)
-        ):
-            gaps.append(
-                "chapter image resolution translation lacks the recovered exact x.jpg/x.webp "
-                f"suffix scope {image_policy.chapter_resolution_regex!r}"
-            )
-    if "date_upload" in input_content and "date_uploaded" not in rust_content:
-        gaps.append("input chapters expose date_upload but generated chapters omit date_uploaded")
-    if "scanlator" in input_content and "scanlators" not in rust_content:
-        gaps.append("input chapters expose scanlator but generated chapters omit scanlators")
-    if re.search(
-        r"\bclass\s+RankResult\b[\s\S]{0,1000}?\bList<ListItem>\s+list\b", input_content
-    ) and re.search(
-        r'["]/ranks\?[\s\S]{0,3000}?\bApiResponse<ListResult>\b',
-        rust_content,
-    ):
-        gaps.append(
-            "rank endpoint returns RankResult.list entries wrapping the manga in ListItem.comic; "
-            "generated code incorrectly deserializes ranks as a direct ListResult<Comic>, "
-            "producing empty manga titles and keys"
-        )
-    if re.search(
-        r"ApiResponse\.class[\s\S]{0,300}?"
-        r"Reflection\.typeOf\(ComicDetailResult\.class\)",
-        input_content,
-    ) and _detail_helper_skips_api_envelope(rust):
-        gaps.append(
-            "detail endpoint is wrapped in ApiResponse<ComicDetailResult>, but generated detail "
-            "helper deserializes the HTTP response directly into DetailResult; deserialize "
-            "ApiResponse<DetailResult> and return response.results"
-        )
-    if re.search(r"\bSChapter\b[\s\S]{0,2000}?\burl\s*=", input_content) and not re.search(
-        r"\bChapter\s*\{[\s\S]{0,4000}?\burl\s*:", rust_content
-    ):
-        gaps.append("input chapters expose a URL but generated Chapter values omit url")
-    legacy_settings = {value for value in ("zh-hant", "zh-hans") if f'"{value}"' in input_content}
-    missing_legacy_settings = sorted(
-        value for value in legacy_settings if f'"{value}"' not in rust_content
-    )
-    if missing_legacy_settings:
-        gaps.append(
-            "generated settings logic omits legacy input values: "
-            + ", ".join(missing_legacy_settings)
-        )
-    return gaps
-
-
-def _dynamic_filter_ids_missing_from_query_mapping(rust: RustInspection) -> set[str]:
-    dynamic_texts = [function.text for function in rust.named("get_dynamic_filters")]
-    dynamic_ids = {
-        match.group(1)
-        for text in dynamic_texts
-        for match in re.finditer(
-            r'\bSelectFilter\s*\{[\s\S]{0,1200}?\bid\s*:\s*"([^"\\]+)"',
-            text,
-        )
-    }
-    reachable = rust.reachable_functions("get_search_manga_list")
-    query_mapping = "\n".join(function.text for name in reachable for function in rust.named(name))
-    return {filter_id for filter_id in dynamic_ids if f'"{filter_id}"' not in query_mapping}
-
-
-def _detail_helper_skips_api_envelope(rust: RustInspection) -> bool:
-    for function in rust.functions:
-        if "detail" not in function.name.lower():
-            continue
-        text = function.text
-        signature = text.split("{", 1)[0]
-        if (
-            re.search(r"Result<(?:Comic)?DetailResult>", signature)
-            and ".get_json_owned()" in text
-            and "ApiResponse<" not in text
-        ):
-            return True
-    return False
-
-
-def _has_idempotent_get_retry(rust: RustInspection) -> bool:
-    for function in rust.functions:
-        compact = RustInspection.compact_node(function.node)
-        if compact.count(".send()") >= 2 and (
-            "match" in compact or "or_else" in compact or "ifletErr" in compact
-        ):
-            return True
-    return False
-
-
-def _has_get_send_path(rust: RustInspection) -> bool:
-    get_paths = {function.name for function in rust.functions if "Request::get" in function.text}
-    changed = True
-    while changed:
-        changed = False
-        for function in rust.functions:
-            if function.name not in get_paths and function.calls & get_paths:
-                get_paths.add(function.name)
-                changed = True
-    return any(
-        ".send()" in function.text for function in rust.functions if function.name in get_paths
-    )
-
-
-def _rust_chapter_parser_compiles_regex(rust: RustInspection) -> bool:
-    return any(
-        "chapter" in function.name.lower() and "Regex::new" in function.text
-        for function in rust.functions
-    )
-
-
-def _passes_relative_key_to_request(rust: RustInspection) -> bool:
-    for node in rust.nodes("call_expression"):
-        function = node.child_by_field_name("function")
-        arguments = node.child_by_field_name("arguments")
-        if function is None or arguments is None:
-            continue
-        called = RustInspection.compact_node(function)
-        if not (
-            called in {"Request::get", "Request::post", "request"} or called.endswith(".request")
-        ):
-            continue
-        values = RustInspection.compact_node(arguments)
-        has_relative_key = "manga.key" in values or "chapter.key" in values
-        if has_relative_key and "absolute_url" not in values:
-            return True
-    return False
 
 
 def _should_repair(
@@ -652,6 +266,7 @@ class _ConversionRoundRunner:
     live: bool
     proxy: str | None
     manifest: GenerationManifest = field(init=False)
+    contract: ContractEvaluation = field(init=False)
     capability_gaps: list[str] = field(init=False)
     validation: ValidationResult = field(init=False)
 
@@ -751,7 +366,8 @@ class _ConversionRoundRunner:
         generated_files = apply_generation_manifest(
             self.project, self.ir, self.manifest, query=self.query
         )
-        self.capability_gaps = _capability_gaps(self.ir, self.manifest)
+        self.contract = evaluate_manifest_contract(self.ir, self.manifest)
+        self.capability_gaps = self.contract.messages
         self.validation = validate_project(self.project, live=self.live, proxy=self.proxy)
         self.validation.contract_ok = not self.capability_gaps
         self.checkpoint.generated_files = generated_files
@@ -783,18 +399,13 @@ class _ConversionRoundRunner:
         current_files = read_generated_files(self.project)
         targeted_diagnostics = self.validation.diagnostics[-MAX_AI_DIAGNOSTIC_CHARS:]
         excerpts = _diagnostic_file_excerpts(self.project, targeted_diagnostics)
-        contract_excerpts = _contract_gap_file_excerpts(self.project, self.capability_gaps)
+        contract_repair = self.contract.repair(self.project)
         patch_request = None
-        contract_patch = (
-            contract_excerpts
-            and self.capability_gaps
-            and all("one-retry" in gap or "Regex::new" in gap for gap in self.capability_gaps)
-        )
-        if contract_patch:
+        if contract_repair is not None:
             patch_request = (
                 "contract",
-                contract_excerpts,
-                "\n".join(self.capability_gaps)[-MAX_AI_DIAGNOSTIC_CHARS:],
+                contract_repair.excerpts,
+                contract_repair.diagnostics,
                 "contract",
             )
         else:
