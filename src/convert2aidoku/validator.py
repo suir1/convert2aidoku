@@ -278,7 +278,7 @@ def _blocked_site_probe(
             f"with HTTP {response.status_code}; this validation process does not share a browser "
             "session, so the result does not prove the site is unavailable in a normal browser"
         )
-    if "RequestError(RequestError)" in runner_output:
+    if "requesterror" in runner_output.lower():
         return (
             "Aidoku runner returned a network RequestError while the independent HTTPX probe"
             f"{route} reached {url} with HTTP {response.status_code}; this points to a runner "

@@ -102,9 +102,17 @@ def test_site_probe_distinguishes_runner_fingerprint_from_browser_like_httpx(
     assert "TLS/HTTP fingerprint" in diagnostic
 
 
+@pytest.mark.parametrize(
+    "runner_output",
+    [
+        "request failed: RequestError(RequestError)",
+        "cover image request failed after retry: RequestError",
+    ],
+)
 def test_site_probe_classifies_runner_request_error_when_httpx_succeeds(
     tmp_path: Path,
     monkeypatch,
+    runner_output: str,
 ) -> None:
     resource = tmp_path / "res"
     resource.mkdir()
@@ -120,7 +128,7 @@ def test_site_probe_classifies_runner_request_error_when_httpx_succeeds(
     diagnostic = (
         _blocked_site_probe(
             tmp_path,
-            runner_output="request failed: RequestError(RequestError)",
+            runner_output=runner_output,
         )
         or ""
     )
