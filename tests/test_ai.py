@@ -338,3 +338,62 @@ def test_compiler_repair_sends_only_excerpts_and_returns_exact_edits() -> None:
 
     assert result.patch.edits[0].new_text == "title: Some(title),"
     assert result.usage and result.usage.total_tokens == 980
+
+
+def test_contract_repair_sends_only_scoped_excerpts() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert "contract or performance" in payload["messages"][0]["content"]
+        repair_payload = json.loads(payload["messages"][1]["content"])
+        assert "current_files" not in repair_payload
+        assert repair_payload["contract_diagnostics"].startswith("standard Kotlin HttpSource")
+        assert len(request.content) < 12_000
+        patch = {
+            "edits": [
+                {
+                    "path": "src/lib.rs",
+                    "old_text": "self.request(url)?.send()?",
+                    "new_text": "self.request(url.clone())?.send()?",
+                }
+            ]
+        }
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": json.dumps(patch)}}],
+                "usage": {"prompt_tokens": 700, "completion_tokens": 60, "total_tokens": 760},
+            },
+        )
+
+    settings = AISettings(
+        base_url="http://local/v1",
+        model="test",
+        api_key=SecretStr("secret"),
+    )
+    ir = SourceIR(
+        input_ref="fixture",
+        metadata=SourceMetadata(
+            source_id="en.example",
+            package_name="example",
+            name="Example",
+            language="en",
+            base_url="https://example.com",
+        ),
+        main_class="Example",
+    )
+    with OpenAICompatibleClient(settings, transport=httpx.MockTransport(handler)) as client:
+        result = client.repair_contract_patch(
+            ir,
+            current_file_excerpts=[
+                {
+                    "path": "src/lib.rs",
+                    "start_line": 10,
+                    "end_line": 14,
+                    "content": "self.request(url)?.send()?",
+                }
+            ],
+            diagnostics="standard Kotlin HttpSource generated no one-retry helper",
+        )
+
+    assert result.patch.edits[0].old_text == "self.request(url)?.send()?"
+    assert result.usage and result.usage.total_tokens == 760

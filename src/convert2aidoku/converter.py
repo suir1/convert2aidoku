@@ -134,6 +134,43 @@ def _diagnostic_file_excerpts(
     return excerpts[:12]
 
 
+def _contract_gap_file_excerpts(
+    project: Path,
+    capability_gaps: list[str],
+) -> list[dict[str, object]]:
+    needs_retry = any("one-retry" in gap for gap in capability_gaps)
+    needs_chapter_scan = any("Regex::new" in gap for gap in capability_gaps)
+    if not needs_retry and not needs_chapter_scan:
+        return []
+    excerpts: list[dict[str, object]] = []
+    source_root = project / "src"
+    for path in sorted(source_root.rglob("*.rs")):
+        if path.name == "generated_smoke.rs" or path.is_symlink():
+            continue
+        content = path.read_text(encoding="utf-8")
+        relative = path.relative_to(project).as_posix()
+        for node in _walk_rust(content):
+            if node.type != "function_item":
+                continue
+            identifier = node.child_by_field_name("name")
+            name = identifier.text.decode("utf-8") if identifier is not None else ""
+            text = node.text.decode("utf-8", errors="replace")
+            include = (needs_retry and ".send()" in text) or (
+                needs_chapter_scan and "chapter" in name.lower() and "Regex::new" in text
+            )
+            if not include:
+                continue
+            excerpts.append(
+                {
+                    "path": relative,
+                    "start_line": node.start_point[0] + 1,
+                    "end_line": node.end_point[0] + 1,
+                    "content": text,
+                }
+            )
+    return excerpts[:8]
+
+
 def _remove_generated_smoke_for_repair(content: str) -> str:
     return content.replace("\n#[cfg(test)]\nmod generated_smoke;\n", "\n")
 
@@ -149,6 +186,18 @@ def _can_use_targeted_repair(
         and bool(excerpts)
         and bool(failed_stages)
         and failed_stages <= {"cargo-check", "clippy", "clippy-fix"}
+    )
+
+
+def _can_use_contract_repair(
+    capability_gaps: list[str],
+    excerpts: list[dict[str, object]],
+) -> bool:
+    supported_markers = ("one-retry", "Regex::new")
+    return (
+        bool(excerpts)
+        and bool(capability_gaps)
+        and all(any(marker in gap for marker in supported_markers) for gap in capability_gaps)
     )
 
 
@@ -1269,7 +1318,37 @@ def convert_source(
                 current_files = read_generated_files(project)
                 targeted_diagnostics = validation.diagnostics[-MAX_AI_DIAGNOSTIC_CHARS:]
                 excerpts = _diagnostic_file_excerpts(project, targeted_diagnostics)
-                if _can_use_targeted_repair(validation, capability_gaps, excerpts):
+                contract_excerpts = _contract_gap_file_excerpts(project, capability_gaps)
+                if _can_use_contract_repair(capability_gaps, contract_excerpts):
+                    try:
+                        patch_result = client.repair_contract_patch(
+                            ir,
+                            current_file_excerpts=contract_excerpts,
+                            diagnostics="\n".join(capability_gaps)[-MAX_AI_DIAGNOSTIC_CHARS:],
+                        )
+                        patched_manifest = _apply_repair_patch(
+                            manifest,
+                            current_files,
+                            patch_result.patch,
+                            contract_excerpts,
+                        )
+                        repaired = AIResult(
+                            manifest=patched_manifest,
+                            structured_output=patch_result.structured_output,
+                            usage=patch_result.usage,
+                            warnings=patch_result.warnings,
+                        )
+                    except AIProviderError as exc:
+                        diagnostics = _repair_diagnostics(ir, validation, capability_gaps)
+                        diagnostics = diagnostics[-MAX_AI_DIAGNOSTIC_CHARS:]
+                        repaired = client.repair(
+                            ir,
+                            current_files=current_files,
+                            diagnostics=diagnostics,
+                            manifest_history=_manifest_history(workspace, checkpoint),
+                        )
+                        repaired.warnings.append(f"contract patch fallback: {exc}")
+                elif _can_use_targeted_repair(validation, capability_gaps, excerpts):
                     try:
                         patch_result = client.repair_patch(
                             ir,

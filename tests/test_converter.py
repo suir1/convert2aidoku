@@ -10,6 +10,7 @@ from convert2aidoku.config import AISettings
 from convert2aidoku.converter import (
     _apply_repair_patch,
     _capability_gaps,
+    _contract_gap_file_excerpts,
     _diagnostic_file_excerpts,
     _repair_diagnostics,
     _should_repair,
@@ -1303,6 +1304,34 @@ def test_compiler_diagnostics_produce_bounded_source_excerpts(tmp_path: Path) ->
             "content": "\n".join(lines[16:27]),
         }
     ]
+
+
+def test_contract_repair_excerpts_include_only_relevant_functions(tmp_path: Path) -> None:
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "lib.rs").write_text(
+        (
+            "fn request(&self) { build_request(); }\n"
+            "fn fetch(&self) { self.request().send(); }\n"
+            'fn parse_chapters(&self) { Regex::new("chapters"); }\n'
+            "fn unrelated(&self) { preserve_everything_here(); }\n"
+        ),
+        encoding="utf-8",
+    )
+
+    excerpts = _contract_gap_file_excerpts(
+        tmp_path,
+        [
+            "standard Kotlin HttpSource generated no centralized one-retry helper",
+            "generated code compiles Regex::new on every chapter parse",
+        ],
+    )
+
+    assert [item["start_line"] for item in excerpts] == [2, 3]
+    combined = "\n".join(str(item["content"]) for item in excerpts)
+    assert "self.request().send()" in combined
+    assert "Regex::new" in combined
+    assert "preserve_everything_here" not in combined
 
 
 def test_repair_patch_requires_one_exact_match_and_preserves_manifest_metadata() -> None:
