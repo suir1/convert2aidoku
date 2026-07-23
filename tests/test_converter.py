@@ -1150,6 +1150,30 @@ def test_kotlin_http_source_requires_idempotent_get_retry() -> None:
     assert not any("Kotlin HttpSource" in gap and "one-retry" in gap for gap in good_gaps)
 
 
+def test_post_api_does_not_inherit_get_retry_requirement_from_image_provider() -> None:
+    with resolve_source(str(FIXTURE)) as resolved:
+        ir = analyze_source(resolved)
+    manifest = GenerationManifest(
+        source_struct="Simple",
+        implemented_traits=["ImageRequestProvider"],
+        files=[
+            GeneratedFile(
+                path="src/lib.rs",
+                content=(
+                    "fn post_query(&self, url: String) -> Result<Response> {\n"
+                    "Request::post(url).send()\n}\n"
+                    "fn get_image_request(&self, url: String) -> Result<Request> {\n"
+                    "Request::get(url)\n}\n"
+                ),
+            )
+        ],
+    )
+
+    gaps = _capability_gaps(ir, manifest)
+
+    assert not any("Kotlin HttpSource" in gap and "one-retry" in gap for gap in gaps)
+
+
 def test_chapter_parser_cannot_compile_regex_on_every_request() -> None:
     with resolve_source(str(FIXTURE)) as resolved:
         ir = analyze_source(resolved)

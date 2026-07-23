@@ -505,8 +505,7 @@ def _capability_gaps(ir: SourceIR, manifest: GenerationManifest) -> list[str]:
     if (
         ir.source_format == "kotlin_module"
         and "HttpSource" in ir.parent_classes
-        and "Request::get" in rust_content
-        and ".send()" in rust_content
+        and _has_get_send_path(rust_content)
         and not any(_has_idempotent_get_retry(item.content) for item in rust_files)
     ):
         gaps.append(
@@ -763,6 +762,30 @@ def _has_idempotent_get_retry(content: str) -> bool:
         ):
             return True
     return False
+
+
+def _has_get_send_path(content: str) -> bool:
+    functions: dict[str, str] = {}
+    calls: dict[str, set[str]] = {}
+    for node in _walk_rust(content):
+        if node.type != "function_item":
+            continue
+        identifier = node.child_by_field_name("name")
+        if identifier is None:
+            continue
+        name = identifier.text.decode("utf-8")
+        text = node.text.decode("utf-8", errors="replace")
+        functions[name] = text
+        calls[name] = set(re.findall(r"\b(?:self\.)?([A-Za-z_][A-Za-z0-9_]*)\s*\(", text))
+    get_paths = {name for name, text in functions.items() if "Request::get" in text}
+    changed = True
+    while changed:
+        changed = False
+        for name, called in calls.items():
+            if name not in get_paths and called & get_paths:
+                get_paths.add(name)
+                changed = True
+    return any(".send()" in functions[name] for name in get_paths)
 
 
 def _rust_chapter_parser_compiles_regex(content: str) -> bool:
