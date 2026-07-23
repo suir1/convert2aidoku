@@ -24,6 +24,10 @@ _Avoid_: Resource strings, JSON blobs
 The parsed syntax and indexed function facts recovered from generated Rust without applying safety or contract policy.
 _Avoid_: Rust policy, contract check
 
+**Typed AI Exchange**:
+A provider request for one declared Pydantic model, including Structured Output fallback, validation feedback, usage, and warnings.
+_Avoid_: Raw AI response, model call
+
 **Checkpoint**:
 The resumable record of conversion phase, AI rounds, current manifest, diagnostics, and validation state.
 _Avoid_: Cache, session file
@@ -46,6 +50,7 @@ _Avoid_: Log
 - One **Checkpoint** records one or more **Generation Manifests** and identifies exactly one current manifest.
 - One **Generation Manifest** owns zero or one filter resource and zero or one settings resource as **Generated Resources**.
 - One **Generation Manifest** yields one **Rust Inspection** of its controlled Rust files during contract evaluation.
+- Each AI round is produced by one successful **Typed AI Exchange**.
 - One effective **Generation Manifest** materializes one **Generated Source**.
 - One **Validation Result** evaluates one materialized **Generated Source**.
 - One **Conversion Report** summarizes one conversion attempt without storing provider credentials.

@@ -3,9 +3,15 @@ import json
 import httpx
 from pydantic import SecretStr
 
-from convert2aidoku.ai import OpenAICompatibleClient, _contract_text, _strict_json_schema
+from convert2aidoku.ai import OpenAICompatibleClient, _contract_text, _strict_model_schema
 from convert2aidoku.config import AISettings
-from convert2aidoku.models import SourceFile, SourceIR, SourceMetadata
+from convert2aidoku.models import (
+    GenerationManifest,
+    RepairPatch,
+    SourceFile,
+    SourceIR,
+    SourceMetadata,
+)
 
 
 def _manifest() -> dict[str, object]:
@@ -20,7 +26,7 @@ def _manifest() -> dict[str, object]:
 
 
 def test_strict_schema_closes_every_object() -> None:
-    schema = _strict_json_schema()
+    schema = _strict_model_schema(GenerationManifest)
 
     def visit(value: object) -> None:
         if isinstance(value, dict):
@@ -76,7 +82,7 @@ def test_structured_manifest_response() -> None:
     with OpenAICompatibleClient(settings, transport=httpx.MockTransport(handler)) as client:
         result = client._request_manifest([{"role": "user", "content": "test"}])
     assert result.structured_output
-    assert result.manifest.source_struct == "Example"
+    assert result.value.source_struct == "Example"
     assert result.usage and result.usage.total_tokens == 12
 
 
@@ -104,6 +110,74 @@ def test_falls_back_when_json_schema_is_rejected() -> None:
     assert calls == 2
     assert not result.structured_output
     assert result.warnings
+
+
+def test_typed_exchange_falls_back_for_repair_patch() -> None:
+    calls = 0
+    patch = {
+        "edits": [
+            {
+                "path": "src/lib.rs",
+                "old_text": "old();",
+                "new_text": "new();",
+            }
+        ]
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        payload = json.loads(request.content)
+        if "response_format" in payload:
+            assert payload["response_format"]["json_schema"]["name"] == "aidoku_repair_patch"
+            return httpx.Response(422, text="json_schema unsupported")
+        assert "matching this repair patch schema" in payload["messages"][-2]["content"]
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(patch)}}]},
+        )
+
+    settings = AISettings(
+        base_url="http://local/v1",
+        model="test",
+        api_key=SecretStr("secret"),
+    )
+    with OpenAICompatibleClient(settings, transport=httpx.MockTransport(handler)) as client:
+        result = client._request_model([{"role": "user", "content": "test"}], RepairPatch)
+
+    assert calls == 2
+    assert not result.structured_output
+    assert result.value.edits[0].new_text == "new();"
+
+
+def test_manifest_dependency_policy_participates_in_validation_retry() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        payload = json.loads(request.content)
+        if calls == 2:
+            assert "disallowed dependencies: reqwest" in payload["messages"][-1]["content"]
+        manifest = _manifest()
+        if calls == 1:
+            manifest["dependencies"] = [{"name": "reqwest"}]
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(manifest)}}]},
+        )
+
+    settings = AISettings(
+        base_url="http://local/v1",
+        model="test",
+        api_key=SecretStr("secret"),
+    )
+    with OpenAICompatibleClient(settings, transport=httpx.MockTransport(handler)) as client:
+        result = client._request_manifest([{"role": "user", "content": "test"}])
+
+    assert calls == 2
+    assert result.value.dependencies == []
+    assert any("disallowed dependencies: reqwest" in warning for warning in result.warnings)
 
 
 def test_invalid_filter_shape_is_retried_with_field_diagnostic() -> None:
@@ -142,7 +216,7 @@ def test_invalid_filter_shape_is_retried_with_field_diagnostic() -> None:
         result = client._request_manifest([{"role": "user", "content": "test"}])
 
     assert calls == 2
-    assert result.manifest.files[1].path == "res/filters.json"
+    assert result.value.files[1].path == "res/filters.json"
 
 
 def test_transient_provider_errors_are_retried_with_backoff() -> None:
@@ -173,7 +247,7 @@ def test_transient_provider_errors_are_retried_with_backoff() -> None:
     ) as client:
         result = client._request_manifest([{"role": "user", "content": "test"}])
 
-    assert result.manifest.source_struct == "Example"
+    assert result.value.source_struct == "Example"
     assert calls == 3
     assert delays == [5.0, 15.0]
 
@@ -214,7 +288,7 @@ def test_generate_sends_deterministic_source_evidence_instead_of_raw_files() -> 
     with OpenAICompatibleClient(settings, transport=httpx.MockTransport(handler)) as client:
         result = client.generate(ir)
 
-    assert result.manifest.source_struct == "Example"
+    assert result.value.source_struct == "Example"
 
 
 def test_repair_uses_compact_context_without_original_source_bodies() -> None:
@@ -277,7 +351,7 @@ def test_repair_uses_compact_context_without_original_source_bodies() -> None:
                 }
             ],
         )
-    assert result.manifest.source_struct == "Example"
+    assert result.value.source_struct == "Example"
 
 
 def test_compiler_repair_sends_only_excerpts_and_returns_exact_edits() -> None:
@@ -336,7 +410,7 @@ def test_compiler_repair_sends_only_excerpts_and_returns_exact_edits() -> None:
             diagnostics="error[E0308]: mismatched types",
         )
 
-    assert result.patch.edits[0].new_text == "title: Some(title),"
+    assert result.value.edits[0].new_text == "title: Some(title),"
     assert result.usage and result.usage.total_tokens == 980
 
 
@@ -382,7 +456,7 @@ def test_contract_repair_sends_only_scoped_excerpts() -> None:
         main_class="Example",
     )
     with OpenAICompatibleClient(settings, transport=httpx.MockTransport(handler)) as client:
-        result = client.repair_contract_patch(
+        result = client.repair_patch(
             ir,
             current_file_excerpts=[
                 {
@@ -393,7 +467,8 @@ def test_contract_repair_sends_only_scoped_excerpts() -> None:
                 }
             ],
             diagnostics="standard Kotlin HttpSource generated no one-retry helper",
+            scope="contract",
         )
 
-    assert result.patch.edits[0].old_text == "self.request(url)?.send()?"
+    assert result.value.edits[0].old_text == "self.request(url)?.send()?"
     assert result.usage and result.usage.total_tokens == 760

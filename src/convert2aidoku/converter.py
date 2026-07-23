@@ -681,7 +681,7 @@ def _manifest_path(workspace: Path, relative: str) -> Path:
 def _save_manifest(
     workspace: Path,
     checkpoint: ConversionCheckpoint,
-    result,
+    result: AIResult[GenerationManifest],
     *,
     purpose: str,
 ) -> GenerationManifest:
@@ -689,16 +689,16 @@ def _save_manifest(
     relative = f"manifests/round-{number:02d}.json"
     path = _manifest_path(workspace, relative)
     path.parent.mkdir(exist_ok=True)
-    _atomic_write_text(path, result.manifest.model_dump_json(indent=2) + "\n")
+    _atomic_write_text(path, result.value.model_dump_json(indent=2) + "\n")
     checkpoint.current_manifest = relative
     checkpoint.ai_rounds.append(ai_round(number, purpose, result))
     checkpoint.warnings.extend(result.warnings)
-    checkpoint.manifest_warnings = list(result.manifest.warnings)
-    checkpoint.unsupported_features.extend(result.manifest.unsupported_features)
+    checkpoint.manifest_warnings = list(result.value.warnings)
+    checkpoint.unsupported_features.extend(result.value.unsupported_features)
     checkpoint.phase = "manifest_saved"
     checkpoint.validation = None
     _write_checkpoint(workspace, checkpoint)
-    return result.manifest
+    return result.value
 
 
 def _load_manifest(workspace: Path, checkpoint: ConversionCheckpoint) -> GenerationManifest:
@@ -1042,23 +1042,19 @@ def convert_source(
                 contract_excerpts = _contract_gap_file_excerpts(project, capability_gaps)
                 if _can_use_contract_repair(capability_gaps, contract_excerpts):
                     try:
-                        patch_result = client.repair_contract_patch(
+                        patch_result = client.repair_patch(
                             ir,
                             current_file_excerpts=contract_excerpts,
                             diagnostics="\n".join(capability_gaps)[-MAX_AI_DIAGNOSTIC_CHARS:],
+                            scope="contract",
                         )
                         patched_manifest = _apply_repair_patch(
                             manifest,
                             current_files,
-                            patch_result.patch,
+                            patch_result.value,
                             contract_excerpts,
                         )
-                        repaired = AIResult(
-                            manifest=patched_manifest,
-                            structured_output=patch_result.structured_output,
-                            usage=patch_result.usage,
-                            warnings=patch_result.warnings,
-                        )
+                        repaired = patch_result.with_value(patched_manifest)
                     except AIProviderError as exc:
                         diagnostics = _repair_diagnostics(ir, validation, capability_gaps)
                         diagnostics = diagnostics[-MAX_AI_DIAGNOSTIC_CHARS:]
@@ -1079,15 +1075,10 @@ def convert_source(
                         patched_manifest = _apply_repair_patch(
                             manifest,
                             current_files,
-                            patch_result.patch,
+                            patch_result.value,
                             excerpts,
                         )
-                        repaired = AIResult(
-                            manifest=patched_manifest,
-                            structured_output=patch_result.structured_output,
-                            usage=patch_result.usage,
-                            warnings=patch_result.warnings,
-                        )
+                        repaired = patch_result.with_value(patched_manifest)
                     except AIProviderError as exc:
                         diagnostics = _repair_diagnostics(ir, validation, capability_gaps)
                         diagnostics = diagnostics[-MAX_AI_DIAGNOSTIC_CHARS:]

@@ -92,7 +92,7 @@ class FakeClient:
 
     def generate(self, _ir: object) -> AIResult:
         return AIResult(
-            manifest=GenerationManifest(
+            value=GenerationManifest(
                 source_struct="Simple",
                 implemented_traits=["ListingProvider", "ImageRequestProvider"],
                 files=[
@@ -118,7 +118,7 @@ class FakeClient:
 class RepairingGapClient(FakeClient):
     def generate(self, _ir: object) -> AIResult:
         return AIResult(
-            manifest=GenerationManifest(
+            value=GenerationManifest(
                 source_struct="Simple",
                 files=[GeneratedFile(path="src/lib.rs", content=RUST_SOURCE)],
             ),
@@ -148,10 +148,10 @@ class ResourceDroppingRepairClient(FakeClient):
     def generate(self, _ir: object) -> AIResult:
         result = super().generate(_ir)
         return AIResult(
-            manifest=result.manifest.model_copy(
+            value=result.value.model_copy(
                 update={
                     "files": [
-                        item for item in result.manifest.files if not item.path.startswith("res/")
+                        item for item in result.value.files if not item.path.startswith("res/")
                     ]
                     + [
                         GeneratedFile(
@@ -179,7 +179,7 @@ class ResourceDroppingRepairClient(FakeClient):
         manifest_history: object | None = None,
     ) -> AIResult:
         return AIResult(
-            manifest=GenerationManifest(
+            value=GenerationManifest(
                 source_struct="Simple",
                 files=[GeneratedFile(path="src/lib.rs", content=RUST_SOURCE)],
             ),
