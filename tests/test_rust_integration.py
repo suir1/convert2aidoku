@@ -3,14 +3,13 @@ from pathlib import Path
 
 import pytest
 
-from convert2aidoku.analyzer import analyze_source
-from convert2aidoku.ingest import resolve_source
 from convert2aidoku.models import DependencyRequest, GeneratedFile, GenerationManifest
-from convert2aidoku.scaffold import apply_generation_manifest, create_scaffold
+from convert2aidoku.scaffold import apply_generation_manifest
 from convert2aidoku.toolchain import find_tool
 from convert2aidoku.validator import validate_project
+from tests.scenarios import scaffold_project
 
-from .test_converter import FIXTURE, RUST_SOURCE
+from .test_converter import RUST_SOURCE
 
 ENCRYPTED_RUST_SOURCE = RUST_SOURCE.replace(
     "use aidoku::{",
@@ -60,19 +59,16 @@ pytestmark = pytest.mark.skipif(
 def test_generated_fixture_builds_packages_and_verifies(tmp_path: Path) -> None:
     assert find_tool("cargo")
     assert find_tool("aidoku")
-    with resolve_source(str(FIXTURE)) as resolved:
-        ir = analyze_source(resolved)
-        project = tmp_path / "project"
-        create_scaffold(project, ir, resolved)
-        apply_generation_manifest(
-            project,
-            ir,
-            GenerationManifest(
-                source_struct="Simple",
-                files=[GeneratedFile(path="src/lib.rs", content=RUST_SOURCE)],
-            ),
-            query=None,
-        )
+    project, ir = scaffold_project(tmp_path)
+    apply_generation_manifest(
+        project,
+        ir,
+        GenerationManifest(
+            source_struct="Simple",
+            files=[GeneratedFile(path="src/lib.rs", content=RUST_SOURCE)],
+        ),
+        query=None,
+    )
 
     validation = validate_project(project, live=False)
     assert validation.build_ok, validation.diagnostics
@@ -82,24 +78,21 @@ def test_generated_fixture_builds_packages_and_verifies(tmp_path: Path) -> None:
 
 def test_pinned_encrypted_json_dependencies_compile_for_wasm(tmp_path: Path) -> None:
     assert find_tool("cargo")
-    with resolve_source(str(FIXTURE)) as resolved:
-        ir = analyze_source(resolved)
-        project = tmp_path / "encrypted-project"
-        create_scaffold(project, ir, resolved)
-        apply_generation_manifest(
-            project,
-            ir,
-            GenerationManifest(
-                source_struct="Simple",
-                files=[GeneratedFile(path="src/lib.rs", content=ENCRYPTED_RUST_SOURCE)],
-                dependencies=[
-                    DependencyRequest(name="aes"),
-                    DependencyRequest(name="cbc"),
-                    DependencyRequest(name="hex"),
-                ],
-            ),
-            query=None,
-        )
+    project, ir = scaffold_project(tmp_path, name="encrypted-project")
+    apply_generation_manifest(
+        project,
+        ir,
+        GenerationManifest(
+            source_struct="Simple",
+            files=[GeneratedFile(path="src/lib.rs", content=ENCRYPTED_RUST_SOURCE)],
+            dependencies=[
+                DependencyRequest(name="aes"),
+                DependencyRequest(name="cbc"),
+                DependencyRequest(name="hex"),
+            ],
+        ),
+        query=None,
+    )
 
     validation = validate_project(project, live=False)
     assert validation.build_ok, validation.diagnostics
@@ -108,24 +101,21 @@ def test_pinned_encrypted_json_dependencies_compile_for_wasm(tmp_path: Path) -> 
 
 def test_pinned_triple_des_dependencies_compile_for_wasm(tmp_path: Path) -> None:
     assert find_tool("cargo")
-    with resolve_source(str(FIXTURE)) as resolved:
-        ir = analyze_source(resolved)
-        project = tmp_path / "triple-des-project"
-        create_scaffold(project, ir, resolved)
-        apply_generation_manifest(
-            project,
-            ir,
-            GenerationManifest(
-                source_struct="Simple",
-                files=[GeneratedFile(path="src/lib.rs", content=TRIPLE_DES_RUST_SOURCE)],
-                dependencies=[
-                    DependencyRequest(name="des"),
-                    DependencyRequest(name="cbc"),
-                    DependencyRequest(name="base64"),
-                ],
-            ),
-            query=None,
-        )
+    project, ir = scaffold_project(tmp_path, name="triple-des-project")
+    apply_generation_manifest(
+        project,
+        ir,
+        GenerationManifest(
+            source_struct="Simple",
+            files=[GeneratedFile(path="src/lib.rs", content=TRIPLE_DES_RUST_SOURCE)],
+            dependencies=[
+                DependencyRequest(name="des"),
+                DependencyRequest(name="cbc"),
+                DependencyRequest(name="base64"),
+            ],
+        ),
+        query=None,
+    )
 
     validation = validate_project(project, live=False)
     assert validation.build_ok, validation.diagnostics

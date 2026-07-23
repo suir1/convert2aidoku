@@ -6,7 +6,8 @@ import pytest
 
 from convert2aidoku.errors import InputError
 from convert2aidoku.generation_context import build_generation_context
-from convert2aidoku.models import SourceFile, SourceIR, SourceMetadata
+from convert2aidoku.models import SourceFile, SourceIR
+from tests.scenarios import minimal_source_ir
 
 
 def _file(path: str, content: str) -> SourceFile:
@@ -18,18 +19,11 @@ def _file(path: str, content: str) -> SourceFile:
 
 
 def _ir(*files: SourceFile, source_format: str = "decompiled_apk") -> SourceIR:
-    return SourceIR(
-        input_ref="fixture",
-        source_format=source_format,
-        metadata=SourceMetadata(
-            source_id="zh.example",
-            package_name="example",
-            name="Example",
-            language="zh",
-            base_url="https://example.com",
-        ),
-        main_class="Example",
+    return minimal_source_ir(
         files=list(files),
+        source_id="zh.example",
+        language="zh",
+        source_format=source_format,
     )
 
 

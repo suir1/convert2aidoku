@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 
 import httpx
@@ -15,15 +14,11 @@ from convert2aidoku.validator import (
     _resolve_proxy,
     validate_project,
 )
+from tests.scenarios import source_metadata_project
 
 
 def test_blocked_site_probe_confirms_http_403(tmp_path: Path, monkeypatch) -> None:
-    resource = tmp_path / "res"
-    resource.mkdir()
-    (resource / "source.json").write_text(
-        json.dumps({"info": {"url": "https://example.com"}}),
-        encoding="utf-8",
-    )
+    source_metadata_project(tmp_path)
     monkeypatch.setattr(
         "convert2aidoku.validator.httpx.get",
         lambda *_args, **_kwargs: httpx.Response(403, text="challenge"),
@@ -40,12 +35,7 @@ def test_site_probe_does_not_block_normal_cloudflare_cdn_reference(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    resource = tmp_path / "res"
-    resource.mkdir()
-    (resource / "source.json").write_text(
-        json.dumps({"info": {"url": "https://example.com"}}),
-        encoding="utf-8",
-    )
+    source_metadata_project(tmp_path)
     monkeypatch.setattr(
         "convert2aidoku.validator.httpx.get",
         lambda *_args, **_kwargs: httpx.Response(
@@ -58,12 +48,7 @@ def test_site_probe_does_not_block_normal_cloudflare_cdn_reference(
 
 
 def test_site_probe_detects_explicit_challenge_page(tmp_path: Path, monkeypatch) -> None:
-    resource = tmp_path / "res"
-    resource.mkdir()
-    (resource / "source.json").write_text(
-        json.dumps({"info": {"url": "https://example.com"}}),
-        encoding="utf-8",
-    )
+    source_metadata_project(tmp_path)
     monkeypatch.setattr(
         "convert2aidoku.validator.httpx.get",
         lambda *_args, **_kwargs: httpx.Response(
@@ -79,12 +64,7 @@ def test_site_probe_distinguishes_runner_fingerprint_from_browser_like_httpx(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    resource = tmp_path / "res"
-    resource.mkdir()
-    (resource / "source.json").write_text(
-        json.dumps({"info": {"url": "https://example.com"}}),
-        encoding="utf-8",
-    )
+    source_metadata_project(tmp_path)
     responses = iter(
         [
             httpx.Response(403, text="challenge"),
@@ -114,12 +94,7 @@ def test_site_probe_classifies_runner_request_error_when_httpx_succeeds(
     monkeypatch,
     runner_output: str,
 ) -> None:
-    resource = tmp_path / "res"
-    resource.mkdir()
-    (resource / "source.json").write_text(
-        json.dumps({"info": {"url": "https://example.com"}}),
-        encoding="utf-8",
-    )
+    source_metadata_project(tmp_path)
     monkeypatch.setattr(
         "convert2aidoku.validator.httpx.get",
         lambda *_args, **_kwargs: httpx.Response(200, text="<main>Comics</main>"),
@@ -147,12 +122,7 @@ def test_runner_assertion_failure_is_not_misclassified_as_network_failure() -> N
 
 
 def test_proxy_is_passed_to_probe_without_being_reported(tmp_path: Path, monkeypatch) -> None:
-    resource = tmp_path / "res"
-    resource.mkdir()
-    (resource / "source.json").write_text(
-        json.dumps({"info": {"url": "https://example.com"}}),
-        encoding="utf-8",
-    )
+    source_metadata_project(tmp_path)
     captured: dict[str, object] = {}
 
     def fake_get(*_args: object, **kwargs: object) -> httpx.Response:

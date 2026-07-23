@@ -2,7 +2,6 @@ import json
 from pathlib import Path
 
 import pytest
-from pydantic import SecretStr
 
 from convert2aidoku.ai import AIResult
 from convert2aidoku.analyzer import analyze_source
@@ -38,7 +37,7 @@ from convert2aidoku.models import (
     ValidationResult,
     ValidationStage,
 )
-from convert2aidoku.scaffold import create_scaffold
+from tests.scenarios import conversion_settings, scaffold_project
 
 FIXTURE = Path(__file__).parent / "fixtures" / "simple"
 ENCRYPTED_API_FIXTURE = Path(__file__).parent / "fixtures" / "encrypted_api"
@@ -233,11 +232,7 @@ def test_conversion_orchestrates_atomic_output(
         "convert2aidoku.converter.validate_project",
         lambda *_args, **_kwargs: ValidationResult(build_ok=True, package_ok=True, live_ok=True),
     )
-    settings = AISettings(
-        base_url="http://localhost/v1",
-        model="fake",
-        api_key=SecretStr("secret"),
-    )
+    settings = conversion_settings()
     output = tmp_path / "generated" / "en.simple"
 
     outcome = convert_source(str(FIXTURE), output=output, settings=settings, live=True)
@@ -271,11 +266,7 @@ def test_interrupted_conversion_resumes_saved_manifest_without_regeneration(
         "convert2aidoku.converter.validate_project",
         interrupted_validation,
     )
-    settings = AISettings(
-        base_url="http://localhost/v1",
-        model="fake",
-        api_key=SecretStr("secret"),
-    )
+    settings = conversion_settings()
     output = tmp_path / "generated" / "en.simple"
 
     with pytest.raises(RuntimeError, match="validator interruption"):
@@ -321,12 +312,7 @@ def test_repair_preserves_source_ir_required_resources(tmp_path: Path, monkeypat
         "convert2aidoku.converter.validate_project",
         lambda *_args, **_kwargs: next(validations),
     )
-    settings = AISettings(
-        base_url="http://localhost/v1",
-        model="fake",
-        api_key=SecretStr("secret"),
-        max_repair_rounds=1,
-    )
+    settings = conversion_settings(max_repair_rounds=1)
     output = tmp_path / "generated" / "en.simple"
 
     outcome = convert_source(str(FIXTURE), output=output, settings=settings, live=True)
@@ -370,12 +356,7 @@ def test_targeted_patch_failure_falls_back_to_full_repair(
         "convert2aidoku.converter.validate_project",
         lambda *_args, **_kwargs: next(validations),
     )
-    settings = AISettings(
-        base_url="http://localhost/v1",
-        model="fake",
-        api_key=SecretStr("secret"),
-        max_repair_rounds=1,
-    )
+    settings = conversion_settings(max_repair_rounds=1)
 
     outcome = convert_source(
         str(FIXTURE),
@@ -402,12 +383,7 @@ def test_forced_failed_conversion_preserves_existing_output(tmp_path: Path, monk
         "convert2aidoku.converter.validate_project",
         lambda *_args, **_kwargs: ValidationResult(),
     )
-    settings = AISettings(
-        base_url="http://localhost/v1",
-        model="fake",
-        api_key=SecretStr("secret"),
-        max_repair_rounds=0,
-    )
+    settings = conversion_settings(max_repair_rounds=0)
     output = tmp_path / "generated" / "en.simple"
     output.mkdir(parents=True)
     (output / "keep.txt").write_text("old", encoding="utf-8")
@@ -436,12 +412,7 @@ def test_contract_incomplete_build_stays_in_resumable_workspace(
         "convert2aidoku.converter._capability_gaps",
         lambda *_args, **_kwargs: ["synthetic missing capability"],
     )
-    settings = AISettings(
-        base_url="http://localhost/v1",
-        model="fake",
-        api_key=SecretStr("secret"),
-        max_repair_rounds=0,
-    )
+    settings = conversion_settings(max_repair_rounds=0)
     output = tmp_path / "generated" / "en.simple"
 
     outcome = convert_source(str(FIXTURE), output=output, settings=settings, live=True)
@@ -469,11 +440,7 @@ def test_resolved_contract_gaps_are_not_reported_as_final_warnings(
             live_ok=True,
         ),
     )
-    settings = AISettings(
-        base_url="http://localhost/v1",
-        model="fake",
-        api_key=SecretStr("secret"),
-    )
+    settings = conversion_settings()
 
     outcome = convert_source(
         str(FIXTURE),
@@ -487,9 +454,7 @@ def test_resolved_contract_gaps_are_not_reported_as_final_warnings(
 
 
 def test_validate_preserves_conversion_audit_fields(tmp_path: Path, monkeypatch) -> None:
-    with resolve_source(str(FIXTURE)) as resolved:
-        project = tmp_path / "project"
-        create_scaffold(project, analyze_source(resolved), resolved)
+    project, _ir = scaffold_project(tmp_path, fixture=FIXTURE)
     (project / "report.json").write_text(
         '{"status":"verified","input_ref":"source","source_id":"en.simple",'
         '"provider_base_url":"http://local/v1","model":"fake",'

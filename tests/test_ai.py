@@ -1,17 +1,14 @@
 import json
 
 import httpx
-from pydantic import SecretStr
 
 from convert2aidoku.ai import OpenAICompatibleClient, _contract_text, _strict_model_schema
-from convert2aidoku.config import AISettings
 from convert2aidoku.models import (
     GenerationManifest,
     RepairPatch,
     SourceFile,
-    SourceIR,
-    SourceMetadata,
 )
+from tests.scenarios import minimal_source_ir, provider_settings
 
 
 def _manifest() -> dict[str, object]:
@@ -74,11 +71,7 @@ def test_structured_manifest_response() -> None:
             },
         )
 
-    settings = AISettings(
-        base_url="http://local/v1",
-        model="test",
-        api_key=SecretStr("secret"),
-    )
+    settings = provider_settings()
     with OpenAICompatibleClient(settings, transport=httpx.MockTransport(handler)) as client:
         result = client._request_manifest([{"role": "user", "content": "test"}])
     assert result.structured_output
@@ -100,11 +93,7 @@ def test_falls_back_when_json_schema_is_rejected() -> None:
             json={"choices": [{"message": {"content": json.dumps(_manifest())}}]},
         )
 
-    settings = AISettings(
-        base_url="http://local/v1",
-        model="test",
-        api_key=SecretStr("secret"),
-    )
+    settings = provider_settings()
     with OpenAICompatibleClient(settings, transport=httpx.MockTransport(handler)) as client:
         result = client._request_manifest([{"role": "user", "content": "test"}])
     assert calls == 2
@@ -137,11 +126,7 @@ def test_typed_exchange_falls_back_for_repair_patch() -> None:
             json={"choices": [{"message": {"content": json.dumps(patch)}}]},
         )
 
-    settings = AISettings(
-        base_url="http://local/v1",
-        model="test",
-        api_key=SecretStr("secret"),
-    )
+    settings = provider_settings()
     with OpenAICompatibleClient(settings, transport=httpx.MockTransport(handler)) as client:
         result = client._request_model([{"role": "user", "content": "test"}], RepairPatch)
 
@@ -167,11 +152,7 @@ def test_manifest_dependency_policy_participates_in_validation_retry() -> None:
             json={"choices": [{"message": {"content": json.dumps(manifest)}}]},
         )
 
-    settings = AISettings(
-        base_url="http://local/v1",
-        model="test",
-        api_key=SecretStr("secret"),
-    )
+    settings = provider_settings()
     with OpenAICompatibleClient(settings, transport=httpx.MockTransport(handler)) as client:
         result = client._request_manifest([{"role": "user", "content": "test"}])
 
@@ -207,11 +188,7 @@ def test_invalid_filter_shape_is_retried_with_field_diagnostic() -> None:
             json={"choices": [{"message": {"content": json.dumps(manifest)}}]},
         )
 
-    settings = AISettings(
-        base_url="http://local/v1",
-        model="test",
-        api_key=SecretStr("secret"),
-    )
+    settings = provider_settings()
     with OpenAICompatibleClient(settings, transport=httpx.MockTransport(handler)) as client:
         result = client._request_manifest([{"role": "user", "content": "test"}])
 
@@ -235,11 +212,7 @@ def test_transient_provider_errors_are_retried_with_backoff() -> None:
             json={"choices": [{"message": {"content": json.dumps(_manifest())}}]},
         )
 
-    settings = AISettings(
-        base_url="http://local/v1",
-        model="test",
-        api_key=SecretStr("secret"),
-    )
+    settings = provider_settings()
     with OpenAICompatibleClient(
         settings,
         transport=httpx.MockTransport(handler),
@@ -267,21 +240,8 @@ def test_generate_sends_deterministic_source_evidence_instead_of_raw_files() -> 
             json={"choices": [{"message": {"content": json.dumps(_manifest())}}]},
         )
 
-    settings = AISettings(
-        base_url="http://local/v1",
-        model="test",
-        api_key=SecretStr("secret"),
-    )
-    ir = SourceIR(
-        input_ref="fixture",
-        metadata=SourceMetadata(
-            source_id="en.example",
-            package_name="example",
-            name="Example",
-            language="en",
-            base_url="https://example.com",
-        ),
-        main_class="Example",
+    settings = provider_settings()
+    ir = minimal_source_ir(
         files=[SourceFile(path="src/Example.kt", content="class Example", sha256="0")],
     )
 
@@ -308,21 +268,8 @@ def test_repair_uses_compact_context_without_original_source_bodies() -> None:
             json={"choices": [{"message": {"content": json.dumps(_manifest())}}]},
         )
 
-    settings = AISettings(
-        base_url="http://local/v1",
-        model="test",
-        api_key=SecretStr("secret"),
-    )
-    ir = SourceIR(
-        input_ref="fixture",
-        metadata=SourceMetadata(
-            source_id="en.example",
-            package_name="example",
-            name="Example",
-            language="en",
-            base_url="https://example.com",
-        ),
-        main_class="Example",
+    settings = provider_settings()
+    ir = minimal_source_ir(
         files=[
             SourceFile(
                 path="src/Example.kt",
@@ -380,22 +327,8 @@ def test_compiler_repair_sends_only_excerpts_and_returns_exact_edits() -> None:
             },
         )
 
-    settings = AISettings(
-        base_url="http://local/v1",
-        model="test",
-        api_key=SecretStr("secret"),
-    )
-    ir = SourceIR(
-        input_ref="fixture",
-        metadata=SourceMetadata(
-            source_id="en.example",
-            package_name="example",
-            name="Example",
-            language="en",
-            base_url="https://example.com",
-        ),
-        main_class="Example",
-    )
+    settings = provider_settings()
+    ir = minimal_source_ir()
     with OpenAICompatibleClient(settings, transport=httpx.MockTransport(handler)) as client:
         result = client.repair_patch(
             ir,
@@ -439,22 +372,8 @@ def test_contract_repair_sends_only_scoped_excerpts() -> None:
             },
         )
 
-    settings = AISettings(
-        base_url="http://local/v1",
-        model="test",
-        api_key=SecretStr("secret"),
-    )
-    ir = SourceIR(
-        input_ref="fixture",
-        metadata=SourceMetadata(
-            source_id="en.example",
-            package_name="example",
-            name="Example",
-            language="en",
-            base_url="https://example.com",
-        ),
-        main_class="Example",
-    )
+    settings = provider_settings()
+    ir = minimal_source_ir()
     with OpenAICompatibleClient(settings, transport=httpx.MockTransport(handler)) as client:
         result = client.repair_patch(
             ir,
