@@ -5,7 +5,7 @@ import os
 import re
 import shutil
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .ai import AIResult, OpenAICompatibleClient, ai_round
@@ -171,32 +171,6 @@ def _contract_gap_file_excerpts(
 
 def _remove_generated_smoke_for_repair(content: str) -> str:
     return content.replace("\n#[cfg(test)]\nmod generated_smoke;\n", "\n")
-
-
-def _can_use_targeted_repair(
-    validation: ValidationResult,
-    capability_gaps: list[str],
-    excerpts: list[dict[str, object]],
-) -> bool:
-    failed_stages = {stage.name for stage in validation.stages if not stage.ok}
-    return (
-        not capability_gaps
-        and bool(excerpts)
-        and bool(failed_stages)
-        and failed_stages <= {"cargo-check", "clippy", "clippy-fix"}
-    )
-
-
-def _can_use_contract_repair(
-    capability_gaps: list[str],
-    excerpts: list[dict[str, object]],
-) -> bool:
-    supported_markers = ("one-retry", "Regex::new")
-    return (
-        bool(excerpts)
-        and bool(capability_gaps)
-        and all(any(marker in gap for marker in supported_markers) for gap in capability_gaps)
-    )
 
 
 def _apply_repair_patch(
@@ -668,122 +642,217 @@ def _load_checkpoint(workspace: Path) -> ConversionCheckpoint:
         raise InputError(f"invalid resume checkpoint {path}: {exc}") from exc
 
 
-def _manifest_path(workspace: Path, relative: str) -> Path:
-    candidate = Path(relative)
-    if candidate.is_absolute() or ".." in candidate.parts or candidate.parts[:1] != ("manifests",):
-        raise InputError(f"invalid manifest path in resume checkpoint: {relative}")
-    path = workspace.joinpath(*candidate.parts)
-    if path.is_symlink():
-        raise InputError(f"refusing symbolic-link resume manifest: {path}")
-    return path
+@dataclass
+class _ConversionRoundRunner:
+    ir: SourceIR
+    workspace: Path
+    project: Path
+    checkpoint: ConversionCheckpoint
+    query: str | None
+    live: bool
+    proxy: str | None
+    manifest: GenerationManifest = field(init=False)
+    capability_gaps: list[str] = field(init=False)
+    validation: ValidationResult = field(init=False)
 
+    def _manifest_path(self, relative: str) -> Path:
+        candidate = Path(relative)
+        if (
+            candidate.is_absolute()
+            or ".." in candidate.parts
+            or candidate.parts[:1] != ("manifests",)
+        ):
+            raise InputError(f"invalid manifest path in resume checkpoint: {relative}")
+        path = self.workspace.joinpath(*candidate.parts)
+        if path.is_symlink():
+            raise InputError(f"refusing symbolic-link resume manifest: {path}")
+        return path
 
-def _save_manifest(
-    workspace: Path,
-    checkpoint: ConversionCheckpoint,
-    result: AIResult[GenerationManifest],
-    *,
-    purpose: str,
-) -> GenerationManifest:
-    number = len(checkpoint.ai_rounds) + 1
-    relative = f"manifests/round-{number:02d}.json"
-    path = _manifest_path(workspace, relative)
-    path.parent.mkdir(exist_ok=True)
-    _atomic_write_text(path, result.value.model_dump_json(indent=2) + "\n")
-    checkpoint.current_manifest = relative
-    checkpoint.ai_rounds.append(ai_round(number, purpose, result))
-    checkpoint.warnings.extend(result.warnings)
-    checkpoint.manifest_warnings = list(result.value.warnings)
-    checkpoint.unsupported_features.extend(result.value.unsupported_features)
-    checkpoint.phase = "manifest_saved"
-    checkpoint.validation = None
-    _write_checkpoint(workspace, checkpoint)
-    return result.value
-
-
-def _load_manifest(workspace: Path, checkpoint: ConversionCheckpoint) -> GenerationManifest:
-    if checkpoint.current_manifest is None:
-        raise InputError("resume checkpoint has no saved generation manifest")
-    path = _manifest_path(workspace, checkpoint.current_manifest)
-    if not path.is_file():
-        raise InputError(f"saved generation manifest is missing: {path}")
-    try:
-        return GenerationManifest.model_validate_json(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise InputError(f"invalid saved generation manifest {path}: {exc}") from exc
-
-
-def _manifest_history(workspace: Path, checkpoint: ConversionCheckpoint) -> list[dict[str, object]]:
-    history: list[dict[str, object]] = []
-    for number in range(1, len(checkpoint.ai_rounds) + 1):
-        relative = f"manifests/round-{number:02d}.json"
-        path = _manifest_path(workspace, relative)
+    def load(self) -> GenerationManifest:
+        if self.checkpoint.current_manifest is None:
+            raise InputError("resume checkpoint has no saved generation manifest")
+        path = self._manifest_path(self.checkpoint.current_manifest)
+        if not path.is_file():
+            raise InputError(f"saved generation manifest is missing: {path}")
         try:
-            manifest = GenerationManifest.model_validate_json(path.read_text(encoding="utf-8"))
+            return GenerationManifest.model_validate_json(path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             raise InputError(f"invalid saved generation manifest {path}: {exc}") from exc
-        history.append(
-            {
-                "round": number,
-                "implemented_traits": manifest.implemented_traits,
-                "dependencies": [item.model_dump(mode="json") for item in manifest.dependencies],
-                "file_paths": [item.path for item in manifest.files],
-            }
-        )
-    return history
 
-
-def _effective_manifest(
-    ir: SourceIR,
-    workspace: Path,
-    checkpoint: ConversionCheckpoint,
-    manifest: GenerationManifest,
-) -> GenerationManifest:
-    """Carry required resources across repair rounds without altering raw AI audit files."""
-    required_paths = set()
-    if Capability.FILTERS in ir.capabilities:
-        required_paths.add("res/filters.json")
-    if Capability.SETTINGS in ir.capabilities or Capability.DYNAMIC_BASE_URLS in ir.capabilities:
-        required_paths.add("res/settings.json")
-    present = {item.path for item in manifest.files}
-    missing = required_paths - present
-    inherited = []
-    if missing:
-        for number in range(len(checkpoint.ai_rounds) - 1, 0, -1):
-            previous_path = _manifest_path(workspace, f"manifests/round-{number:02d}.json")
+    def _history(self) -> list[dict[str, object]]:
+        history: list[dict[str, object]] = []
+        for number in range(1, len(self.checkpoint.ai_rounds) + 1):
+            path = self._manifest_path(f"manifests/round-{number:02d}.json")
             try:
-                previous = GenerationManifest.model_validate_json(
-                    previous_path.read_text(encoding="utf-8")
-                )
+                manifest = GenerationManifest.model_validate_json(path.read_text(encoding="utf-8"))
             except (OSError, ValueError) as exc:
-                raise InputError(
-                    f"invalid saved generation manifest {previous_path}: {exc}"
-                ) from exc
-            for item in previous.files:
-                if item.path in missing:
-                    inherited.append(item)
-                    missing.remove(item.path)
-            if not missing:
-                break
-    effective = manifest
-    if inherited:
-        inherited_paths = sorted(item.path for item in inherited)
-        warning = (
-            "repair manifest omitted SourceIR-required resources; preserved from the prior "
-            "round: " + ", ".join(inherited_paths)
+                raise InputError(f"invalid saved generation manifest {path}: {exc}") from exc
+            history.append(
+                {
+                    "round": number,
+                    "implemented_traits": manifest.implemented_traits,
+                    "dependencies": [
+                        item.model_dump(mode="json") for item in manifest.dependencies
+                    ],
+                    "file_paths": [item.path for item in manifest.files],
+                }
+            )
+        return history
+
+    def _effective(self, manifest: GenerationManifest) -> GenerationManifest:
+        """Carry required resources across rounds without altering raw audit manifests."""
+        required_paths = set()
+        if Capability.FILTERS in self.ir.capabilities:
+            required_paths.add("res/filters.json")
+        if (
+            Capability.SETTINGS in self.ir.capabilities
+            or Capability.DYNAMIC_BASE_URLS in self.ir.capabilities
+        ):
+            required_paths.add("res/settings.json")
+        missing = required_paths - {item.path for item in manifest.files}
+        inherited = []
+        if missing:
+            for number in range(len(self.checkpoint.ai_rounds) - 1, 0, -1):
+                path = self._manifest_path(f"manifests/round-{number:02d}.json")
+                try:
+                    previous = GenerationManifest.model_validate_json(
+                        path.read_text(encoding="utf-8")
+                    )
+                except (OSError, ValueError) as exc:
+                    raise InputError(f"invalid saved generation manifest {path}: {exc}") from exc
+                for item in previous.files:
+                    if item.path in missing:
+                        inherited.append(item)
+                        missing.remove(item.path)
+                if not missing:
+                    break
+        effective = manifest
+        if inherited:
+            paths = sorted(item.path for item in inherited)
+            warning = (
+                "repair manifest omitted SourceIR-required resources; preserved from the prior "
+                "round: " + ", ".join(paths)
+            )
+            if warning not in self.checkpoint.warnings:
+                self.checkpoint.warnings.append(warning)
+            effective = manifest.model_copy(update={"files": manifest.files + inherited})
+        setting_overrides = (
+            _LIVE_VALIDATED_SETTING_DEFAULTS.get(self.ir.metadata.source_id)
+            if Capability.DYNAMIC_BASE_URLS in self.ir.capabilities
+            else None
         )
-        if warning not in checkpoint.warnings:
-            checkpoint.warnings.append(warning)
-        effective = manifest.model_copy(update={"files": manifest.files + inherited})
-    setting_overrides = (
-        _LIVE_VALIDATED_SETTING_DEFAULTS.get(ir.metadata.source_id)
-        if Capability.DYNAMIC_BASE_URLS in ir.capabilities
-        else None
-    )
-    return GeneratedResources(effective).with_defaults(
-        filter_specs=ir.filter_specs,
-        setting_overrides=setting_overrides,
-    )
+        return GeneratedResources(effective).with_defaults(
+            filter_specs=self.ir.filter_specs,
+            setting_overrides=setting_overrides,
+        )
+
+    def evaluate(self, manifest: GenerationManifest) -> None:
+        self.manifest = self._effective(manifest)
+        generated_files = apply_generation_manifest(
+            self.project, self.ir, self.manifest, query=self.query
+        )
+        self.capability_gaps = _capability_gaps(self.ir, self.manifest)
+        self.validation = validate_project(self.project, live=self.live, proxy=self.proxy)
+        self.validation.contract_ok = not self.capability_gaps
+        self.checkpoint.generated_files = generated_files
+        self.checkpoint.capability_gaps = self.capability_gaps
+        self.checkpoint.validation = self.validation
+        self.checkpoint.phase = "validated"
+        _write_checkpoint(self.workspace, self.checkpoint)
+
+    def accept(self, result: AIResult[GenerationManifest], *, purpose: str) -> None:
+        number = len(self.checkpoint.ai_rounds) + 1
+        relative = f"manifests/round-{number:02d}.json"
+        path = self._manifest_path(relative)
+        path.parent.mkdir(exist_ok=True)
+        _atomic_write_text(path, result.value.model_dump_json(indent=2) + "\n")
+        self.checkpoint.current_manifest = relative
+        self.checkpoint.ai_rounds.append(ai_round(number, purpose, result))
+        self.checkpoint.warnings.extend(result.warnings)
+        self.checkpoint.manifest_warnings = list(result.value.warnings)
+        self.checkpoint.unsupported_features.extend(result.value.unsupported_features)
+        self.checkpoint.phase = "manifest_saved"
+        self.checkpoint.validation = None
+        _write_checkpoint(self.workspace, self.checkpoint)
+        self.evaluate(result.value)
+
+    def request_repair(
+        self,
+        client: OpenAICompatibleClient,
+    ) -> AIResult[GenerationManifest]:
+        current_files = read_generated_files(self.project)
+        targeted_diagnostics = self.validation.diagnostics[-MAX_AI_DIAGNOSTIC_CHARS:]
+        excerpts = _diagnostic_file_excerpts(self.project, targeted_diagnostics)
+        contract_excerpts = _contract_gap_file_excerpts(self.project, self.capability_gaps)
+        patch_request = None
+        contract_patch = (
+            contract_excerpts
+            and self.capability_gaps
+            and all("one-retry" in gap or "Regex::new" in gap for gap in self.capability_gaps)
+        )
+        if contract_patch:
+            patch_request = (
+                "contract",
+                contract_excerpts,
+                "\n".join(self.capability_gaps)[-MAX_AI_DIAGNOSTIC_CHARS:],
+                "contract",
+            )
+        else:
+            failed_stages = {stage.name for stage in self.validation.stages if not stage.ok}
+            if (
+                not self.capability_gaps
+                and excerpts
+                and failed_stages
+                and failed_stages <= {"cargo-check", "clippy", "clippy-fix"}
+            ):
+                patch_request = ("compiler", excerpts, targeted_diagnostics, "targeted")
+
+        fallback_warning = None
+        if patch_request is not None:
+            scope, patch_excerpts, patch_diagnostics, fallback_label = patch_request
+            try:
+                patch_result = client.repair_patch(
+                    self.ir,
+                    current_file_excerpts=patch_excerpts,
+                    diagnostics=patch_diagnostics,
+                    scope=scope,
+                )
+                patched_manifest = _apply_repair_patch(
+                    self.manifest,
+                    current_files,
+                    patch_result.value,
+                    patch_excerpts,
+                )
+                return patch_result.with_value(patched_manifest)
+            except AIProviderError as exc:
+                fallback_warning = f"{fallback_label} patch fallback: {exc}"
+
+        diagnostics = _repair_diagnostics(
+            self.ir,
+            self.validation,
+            self.capability_gaps,
+        )[-MAX_AI_DIAGNOSTIC_CHARS:]
+        repaired = client.repair(
+            self.ir,
+            current_files=current_files,
+            diagnostics=diagnostics,
+            manifest_history=self._history(),
+        )
+        if fallback_warning:
+            repaired.warnings.append(fallback_warning)
+        return repaired
+
+    def repair(self, settings: AISettings) -> None:
+        repair_number = max(0, len(self.checkpoint.ai_rounds) - 1)
+        if not _should_repair(self.validation, self.capability_gaps, live=self.live):
+            return
+        with OpenAICompatibleClient(settings) as client:
+            while (
+                _should_repair(self.validation, self.capability_gaps, live=self.live)
+                and repair_number < settings.max_repair_rounds
+            ):
+                repair_number += 1
+                self.accept(self.request_repair(client), purpose="repair")
 
 
 def _restore_installed_workspace(output: Path, workspace: Path) -> None:
@@ -996,124 +1065,26 @@ def convert_source(
         _write_checkpoint(workspace, checkpoint)
 
     template_matches = match_templates(ir)
+    rounds = _ConversionRoundRunner(
+        ir=ir,
+        workspace=workspace,
+        project=project,
+        checkpoint=checkpoint,
+        query=query,
+        live=live,
+        proxy=proxy,
+    )
     if checkpoint.current_manifest is not None:
-        manifest = _load_manifest(workspace, checkpoint)
-        manifest = _effective_manifest(ir, workspace, checkpoint, manifest)
-        generated_files = apply_generation_manifest(project, ir, manifest, query=query)
-        capability_gaps = _capability_gaps(ir, manifest)
-        validation = validate_project(project, live=live, proxy=proxy)
-        validation.contract_ok = not capability_gaps
-        checkpoint.generated_files = generated_files
-        checkpoint.capability_gaps = capability_gaps
-        checkpoint.validation = validation
-        checkpoint.phase = "validated"
-        _write_checkpoint(workspace, checkpoint)
+        rounds.evaluate(rounds.load())
     else:
         with OpenAICompatibleClient(settings) as client:
-            generated = client.generate(ir)
-            manifest = _save_manifest(
-                workspace,
-                checkpoint,
-                generated,
+            rounds.accept(
+                client.generate(ir),
                 purpose="generate",
             )
-            manifest = _effective_manifest(ir, workspace, checkpoint, manifest)
-            generated_files = apply_generation_manifest(project, ir, manifest, query=query)
-            capability_gaps = _capability_gaps(ir, manifest)
-            validation = validate_project(project, live=live, proxy=proxy)
-            validation.contract_ok = not capability_gaps
-            checkpoint.generated_files = generated_files
-            checkpoint.capability_gaps = capability_gaps
-            checkpoint.validation = validation
-            checkpoint.phase = "validated"
-            _write_checkpoint(workspace, checkpoint)
 
-    repair_number = max(0, len(checkpoint.ai_rounds) - 1)
-    if _should_repair(validation, capability_gaps, live=live):
-        with OpenAICompatibleClient(settings) as client:
-            while (
-                _should_repair(validation, capability_gaps, live=live)
-                and repair_number < settings.max_repair_rounds
-            ):
-                repair_number += 1
-                current_files = read_generated_files(project)
-                targeted_diagnostics = validation.diagnostics[-MAX_AI_DIAGNOSTIC_CHARS:]
-                excerpts = _diagnostic_file_excerpts(project, targeted_diagnostics)
-                contract_excerpts = _contract_gap_file_excerpts(project, capability_gaps)
-                if _can_use_contract_repair(capability_gaps, contract_excerpts):
-                    try:
-                        patch_result = client.repair_patch(
-                            ir,
-                            current_file_excerpts=contract_excerpts,
-                            diagnostics="\n".join(capability_gaps)[-MAX_AI_DIAGNOSTIC_CHARS:],
-                            scope="contract",
-                        )
-                        patched_manifest = _apply_repair_patch(
-                            manifest,
-                            current_files,
-                            patch_result.value,
-                            contract_excerpts,
-                        )
-                        repaired = patch_result.with_value(patched_manifest)
-                    except AIProviderError as exc:
-                        diagnostics = _repair_diagnostics(ir, validation, capability_gaps)
-                        diagnostics = diagnostics[-MAX_AI_DIAGNOSTIC_CHARS:]
-                        repaired = client.repair(
-                            ir,
-                            current_files=current_files,
-                            diagnostics=diagnostics,
-                            manifest_history=_manifest_history(workspace, checkpoint),
-                        )
-                        repaired.warnings.append(f"contract patch fallback: {exc}")
-                elif _can_use_targeted_repair(validation, capability_gaps, excerpts):
-                    try:
-                        patch_result = client.repair_patch(
-                            ir,
-                            current_file_excerpts=excerpts,
-                            diagnostics=targeted_diagnostics,
-                        )
-                        patched_manifest = _apply_repair_patch(
-                            manifest,
-                            current_files,
-                            patch_result.value,
-                            excerpts,
-                        )
-                        repaired = patch_result.with_value(patched_manifest)
-                    except AIProviderError as exc:
-                        diagnostics = _repair_diagnostics(ir, validation, capability_gaps)
-                        diagnostics = diagnostics[-MAX_AI_DIAGNOSTIC_CHARS:]
-                        repaired = client.repair(
-                            ir,
-                            current_files=current_files,
-                            diagnostics=diagnostics,
-                            manifest_history=_manifest_history(workspace, checkpoint),
-                        )
-                        repaired.warnings.append(f"targeted repair fallback: {exc}")
-                else:
-                    diagnostics = _repair_diagnostics(ir, validation, capability_gaps)
-                    diagnostics = diagnostics[-MAX_AI_DIAGNOSTIC_CHARS:]
-                    repaired = client.repair(
-                        ir,
-                        current_files=current_files,
-                        diagnostics=diagnostics,
-                        manifest_history=_manifest_history(workspace, checkpoint),
-                    )
-                manifest = _save_manifest(
-                    workspace,
-                    checkpoint,
-                    repaired,
-                    purpose="repair",
-                )
-                manifest = _effective_manifest(ir, workspace, checkpoint, manifest)
-                generated_files = apply_generation_manifest(project, ir, manifest, query=query)
-                capability_gaps = _capability_gaps(ir, manifest)
-                validation = validate_project(project, live=live, proxy=proxy)
-                validation.contract_ok = not capability_gaps
-                checkpoint.generated_files = generated_files
-                checkpoint.capability_gaps = capability_gaps
-                checkpoint.validation = validation
-                checkpoint.phase = "validated"
-                _write_checkpoint(workspace, checkpoint)
+    rounds.repair(settings)
+    validation = rounds.validation
 
     deterministic_files = [
         ".cargo/config.toml",

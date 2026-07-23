@@ -23,6 +23,7 @@ from convert2aidoku.models import (
     Capability,
     ChapterPageRoute,
     ChapterPageRouteVariant,
+    ConversionCheckpoint,
     ConversionStatus,
     DependencyRequest,
     GeneratedFile,
@@ -35,6 +36,7 @@ from convert2aidoku.models import (
     SourceFilterOption,
     SourceFilterSpec,
     ValidationResult,
+    ValidationStage,
 )
 from convert2aidoku.scaffold import create_scaffold
 
@@ -187,6 +189,41 @@ class ResourceDroppingRepairClient(FakeClient):
         )
 
 
+class PatchFallbackClient(FakeClient):
+    patch_calls = 0
+    full_repair_calls = 0
+
+    def repair_patch(
+        self,
+        _ir: object,
+        *,
+        current_file_excerpts: object,
+        diagnostics: str,
+        scope: str = "compiler",
+    ) -> AIResult:
+        type(self).patch_calls += 1
+        assert scope == "compiler"
+        assert diagnostics
+        assert current_file_excerpts
+        raise AIProviderError("synthetic invalid patch")
+
+    def repair(
+        self,
+        _ir: object,
+        *,
+        current_files: object,
+        diagnostics: str,
+        manifest_history: object | None = None,
+    ) -> AIResult:
+        type(self).full_repair_calls += 1
+        return super().repair(
+            _ir,
+            current_files=current_files,
+            diagnostics=diagnostics,
+            manifest_history=manifest_history,
+        )
+
+
 def test_conversion_orchestrates_atomic_output(
     tmp_path: Path,
     monkeypatch,
@@ -302,6 +339,61 @@ def test_repair_preserves_source_ir_required_resources(tmp_path: Path, monkeypat
     )
     assert [item.path for item in raw_repair.files] == ["src/lib.rs"]
     assert any("preserved from the prior round" in item for item in outcome.report.warnings)
+
+
+def test_targeted_patch_failure_falls_back_to_full_repair(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    PatchFallbackClient.patch_calls = 0
+    PatchFallbackClient.full_repair_calls = 0
+    monkeypatch.setattr(
+        "convert2aidoku.converter.OpenAICompatibleClient",
+        PatchFallbackClient,
+    )
+    validations = iter(
+        [
+            ValidationResult(
+                stages=[
+                    ValidationStage(
+                        name="cargo-check",
+                        kind="check",
+                        ok=False,
+                        output="error\n  --> src/lib.rs:1:1",
+                    )
+                ]
+            ),
+            ValidationResult(build_ok=True, package_ok=True, live_ok=True),
+        ]
+    )
+    monkeypatch.setattr(
+        "convert2aidoku.converter.validate_project",
+        lambda *_args, **_kwargs: next(validations),
+    )
+    settings = AISettings(
+        base_url="http://localhost/v1",
+        model="fake",
+        api_key=SecretStr("secret"),
+        max_repair_rounds=1,
+    )
+
+    outcome = convert_source(
+        str(FIXTURE),
+        output=tmp_path / "generated" / "en.simple",
+        settings=settings,
+        live=True,
+    )
+
+    assert outcome.report.status is ConversionStatus.VERIFIED
+    assert PatchFallbackClient.patch_calls == 1
+    assert PatchFallbackClient.full_repair_calls == 1
+    assert len(outcome.report.ai_rounds) == 2
+    assert any("targeted patch fallback" in warning for warning in outcome.report.warnings)
+    checkpoint = ConversionCheckpoint.model_validate_json(
+        (outcome.output / ".c2a" / "checkpoint.json").read_text(encoding="utf-8")
+    )
+    assert checkpoint.phase == "complete"
+    assert checkpoint.current_manifest == "manifests/round-02.json"
 
 
 def test_forced_failed_conversion_preserves_existing_output(tmp_path: Path, monkeypatch) -> None:

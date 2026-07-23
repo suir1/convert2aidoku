@@ -28,6 +28,10 @@ _Avoid_: Rust policy, contract check
 A provider request for one declared Pydantic model, including Structured Output fallback, validation feedback, usage, and warnings.
 _Avoid_: Raw AI response, model call
 
+**Conversion Round**:
+One materialization, contract evaluation, validation, and **Checkpoint** update for the current effective **Generation Manifest**.
+_Avoid_: AI call, repair attempt
+
 **Checkpoint**:
 The resumable record of conversion phase, AI rounds, current manifest, diagnostics, and validation state.
 _Avoid_: Cache, session file
@@ -51,6 +55,7 @@ _Avoid_: Log
 - One **Generation Manifest** owns zero or one filter resource and zero or one settings resource as **Generated Resources**.
 - One **Generation Manifest** yields one **Rust Inspection** of its controlled Rust files during contract evaluation.
 - Each AI round is produced by one successful **Typed AI Exchange**.
+- Each **Conversion Round** evaluates one effective **Generation Manifest** and records its generated files, contract gaps, and **Validation Result** in the **Checkpoint**.
 - One effective **Generation Manifest** materializes one **Generated Source**.
 - One **Validation Result** evaluates one materialized **Generated Source**.
 - One **Conversion Report** summarizes one conversion attempt without storing provider credentials.
