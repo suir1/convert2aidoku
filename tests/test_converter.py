@@ -431,17 +431,8 @@ def test_validate_preserves_conversion_audit_fields(tmp_path: Path, monkeypatch)
 def test_relative_key_requests_are_contract_gaps() -> None:
     with resolve_source(str(FIXTURE)) as resolved:
         ir = analyze_source(resolved).model_copy(update={"relative_url_keys": True})
-    manifest = GenerationManifest(
-        source_struct="Simple",
-        files=[
-            GeneratedFile(
-                path="src/lib.rs",
-                content=(
-                    "fn request(url: String) {}\n"
-                    "fn update(manga: Manga) { self.request(manga.key.clone()); }"
-                ),
-            )
-        ],
+    manifest = generation_manifest(
+        "fn request(url: String) {}\nfn update(manga: Manga) { self.request(manga.key.clone()); }"
     )
 
     gaps = _contract_messages(ir, manifest)
@@ -472,14 +463,8 @@ def test_chapter_page_route_replacement_is_a_contract_gap() -> None:
                 ]
             }
         )
-    manifest = GenerationManifest(
-        source_struct="Simple",
-        files=[
-            GeneratedFile(
-                path="src/lib.rs",
-                content='fn page(key: &str) { let _ = key.trim_start_matches("/comic/"); }',
-            )
-        ],
+    manifest = generation_manifest(
+        'fn page(key: &str) { let _ = key.trim_start_matches("/comic/"); }'
     )
 
     gaps = _contract_messages(ir, manifest)
@@ -497,19 +482,11 @@ def test_cover_urls_and_chapter_resolution_scope_are_contract_gaps() -> None:
                 )
             }
         )
-    manifest = GenerationManifest(
-        source_struct="Simple",
-        files=[
-            GeneratedFile(
-                path="src/lib.rs",
-                content=(
-                    "fn image_resolution(url: String) -> String { url }\n"
-                    "fn comic_to_manga(comic: Comic) -> Manga { Manga { "
-                    "cover: Some(self.image_resolution(comic.cover)), "
-                    "..Default::default() } }"
-                ),
-            )
-        ],
+    manifest = generation_manifest(
+        "fn image_resolution(url: String) -> String { url }\n"
+        "fn comic_to_manga(comic: Comic) -> Manga { Manga { "
+        "cover: Some(self.image_resolution(comic.cover)), "
+        "..Default::default() } }"
     )
 
     gaps = _contract_messages(ir, manifest)
@@ -550,25 +527,18 @@ def test_recovered_filter_contract_rejects_wrong_types_values_and_defaults() -> 
                 ],
             }
         )
-    manifest = GenerationManifest(
-        source_struct="Simple",
-        files=[
-            GeneratedFile(
-                path="src/lib.rs",
-                content="fn filter(filters: Vec<FilterValue>) { "
-                "if let FilterValue::Select { .. } = filters[0] {} }",
-            ),
-            GeneratedFile(
-                path="res/filters.json",
-                content=(
-                    '[{"type":"select","id":"audience","title":"Audience",'
-                    '"options":["Male","Female"],"ids":["male_default","female"]},'
-                    '{"type":"select","id":"sort","title":"Sort",'
-                    '"options":["Popular","Updated"],'
-                    '"ids":["popular","datetime_updated"]}]'
-                ),
-            ),
-        ],
+    manifest = generation_manifest(
+        "fn filter(filters: Vec<FilterValue>) { "
+        "if let FilterValue::Select { .. } = filters[0] {} }",
+        resources={
+            "res/filters.json": (
+                '[{"type":"select","id":"audience","title":"Audience",'
+                '"options":["Male","Female"],"ids":["male_default","female"]},'
+                '{"type":"select","id":"sort","title":"Sort",'
+                '"options":["Popular","Updated"],'
+                '"ids":["popular","datetime_updated"]}]'
+            )
+        },
     )
 
     gaps = _contract_messages(ir, manifest)
@@ -596,17 +566,9 @@ def test_detail_api_response_envelope_is_a_contract_gap() -> None:
                 ]
             }
         )
-    manifest = GenerationManifest(
-        source_struct="Simple",
-        files=[
-            GeneratedFile(
-                path="src/lib.rs",
-                content=(
-                    "fn detail(&self, key: &str) -> Result<DetailResult> { "
-                    "self.request(key)?.send()?.get_json_owned() }"
-                ),
-            )
-        ],
+    manifest = generation_manifest(
+        "fn detail(&self, key: &str) -> Result<DetailResult> { "
+        "self.request(key)?.send()?.get_json_owned() }"
     )
 
     gaps = _contract_messages(ir, manifest)
@@ -646,19 +608,15 @@ def test_recovered_filter_defaults_are_injected_deterministically() -> None:
                 ]
             }
         )
-    manifest = GenerationManifest(
-        source_struct="Simple",
-        files=[
-            GeneratedFile(path="src/lib.rs", content=RUST_SOURCE),
-            GeneratedFile(
-                path="res/filters.json",
-                content=(
-                    '[{"type":"select","id":"audience","options":["Male","Female"],'
-                    '"ids":["male","female"]},'
-                    '{"type":"sort","id":"sort","options":["Popular","Updated"]}]'
-                ),
-            ),
-        ],
+    manifest = generation_manifest(
+        RUST_SOURCE,
+        resources={
+            "res/filters.json": (
+                '[{"type":"select","id":"audience","options":["Male","Female"],'
+                '"ids":["male","female"]},'
+                '{"type":"sort","id":"sort","options":["Popular","Updated"]}]'
+            )
+        },
     )
 
     effective = GeneratedResources(manifest).with_defaults(filter_specs=ir.filter_specs)
@@ -677,13 +635,9 @@ def test_recovered_filter_defaults_are_injected_deterministically() -> None:
 def test_empty_declared_resources_are_contract_gaps() -> None:
     with resolve_source(str(FIXTURE)) as resolved:
         ir = analyze_source(resolved).model_copy(update={"capabilities": ["filters", "settings"]})
-    manifest = GenerationManifest(
-        source_struct="Simple",
-        files=[
-            GeneratedFile(path="src/lib.rs", content=RUST_SOURCE),
-            GeneratedFile(path="res/filters.json", content="[]"),
-            GeneratedFile(path="res/settings.json", content="[]"),
-        ],
+    manifest = generation_manifest(
+        RUST_SOURCE,
+        resources={"res/filters.json": "[]", "res/settings.json": "[]"},
     )
 
     gaps = _contract_messages(ir, manifest)
@@ -697,10 +651,7 @@ def test_declared_dynamic_filters_and_deep_links_require_providers() -> None:
         ir = analyze_source(resolved).model_copy(
             update={"capabilities": [Capability.DYNAMIC_FILTERS, Capability.DEEP_LINKS]}
         )
-    manifest = GenerationManifest(
-        source_struct="Simple",
-        files=[GeneratedFile(path="src/lib.rs", content=RUST_SOURCE)],
-    )
+    manifest = generation_manifest(RUST_SOURCE)
 
     gaps = _contract_messages(ir, manifest)
 
@@ -713,18 +664,9 @@ def test_dynamic_filters_cannot_deserialize_aidoku_filter_from_json() -> None:
         ir = analyze_source(resolved).model_copy(
             update={"capabilities": [Capability.DYNAMIC_FILTERS]}
         )
-    manifest = GenerationManifest(
-        source_struct="Simple",
-        implemented_traits=["DynamicFilters"],
-        files=[
-            GeneratedFile(
-                path="src/lib.rs",
-                content=(
-                    "fn get_dynamic_filters(&self) -> Result<Vec<Filter>> { "
-                    'serde_json::from_str("[]") }'
-                ),
-            )
-        ],
+    manifest = generation_manifest(
+        'fn get_dynamic_filters(&self) -> Result<Vec<Filter>> { serde_json::from_str("[]") }',
+        traits=("DynamicFilters",),
     )
 
     gaps = _contract_messages(ir, manifest)
@@ -737,21 +679,13 @@ def test_graphql_dynamic_filters_cannot_repeat_a_full_listing_request() -> None:
         ir = analyze_source(resolved).model_copy(
             update={"capabilities": [Capability.DYNAMIC_FILTERS, Capability.JSON_API]}
         )
-    manifest = GenerationManifest(
-        source_struct="Simple",
-        implemented_traits=["DynamicFilters"],
-        dependencies=[DependencyRequest(name="serde")],
-        files=[
-            GeneratedFile(
-                path="src/lib.rs",
-                content=(
-                    'fn listing_query(&self) { let query = "query comics { comics { '
-                    'id title description } allCategory { id name } }"; }\n'
-                    "fn get_dynamic_filters(&self) { self.listing_query(); }\n"
-                    "fn get_search_manga_list(&self) { self.listing_query(); }\n"
-                ),
-            )
-        ],
+    manifest = generation_manifest(
+        'fn listing_query(&self) { let query = "query comics { comics { '
+        'id title description } allCategory { id name } }"; }\n'
+        "fn get_dynamic_filters(&self) { self.listing_query(); }\n"
+        "fn get_search_manga_list(&self) { self.listing_query(); }\n",
+        traits=("DynamicFilters",),
+        dependencies=(DependencyRequest(name="serde"),),
     )
 
     gaps = _contract_messages(ir, manifest)
@@ -765,20 +699,12 @@ def test_context_dependent_image_headers_require_page_context() -> None:
         ir = analyze_source(resolved).model_copy(
             update={"capabilities": [Capability.IMAGE_HEADERS]}
         )
-    manifest = GenerationManifest(
-        source_struct="Simple",
-        implemented_traits=["ImageRequestProvider"],
-        files=[
-            GeneratedFile(
-                path="src/lib.rs",
-                content=(
-                    "fn get_page_list(&self) { PageContent::url(image_url); }\n"
-                    "fn get_image_request(&self, context: Option<PageContext>) {\n"
-                    'if let Some(context) = context { context.get("referer"); }\n'
-                    "}\n"
-                ),
-            )
-        ],
+    manifest = generation_manifest(
+        "fn get_page_list(&self) { PageContent::url(image_url); }\n"
+        "fn get_image_request(&self, context: Option<PageContext>) {\n"
+        'if let Some(context) = context { context.get("referer"); }\n'
+        "}\n",
+        traits=("ImageRequestProvider",),
     )
 
     gaps = _contract_messages(ir, manifest)
@@ -803,16 +729,10 @@ def test_cookie_jar_input_requires_a_representable_cookie_session() -> None:
                 ],
             }
         )
-    manifest = GenerationManifest(
-        source_struct="Simple",
-        implemented_traits=["ImageRequestProvider"],
-        files=[
-            GeneratedFile(path="src/lib.rs", content="fn request() {}"),
-            GeneratedFile(
-                path="res/settings.json",
-                content='[{"type":"group","title":"Source","items":[]}]',
-            ),
-        ],
+    manifest = generation_manifest(
+        "fn request() {}",
+        traits=("ImageRequestProvider",),
+        resources={"res/settings.json": '[{"type":"group","title":"Source","items":[]}]'},
     )
 
     gaps = _contract_messages(ir, manifest)
@@ -837,26 +757,17 @@ def test_cookie_session_must_cover_api_and_image_requests(missing_request: str) 
         )
     api_header = "" if missing_request == "api" else '.header("Cookie", cookie)'
     image_header = "" if missing_request == "image" else '.header("Cookie", cookie)'
-    manifest = GenerationManifest(
-        source_struct="Simple",
-        implemented_traits=["ImageRequestProvider"],
-        files=[
-            GeneratedFile(
-                path="src/lib.rs",
-                content=(
-                    f"fn post_query(&self) {{ Request::post(url){api_header}; }}\n"
-                    "fn get_image_request(&self) { "
-                    f"Request::get(url){image_header}; }}\n"
-                ),
-            ),
-            GeneratedFile(
-                path="res/settings.json",
-                content=(
-                    '[{"type":"group","title":"Source","items":'
-                    '[{"type":"text","key":"cookie","title":"Cookie"}]}]'
-                ),
-            ),
-        ],
+    manifest = generation_manifest(
+        f"fn post_query(&self) {{ Request::post(url){api_header}; }}\n"
+        "fn get_image_request(&self) { "
+        f"Request::get(url){image_header}; }}\n",
+        traits=("ImageRequestProvider",),
+        resources={
+            "res/settings.json": (
+                '[{"type":"group","title":"Source","items":'
+                '[{"type":"text","key":"cookie","title":"Cookie"}]}]'
+            )
+        },
     )
 
     gaps = _contract_messages(ir, manifest)
@@ -885,42 +796,31 @@ def test_optimized_graphql_manifest_has_no_performance_contract_gaps() -> None:
                 ],
             }
         )
-    manifest = GenerationManifest(
-        source_struct="Simple",
-        implemented_traits=["DynamicFilters", "ImageRequestProvider"],
-        dependencies=[DependencyRequest(name="serde")],
-        files=[
-            GeneratedFile(
-                path="src/lib.rs",
-                content=(
-                    'fn listing_query(&self) { "query { comics { id title } }"; }\n'
-                    'fn category_query(&self) { "query { allCategory { id name } }"; }\n'
-                    "fn get_dynamic_filters(&self) { self.category_query(); }\n"
-                    "fn get_search_manga_list(&self) { self.listing_query(); }\n"
-                    'fn post_query(&self) { Request::post(url).header("Cookie", cookie); }\n'
-                    "fn get_page_list(&self) { "
-                    "PageContent::url_context(image_url, context); }\n"
-                    "fn get_image_request(&self, context: Option<PageContext>) { "
-                    'context.get("referer"); '
-                    'Request::get(url).header("Cookie", cookie); }\n'
-                    "fn manga_query(&self, needs_details: bool, needs_chapters: bool) {\n"
-                    "match (needs_details, needs_chapters) {\n"
-                    '(true, true) => "comicById chaptersByComicId",\n'
-                    '(true, false) => "comicById",\n'
-                    '(false, true) => "chaptersByComicId",\n'
-                    '_ => "",\n}\n}\n'
-                    "fn get_manga_update(&self, needs_details: bool, needs_chapters: bool) {\n"
-                    "self.manga_query(needs_details, needs_chapters);\n}\n"
-                ),
-            ),
-            GeneratedFile(
-                path="res/settings.json",
-                content=(
-                    '[{"type":"group","title":"Source","items":'
-                    '[{"type":"text","key":"cookie","title":"Cookie"}]}]'
-                ),
-            ),
-        ],
+    manifest = generation_manifest(
+        'fn listing_query(&self) { "query { comics { id title } }"; }\n'
+        'fn category_query(&self) { "query { allCategory { id name } }"; }\n'
+        "fn get_dynamic_filters(&self) { self.category_query(); }\n"
+        "fn get_search_manga_list(&self) { self.listing_query(); }\n"
+        'fn post_query(&self) { Request::post(url).header("Cookie", cookie); }\n'
+        "fn get_page_list(&self) { PageContent::url_context(image_url, context); }\n"
+        "fn get_image_request(&self, context: Option<PageContext>) { "
+        'context.get("referer"); Request::get(url).header("Cookie", cookie); }\n'
+        "fn manga_query(&self, needs_details: bool, needs_chapters: bool) {\n"
+        "match (needs_details, needs_chapters) {\n"
+        '(true, true) => "comicById chaptersByComicId",\n'
+        '(true, false) => "comicById",\n'
+        '(false, true) => "chaptersByComicId",\n'
+        '_ => "",\n}\n}\n'
+        "fn get_manga_update(&self, needs_details: bool, needs_chapters: bool) {\n"
+        "self.manga_query(needs_details, needs_chapters);\n}\n",
+        traits=("DynamicFilters", "ImageRequestProvider"),
+        dependencies=(DependencyRequest(name="serde"),),
+        resources={
+            "res/settings.json": (
+                '[{"type":"group","title":"Source","items":'
+                '[{"type":"text","key":"cookie","title":"Cookie"}]}]'
+            )
+        },
     )
 
     gaps = _contract_messages(ir, manifest)
@@ -940,21 +840,13 @@ def test_manga_update_query_must_respect_requested_data_flags() -> None:
         ir = analyze_source(resolved).model_copy(
             update={"capabilities": [Capability.DETAILS, Capability.CHAPTERS]}
         )
-    manifest = GenerationManifest(
-        source_struct="Simple",
-        files=[
-            GeneratedFile(
-                path="src/lib.rs",
-                content=(
-                    'fn manga_query(&self) { let query = "query { comicById { id } '
-                    'chaptersByComicId { id } }"; }\n'
-                    "fn get_manga_update(&self, needs_details: bool, needs_chapters: bool) {\n"
-                    "if !needs_details && !needs_chapters { return; }\n"
-                    "self.manga_query();\n"
-                    "}\n"
-                ),
-            )
-        ],
+    manifest = generation_manifest(
+        'fn manga_query(&self) { let query = "query { comicById { id } '
+        'chaptersByComicId { id } }"; }\n'
+        "fn get_manga_update(&self, needs_details: bool, needs_chapters: bool) {\n"
+        "if !needs_details && !needs_chapters { return; }\n"
+        "self.manga_query();\n"
+        "}\n"
     )
 
     gaps = _contract_messages(ir, manifest)
@@ -997,21 +889,13 @@ def test_rest_chapter_helper_cannot_repeat_the_detail_request() -> None:
                 ]
             }
         )
-    repeated = GenerationManifest(
-        source_struct="Simple",
-        dependencies=[DependencyRequest(name="serde")],
-        files=[
-            GeneratedFile(
-                path="src/lib.rs",
-                content=(
-                    "fn fetch_chapters(&self, id: &str) {\n"
-                    'self.get(format!("/comic2/{id}"));\n}\n'
-                    "fn get_manga_update(&self, needs_details: bool, needs_chapters: bool) {\n"
-                    'if needs_details { self.get(format!("/comic2/{id}")); }\n'
-                    "if needs_chapters { self.fetch_chapters(id); }\n}\n"
-                ),
-            )
-        ],
+    repeated = generation_manifest(
+        "fn fetch_chapters(&self, id: &str) {\n"
+        'self.get(format!("/comic2/{id}"));\n}\n'
+        "fn get_manga_update(&self, needs_details: bool, needs_chapters: bool) {\n"
+        'if needs_details { self.get(format!("/comic2/{id}")); }\n'
+        "if needs_chapters { self.fetch_chapters(id); }\n}\n",
+        dependencies=(DependencyRequest(name="serde"),),
     )
     reused = repeated.model_copy(
         update={
@@ -1047,21 +931,13 @@ def test_dynamic_filter_ids_must_be_read_in_search_mapping() -> None:
         ir = analyze_source(resolved).model_copy(
             update={"capabilities": [Capability.DYNAMIC_FILTERS]}
         )
-    without_mapping = GenerationManifest(
-        source_struct="Simple",
-        implemented_traits=["DynamicFilters"],
-        files=[
-            GeneratedFile(
-                path="src/lib.rs",
-                content=(
-                    "fn get_dynamic_filters(&self) -> Result<Vec<Filter>> {\n"
-                    'Ok(vec![SelectFilter { id: "theme".into(), '
-                    "..Default::default() }.into()])\n}\n"
-                    "fn get_search_manga_list(&self, filters: Vec<FilterValue>) {\n"
-                    "let _ = filters;\n}\n"
-                ),
-            )
-        ],
+    without_mapping = generation_manifest(
+        "fn get_dynamic_filters(&self) -> Result<Vec<Filter>> {\n"
+        'Ok(vec![SelectFilter { id: "theme".into(), '
+        "..Default::default() }.into()])\n}\n"
+        "fn get_search_manga_list(&self, filters: Vec<FilterValue>) {\n"
+        "let _ = filters;\n}\n",
+        traits=("DynamicFilters",),
     )
     with_mapping = without_mapping.model_copy(
         update={
@@ -1096,10 +972,9 @@ def test_decompiled_json_source_requires_idempotent_get_retry() -> None:
                 "capabilities": [Capability.JSON_API],
             }
         )
-    without_retry = GenerationManifest(
-        source_struct="Simple",
-        files=[GeneratedFile(path="src/lib.rs", content=RUST_SOURCE)],
-        dependencies=[DependencyRequest(name="serde")],
+    without_retry = generation_manifest(
+        RUST_SOURCE,
+        dependencies=(DependencyRequest(name="serde"),),
     )
     with_retry = without_retry.model_copy(
         update={
@@ -1128,17 +1003,8 @@ def test_decompiled_json_source_requires_idempotent_get_retry() -> None:
 def test_kotlin_http_source_requires_idempotent_get_retry() -> None:
     with resolve_source(str(FIXTURE)) as resolved:
         ir = analyze_source(resolved)
-    without_retry = GenerationManifest(
-        source_struct="Simple",
-        files=[
-            GeneratedFile(
-                path="src/lib.rs",
-                content=(
-                    "fn fetch(&self, url: String) -> Result<Response> {\n"
-                    "Request::get(url)?.send()\n}\n"
-                ),
-            )
-        ],
+    without_retry = generation_manifest(
+        "fn fetch(&self, url: String) -> Result<Response> {\nRequest::get(url)?.send()\n}\n"
     )
     with_retry = without_retry.model_copy(
         update={
@@ -1167,20 +1033,12 @@ def test_kotlin_http_source_requires_idempotent_get_retry() -> None:
 def test_post_api_does_not_inherit_get_retry_requirement_from_image_provider() -> None:
     with resolve_source(str(FIXTURE)) as resolved:
         ir = analyze_source(resolved)
-    manifest = GenerationManifest(
-        source_struct="Simple",
-        implemented_traits=["ImageRequestProvider"],
-        files=[
-            GeneratedFile(
-                path="src/lib.rs",
-                content=(
-                    "fn post_query(&self, url: String) -> Result<Response> {\n"
-                    "Request::post(url).send()\n}\n"
-                    "fn get_image_request(&self, url: String) -> Result<Request> {\n"
-                    "Request::get(url)\n}\n"
-                ),
-            )
-        ],
+    manifest = generation_manifest(
+        "fn post_query(&self, url: String) -> Result<Response> {\n"
+        "Request::post(url).send()\n}\n"
+        "fn get_image_request(&self, url: String) -> Result<Request> {\n"
+        "Request::get(url)\n}\n",
+        traits=("ImageRequestProvider",),
     )
 
     gaps = _contract_messages(ir, manifest)
@@ -1191,19 +1049,11 @@ def test_post_api_does_not_inherit_get_retry_requirement_from_image_provider() -
 def test_chapter_parser_cannot_compile_regex_on_every_request() -> None:
     with resolve_source(str(FIXTURE)) as resolved:
         ir = analyze_source(resolved)
-    manifest = GenerationManifest(
-        source_struct="Simple",
-        dependencies=[DependencyRequest(name="regex")],
-        files=[
-            GeneratedFile(
-                path="src/lib.rs",
-                content=(
-                    "fn parse_chapters(&self, data: &str) {\n"
-                    'let expression = Regex::new(r"chapters: \\[\\{{.*?\\}}\\]").unwrap();\n'
-                    "let _ = expression.find(data);\n}\n"
-                ),
-            )
-        ],
+    manifest = generation_manifest(
+        "fn parse_chapters(&self, data: &str) {\n"
+        'let expression = Regex::new(r"chapters: \\[\\{{.*?\\}}\\]").unwrap();\n'
+        "let _ = expression.find(data);\n}\n",
+        dependencies=(DependencyRequest(name="regex"),),
     )
 
     gaps = _contract_messages(ir, manifest)
@@ -1229,10 +1079,7 @@ def test_chapter_metadata_and_legacy_settings_are_contract_gaps() -> None:
                 ]
             }
         )
-    manifest = GenerationManifest(
-        source_struct="Simple",
-        files=[GeneratedFile(path="src/lib.rs", content=RUST_SOURCE)],
-    )
+    manifest = generation_manifest(RUST_SOURCE)
 
     gaps = _contract_messages(ir, manifest)
 
@@ -1247,10 +1094,7 @@ def test_chapter_metadata_and_legacy_settings_are_contract_gaps() -> None:
 def test_encrypted_json_api_dependencies_and_base_url_are_contract_gaps() -> None:
     with resolve_source(str(ENCRYPTED_API_FIXTURE)) as resolved:
         ir = analyze_source(resolved)
-    manifest = GenerationManifest(
-        source_struct="Simple",
-        files=[GeneratedFile(path="src/lib.rs", content=RUST_SOURCE)],
-    )
+    manifest = generation_manifest(RUST_SOURCE)
 
     gaps = _contract_messages(ir, manifest)
 
@@ -1265,15 +1109,7 @@ def test_triple_des_request_requires_dependencies_and_live_millisecond_time() ->
     with resolve_source(str(FIXTURE)) as resolved:
         ir = analyze_source(resolved)
     ir = ir.model_copy(update={"capabilities": [*ir.capabilities, Capability.TRIPLE_DES_CBC]})
-    manifest = GenerationManifest(
-        source_struct="Simple",
-        files=[
-            GeneratedFile(
-                path="src/lib.rs",
-                content=RUST_SOURCE + '\nfn sign() { let time = "0"; }\n',
-            )
-        ],
-    )
+    manifest = generation_manifest(RUST_SOURCE + '\nfn sign() { let time = "0"; }\n')
 
     gaps = _contract_messages(ir, manifest)
 
@@ -1345,11 +1181,10 @@ def test_compiler_diagnostics_produce_bounded_source_excerpts(tmp_path: Path) ->
 
 
 def test_repair_patch_requires_one_exact_match_and_preserves_manifest_metadata() -> None:
-    manifest = GenerationManifest(
-        source_struct="Simple",
-        implemented_traits=["DynamicFilters"],
-        files=[GeneratedFile(path="src/lib.rs", content="let title = title;\n")],
-        dependencies=[DependencyRequest(name="serde")],
+    manifest = generation_manifest(
+        "let title = title;\n",
+        traits=("DynamicFilters",),
+        dependencies=(DependencyRequest(name="serde"),),
     )
     patch = RepairPatch.model_validate(
         {
@@ -1383,10 +1218,7 @@ def test_repair_patch_requires_one_exact_match_and_preserves_manifest_metadata()
 
 
 def test_repair_patch_cannot_edit_text_outside_supplied_excerpts() -> None:
-    manifest = GenerationManifest(
-        source_struct="Simple",
-        files=[GeneratedFile(path="src/lib.rs", content="safe();\nother();\n")],
-    )
+    manifest = generation_manifest("safe();\nother();\n")
     patch = RepairPatch.model_validate(
         {"edits": [{"path": "src/lib.rs", "old_text": "other();", "new_text": "changed();"}]}
     )
@@ -1425,15 +1257,9 @@ def test_live_validated_setting_default_stays_inside_generated_allowlist() -> No
                 ],
             }
         ]
-        return GenerationManifest(
-            source_struct="Simple",
-            files=[
-                GeneratedFile(path="src/lib.rs", content=RUST_SOURCE),
-                GeneratedFile(
-                    path="res/settings.json",
-                    content=json.dumps(settings),
-                ),
-            ],
+        return generation_manifest(
+            RUST_SOURCE,
+            resources={"res/settings.json": json.dumps(settings)},
         )
 
     overrides = {"v2.pref.api_domain": "mapi.copy20.com"}

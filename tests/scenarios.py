@@ -44,7 +44,6 @@ def conversion_settings(**overrides: object) -> AISettings:
 def generation_manifest(
     rust: str,
     *,
-    source_struct: str = "Simple",
     traits: Iterable[OptionalTrait] = (),
     resources: Mapping[str, str] | None = None,
     dependencies: Iterable[DependencyRequest] = (),
@@ -54,7 +53,7 @@ def generation_manifest(
         GeneratedFile(path=path, content=content) for path, content in (resources or {}).items()
     )
     return GenerationManifest(
-        source_struct=source_struct,
+        source_struct="Simple",
         implemented_traits=list(traits),
         files=files,
         dependencies=list(dependencies),
