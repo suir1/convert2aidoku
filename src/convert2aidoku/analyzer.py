@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 import re
-from xml.etree import ElementTree
 
+from .decompiled_input import DecompiledInputInspection
 from .errors import InputError, UnsupportedSourceError
 from .ingest import ResolvedSource, collect_source_files
 from .models import (
@@ -18,8 +18,6 @@ from .models import (
     SourceIR,
     SourceMetadata,
 )
-
-_ANDROID_XML_NAMESPACE = "http://schemas.android.com/apk/res/android"
 
 
 def _match(pattern: str, text: str, default: str = "") -> str:
@@ -191,27 +189,6 @@ def _unsupported_features(build: str, kotlin: str) -> list[str]:
     return unsupported
 
 
-def _java_main_class(java: str) -> tuple[str, list[str]]:
-    match = re.search(
-        r"\bclass\s+([A-Za-z_][A-Za-z0-9_]*)\s+extends\s+([A-Za-z0-9_.$]+)"
-        r"(?:\s+implements\s+([^\{]+))?\s*\{",
-        java,
-    )
-    if not match or match.group(2).rsplit(".", 1)[-1] != "HttpSource":
-        raise UnsupportedSourceError("MVP supports only decompiled standalone HttpSource APKs")
-    parents = ["HttpSource"]
-    if match.group(3):
-        parents.extend(
-            item.strip().rsplit(".", 1)[-1] for item in match.group(3).split(",") if item.strip()
-        )
-    allowed = {"HttpSource", "ConfigurableSource"}
-    if any(parent not in allowed for parent in parents):
-        raise UnsupportedSourceError(
-            "MVP supports only APK HttpSource classes without custom source interfaces"
-        )
-    return match.group(1), parents
-
-
 def _java_capabilities(java: str) -> list[Capability]:
     mapping: tuple[tuple[Capability, tuple[str, ...]], ...] = (
         (Capability.SEARCH, ("searchMangaRequest", "searchMangaParse")),
@@ -243,33 +220,6 @@ def _java_capabilities(java: str) -> list[Capability]:
     if _uses_supported_aes_cbc(java):
         capabilities.append(Capability.ENCRYPTED_JSON)
     return list(dict.fromkeys(capabilities))
-
-
-def _java_header_names(java: str) -> list[str]:
-    names = set(
-        re.findall(
-            r"\.(?:add|set|header|addHeader|setHeader)\(\s*\"([^\"]+)\"\s*,",
-            java,
-        )
-    )
-    blocks = re.findall(r"Headers\.Companion\.of\(new String\[\]\s*\{([^}]+)\}\)", java)
-    for block in blocks:
-        values = re.findall(r'"([^\"]+)"', block)
-        names.update(values[::2])
-    return sorted(names)
-
-
-def _java_method_names(main_java: str) -> list[str]:
-    return sorted(
-        set(
-            re.findall(
-                r"^\s*(?:public|protected)\s+(?:static\s+)?(?:final\s+)?"
-                r"[A-Za-z0-9_.$<>?, \[\]]+\s+([A-Za-z_][A-Za-z0-9_$]*)\s*\(",
-                main_java,
-                re.MULTILINE,
-            )
-        )
-    )
 
 
 def _java_chapter_page_routes(java: str) -> list[ChapterPageRoute]:
@@ -425,20 +375,6 @@ def _java_filter_specs(java: str) -> list[SourceFilterSpec]:
     return specs
 
 
-def _manifest_metadata(manifest: str) -> tuple[ElementTree.Element, dict[str, str]]:
-    try:
-        root = ElementTree.fromstring(manifest)
-    except ElementTree.ParseError as exc:
-        raise InputError(f"unable to parse decompiled AndroidManifest.xml: {exc}") from exc
-    android_name = f"{{{_ANDROID_XML_NAMESPACE}}}name"
-    android_value = f"{{{_ANDROID_XML_NAMESPACE}}}value"
-    values = {
-        item.get(android_name, ""): item.get(android_value, "")
-        for item in root.findall("./application/meta-data")
-    }
-    return root, values
-
-
 def _apk_optional_features(java: str) -> list[str]:
     optional: list[str] = []
     if any(marker in java for marker in ("TokenProvider", '"/login"', "loginURL")):
@@ -452,24 +388,18 @@ def _apk_optional_features(java: str) -> list[str]:
 
 def _analyze_decompiled_apk(resolved: ResolvedSource) -> SourceIR:
     files = collect_source_files(resolved)
-    manifest_file = next(
-        (item for item in files if item.path == "resources/AndroidManifest.xml"), None
+    inspection = DecompiledInputInspection.from_files(
+        files,
+        manifest=resolved.decompiled_manifest,
     )
-    if manifest_file is None:
-        raise InputError("decompiled APK manifest was not collected")
-    java_files = [item for item in files if item.path.endswith(".java")]
-    main_file = next(
-        (
-            item
-            for item in java_files
-            if re.search(r"\bclass\s+\w+\s+extends\s+HttpSource\b", item.content)
-        ),
-        None,
-    )
-    if main_file is None:
-        raise UnsupportedSourceError("decompiled APK contains no standalone HttpSource class")
-    main_class, parents = _java_main_class(main_file.content)
-    java = "\n\n".join(item.content for item in java_files)
+    main_class = inspection.main_class
+    parents = list(inspection.parents)
+    allowed = {"HttpSource", "ConfigurableSource"}
+    if any(parent not in allowed for parent in parents):
+        raise UnsupportedSourceError(
+            "MVP supports only APK HttpSource classes without custom source interfaces"
+        )
+    java = inspection.java
 
     hard_unsupported: list[str] = []
     if any(
@@ -485,8 +415,8 @@ def _analyze_decompiled_apk(resolved: ResolvedSource) -> SourceIR:
             "source is outside the APK public-only scope: " + ", ".join(hard_unsupported)
         )
 
-    root, manifest_values = _manifest_metadata(manifest_file.content)
-    package = root.get("package", "")
+    manifest = inspection.manifest
+    package = manifest.package
     package_match = re.search(
         r"\.extension\.([a-z]{2,3}(?:-[a-z0-9]+)*)\.([A-Za-z0-9_]+)$", package
     )
@@ -495,9 +425,7 @@ def _analyze_decompiled_apk(resolved: ResolvedSource) -> SourceIR:
     language, module_name = package_match.groups()
     module_slug = re.sub(r"[^a-z0-9]+", "-", module_name.lower()).strip("-")
 
-    application = root.find("./application")
-    android_label = f"{{{_ANDROID_XML_NAMESPACE}}}label"
-    label = application.get(android_label, "") if application is not None else ""
+    label = manifest.application_label
     name = _match(r'\bAPP_NAME\s*=\s*"([^\"]+)"', java)
     if not name and label and not label.startswith("@"):
         name = re.sub(r"^Tachiyomi:\s*", "", label).strip()
@@ -508,13 +436,12 @@ def _analyze_decompiled_apk(resolved: ResolvedSource) -> SourceIR:
     if not base_url:
         raise InputError("unable to extract a source base URL from the decompiled APK")
 
-    android_version = f"{{{_ANDROID_XML_NAMESPACE}}}versionCode"
-    version_text = root.get(android_version, "1")
+    version_text = manifest.version_text
     if not version_text.isdigit():
         raise InputError(f"APK versionCode is not an integer: {version_text}")
     rating = (
         ContentRating.NSFW
-        if manifest_values.get("tachiyomi.extension.nsfw") == "1"
+        if manifest.metadata.get("tachiyomi.extension.nsfw") == "1"
         else ContentRating.SAFE
     )
 
@@ -552,8 +479,8 @@ def _analyze_decompiled_apk(resolved: ResolvedSource) -> SourceIR:
         main_class=main_class,
         parent_classes=parents,
         capabilities=_java_capabilities(java),
-        method_names=_java_method_names(main_file.content),
-        header_names=_java_header_names(java),
+        method_names=list(inspection.method_names),
+        header_names=list(inspection.header_names),
         relative_url_keys=("url2comicPath" in java or "setUrlWithoutDomain" in java),
         chapter_page_routes=_java_chapter_page_routes(java),
         image_url_policy=_java_image_url_policy(java),

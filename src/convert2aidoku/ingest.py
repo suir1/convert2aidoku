@@ -11,9 +11,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 from urllib.parse import unquote, urlparse
-from xml.etree import ElementTree
 
 from .constants import DEFAULT_MAX_DECOMPILED_INPUT_CHARS, DEFAULT_MAX_INPUT_CHARS
+from .decompiled_input import (
+    DecompiledManifest,
+    decompiled_source_paths,
+    normalize_decompiled_java,
+)
 from .errors import InputError
 from .models import SourceFile
 
@@ -40,67 +44,7 @@ class ResolvedSource:
     commit: str | None
     license_path: Path | None
     source_format: Literal["kotlin_module", "decompiled_apk"] = "kotlin_module"
-
-
-_ANDROID_XML_NAMESPACE = "http://schemas.android.com/apk/res/android"
-_APK_OPTIONAL_CLASS_MARKERS = (
-    "AuthorizationInterceptor",
-    "ChapterComment",
-    "CollectInfo",
-    "CollectResult",
-    "CommentInfo",
-    "LoginResult",
-    "TokenProvider",
-)
-_APK_HELPER_PRIORITY = (
-    "PluginMetaData.java",
-    "ApiRepo.java",
-    "ApiResponse.java",
-    "ApiResponseKt.java",
-    "ApiDomainOption.java",
-    "FilterKt.java",
-    "ThemeResult.java",
-    "ThemeDetail.java",
-    "TypeFilter.java",
-    "RankFilter.java",
-    "AudienceFilter.java",
-    "RegionFilter.java",
-    "ThemeFilter.java",
-    "FreeTypeFilter.java",
-    "SortFilter.java",
-    "ResolutionOption.java",
-    "CCOption.java",
-    "LatestUpdateOption.java",
-    "PlatFormOption.java",
-    "UserAgentType.java",
-    "PreferencesKeys.java",
-    "HeadersInterceptor.java",
-    "UserAgentInterceptor.java",
-    "ContentResult.java",
-    "ChapterDetail.java",
-    "ContentItem.java",
-    "ComicDetailResult.java",
-    "ComicDetail.java",
-    "Status.java",
-    "MangaStatusManager.java",
-    "GroupInfo.java",
-    "AuthorInfo.java",
-    "ThemeInfo.java",
-    "LastChapter.java",
-    "ChapterInfo.java",
-    "ChapterListResult.java",
-    "SearchComic.java",
-    "SearchResult.java",
-    "ComicSummary.java",
-    "ComicsListResult.java",
-    "NewestItem.java",
-    "NewestResult.java",
-    "RecommendResult.java",
-    "Recommendation.java",
-    "RecommendComic.java",
-    "RankResult.java",
-    "ListItem.java",
-)
+    decompiled_manifest: DecompiledManifest | None = None
 
 
 def parse_github_url(value: str) -> GitHubLocation | None:
@@ -218,191 +162,6 @@ def _run_jadx(apk: Path, destination: Path) -> None:
         raise InputError("JADX output did not contain an Android manifest and Java sources")
 
 
-def _apk_main_class_name(manifest: Path) -> str:
-    try:
-        root = ElementTree.fromstring(manifest.read_text(encoding="utf-8"))
-    except (OSError, ElementTree.ParseError, UnicodeDecodeError) as exc:
-        raise InputError(f"unable to parse decompiled AndroidManifest.xml: {exc}") from exc
-    android_name = f"{{{_ANDROID_XML_NAMESPACE}}}name"
-    android_value = f"{{{_ANDROID_XML_NAMESPACE}}}value"
-    for item in root.findall("./application/meta-data"):
-        if item.get(android_name) == "tachiyomi.extension.class":
-            value = item.get(android_value, "").split(",", 1)[0].strip()
-            if value:
-                return value.rsplit(".", 1)[-1]
-    raise InputError("APK manifest does not declare tachiyomi.extension.class")
-
-
-def _find_apk_main_java(root: Path) -> Path:
-    manifest = root / "resources" / "AndroidManifest.xml"
-    class_name = _apk_main_class_name(manifest)
-    candidates = sorted((root / "sources").rglob(f"{class_name}.java"))
-    for candidate in candidates:
-        if candidate.is_symlink() or not candidate.is_file():
-            continue
-        content = candidate.read_text(encoding="utf-8", errors="replace")
-        if re.search(rf"\bclass\s+{re.escape(class_name)}\s+extends\s+HttpSource\b", content):
-            return candidate
-    raise InputError(f"unable to find decompiled HttpSource class {class_name}.java")
-
-
-def _java_brace_block(content: str, start: int) -> str:
-    opening = content.find("{", start)
-    if opening < 0:
-        return ""
-    depth = 0
-    quote: str | None = None
-    escaped = False
-    for index in range(opening, len(content)):
-        char = content[index]
-        if quote is not None:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == quote:
-                quote = None
-            continue
-        if char in {'"', "'"}:
-            quote = char
-        elif char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return content[start : index + 1].strip()
-    return ""
-
-
-def _compact_decompiled_dto(content: str) -> str:
-    """Keep DTO data shape and conversion behavior without Kotlin compiler boilerplate."""
-    package = _match_line(r"^package\s+[^;]+;", content)
-    declaration = _match_line(
-        r"^(?:public\s+)?(?:final\s+)?(?:/\*\s*data\s*\*/\s*)?class\s+[^\{]+",
-        content,
-    )
-    if not declaration:
-        return content
-
-    fields = re.findall(
-        r"^\s*(?:(?:private|public|protected)\s+)(?:static\s+)?(?:final\s+)?"
-        r"[^(){};\n]+(?:\s*=\s*[^;\n]+)?;\s*$",
-        content,
-        re.MULTILINE,
-    )
-    fields = [field.strip() for field in fields if "$$serializer" not in field]
-
-    mappings: list[tuple[str, str]] = []
-    for match in re.finditer(
-        r'@SerialName\("([^\"]+)"\)[\s\S]{0,240}?\bget([A-Za-z0-9_]+)\$annotations\s*\(',
-        content,
-    ):
-        field_name = match.group(2)
-        field_name = field_name[:1].lower() + field_name[1:]
-        mappings.append((field_name, match.group(1)))
-
-    method_pattern = re.compile(
-        r"^\s*(?:public|protected)\s+(?:static\s+)?(?:final\s+)?"
-        r"[A-Za-z0-9_.$<>?, \[\]]+\s+([A-Za-z_][A-Za-z0-9_$-]*)\s*"
-        r"\([^;{}\n]*\)(?:\s+throws\s+[^\{\n]+)?\s*\{",
-        re.MULTILINE,
-    )
-    excluded = {"copy", "equals", "hashCode", "toString", "write$Self", "serializer"}
-    methods: list[str] = []
-    covered_until = -1
-    for match in method_pattern.finditer(content):
-        if match.start() < covered_until:
-            continue
-        name = match.group(1)
-        if (
-            name in excluded
-            or name.startswith("component")
-            or name.startswith("copy$")
-            or name.startswith("get")
-            or name.startswith("set")
-            or name.startswith("is")
-            or name.endswith("$annotations")
-            or re.fullmatch(r"m\d+.*", name)
-        ):
-            continue
-        block = _java_brace_block(content, match.start())
-        if block:
-            methods.append(block)
-            covered_until = match.start() + len(block)
-
-    lines = [
-        package,
-        "",
-        "// C2A compacted JADX DTO: generated constructors and value methods removed.",
-        declaration.strip() + " {",
-    ]
-    if mappings:
-        lines.append("    // Serialized field names:")
-        lines.extend(
-            f'    // {field_name} -> "{serialized_name}"'
-            for field_name, serialized_name in dict.fromkeys(mappings)
-        )
-    if fields:
-        lines.append("    // Fields:")
-        lines.extend(f"    {field}" for field in dict.fromkeys(fields))
-    if methods:
-        lines.append("    // Source-specific behavior:")
-        lines.extend("\n".join(f"    {line}" for line in method.splitlines()) for method in methods)
-    lines.append("}")
-    return "\n".join(lines).strip() + "\n"
-
-
-def _match_line(pattern: str, content: str) -> str:
-    match = re.search(pattern, content, re.MULTILINE)
-    return match.group(0).strip() if match else ""
-
-
-def _clean_decompiled_java(content: str, path: Path) -> str:
-    # Kotlin metadata and JADX bookkeeping are large compiler artifacts. They do
-    # not describe source behavior and consume most of the AI context otherwise.
-    content = re.sub(r"^\s*@Metadata\([^\n]*\)\s*$", "", content, flags=re.MULTILINE)
-    content = re.sub(r"^\s*/\* JADX INFO:.*?\*/\s*$", "", content, flags=re.MULTILINE)
-    content = content.strip() + "\n"
-    if "/api/dto/" in f"/{path.as_posix()}":
-        return _compact_decompiled_dto(content)
-    return content
-
-
-def _apk_candidate_files(resolved: ResolvedSource) -> list[Path]:
-    root = resolved.module_path
-    manifest = root / "resources" / "AndroidManifest.xml"
-    main = _find_apk_main_java(root)
-    extension_root = main.parent
-    all_java = [
-        path
-        for path in extension_root.rglob("*.java")
-        if path.is_file()
-        and not path.is_symlink()
-        and "$$serializer" not in path.name
-        and path.name != "R.java"
-    ]
-    by_name: dict[str, list[Path]] = {}
-    for path in all_java:
-        by_name.setdefault(path.name, []).append(path)
-
-    candidates = [manifest, main]
-    for name in _APK_HELPER_PRIORITY:
-        candidates.extend(sorted(by_name.get(name, [])))
-
-    main_text = main.read_text(encoding="utf-8", errors="replace")
-    imports = re.findall(
-        r"^import\s+eu\.kanade\.tachiyomi\.extension\.[A-Za-z0-9_.$]+\.([A-Za-z0-9_$]+);",
-        main_text,
-        re.MULTILINE,
-    )
-    for class_name in sorted(set(imports)):
-        if any(marker in class_name for marker in _APK_OPTIONAL_CLASS_MARKERS):
-            continue
-        candidates.extend(sorted(by_name.get(f"{class_name}.java", [])))
-
-    return list(dict.fromkeys(candidates))
-
-
 @contextmanager
 def resolve_source(input_ref: str) -> Iterator[ResolvedSource]:
     github = parse_github_url(input_ref)
@@ -414,6 +173,7 @@ def resolve_source(input_ref: str) -> Iterator[ResolvedSource]:
             with tempfile.TemporaryDirectory(prefix="c2a-apk-") as temporary:
                 root = Path(temporary).resolve() / "decompiled"
                 _run_jadx(local, root)
+                manifest = DecompiledManifest.from_path(root / "resources" / "AndroidManifest.xml")
                 yield ResolvedSource(
                     input_ref,
                     root,
@@ -421,6 +181,7 @@ def resolve_source(input_ref: str) -> Iterator[ResolvedSource]:
                     None,
                     _find_license(local.parent, local.parent),
                     "decompiled_apk",
+                    manifest,
                 )
             return
         if not local.is_dir():
@@ -483,7 +244,10 @@ def collect_source_files(
             else DEFAULT_MAX_INPUT_CHARS
         )
     if resolved.source_format == "decompiled_apk":
-        candidates = _apk_candidate_files(resolved)
+        candidates = decompiled_source_paths(
+            resolved.module_path,
+            manifest=resolved.decompiled_manifest,
+        )
     else:
         candidates = []
     if resolved.source_format == "kotlin_module":
@@ -529,7 +293,10 @@ def collect_source_files(
         except UnicodeDecodeError as exc:
             raise InputError(f"source file is not UTF-8: {path}") from exc
         if resolved.source_format == "decompiled_apk" and path.suffix.lower() == ".java":
-            content = _clean_decompiled_java(content, path.relative_to(resolved.module_path))
+            content = normalize_decompiled_java(
+                content,
+                path.relative_to(resolved.module_path),
+            )
         if total + len(content) > max_chars and resolved.source_format == "decompiled_apk":
             if index < 2:
                 raise InputError(f"essential APK input exceeds {max_chars:,} characters")

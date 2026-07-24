@@ -12,6 +12,10 @@ _Avoid_: Source
 The deterministic, provider-independent description recovered from an **Input Source**.
 _Avoid_: Parsed source, analysis result
 
+**Decompiled Inspection**:
+The Android manifest facts and normalized JADX Java structure recovered from a decompiled APK **Input Source** for both **SourceIR** analysis and generation evidence.
+_Avoid_: Java cleanup helpers, APK parser output
+
 **Generation Manifest**:
 One AI round's complete declaration of controlled Rust files, **Generated Resources**, traits, dependencies, and warnings.
 _Avoid_: AI output, generated files
@@ -63,6 +67,7 @@ _Avoid_: Log
 ## Relationships
 
 - One **Input Source** produces one **SourceIR** per conversion.
+- A decompiled APK **Input Source** yields one shared **Decompiled Inspection** whose facts feed **SourceIR** analysis and whose behavior projection feeds generation evidence.
 - One **Checkpoint** records one or more **Generation Manifests** and identifies exactly one current manifest.
 - One **Generation Manifest** owns zero or one filter resource and zero or one settings resource as **Generated Resources**.
 - One **Generation Manifest** yields one **Rust Inspection** of its controlled Rust files during contract evaluation.

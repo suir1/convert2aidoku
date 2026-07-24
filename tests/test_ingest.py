@@ -6,7 +6,6 @@ import pytest
 from convert2aidoku import ingest
 from convert2aidoku.errors import InputError
 from convert2aidoku.ingest import (
-    _compact_decompiled_dto,
     collect_source_files,
     parse_github_url,
     resolve_source,
@@ -73,6 +72,8 @@ def test_resolves_apk_with_mocked_jadx(tmp_path: Path, monkeypatch: pytest.Monke
     monkeypatch.setattr(ingest, "_run_jadx", fake_jadx)
     with resolve_source(str(apk)) as resolved:
         assert resolved.source_format == "decompiled_apk"
+        assert resolved.decompiled_manifest is not None
+        assert resolved.decompiled_manifest.main_class_name == "CopyManga"
         files = collect_source_files(resolved)
 
     paths = [item.path for item in files]
@@ -80,38 +81,3 @@ def test_resolves_apk_with_mocked_jadx(tmp_path: Path, monkeypatch: pytest.Monke
     assert any(path.endswith("CopyManga.java") for path in paths)
     main = next(item for item in files if item.path.endswith("CopyManga.java"))
     assert "compiler noise" not in main.content
-
-
-def test_compacts_decompiled_dto_but_preserves_mapping_behavior() -> None:
-    source = """
-package example;
-@Serializable
-public final class Comic {
-    private final String pathWord;
-    private final String name;
-    @SerialName("path_word")
-    public static void getPathWord$annotations() {}
-    public final String getPathWord() { return this.pathWord; }
-    public final Comic copy(String pathWord, String name) { return new Comic(pathWord, name); }
-    public boolean equals(Object other) { return other instanceof Comic; }
-    public int hashCode() { return this.pathWord.hashCode(); }
-    public String toString() { return this.name; }
-    public final SManga toSManga() {
-        SManga manga = SManga.create();
-        manga.setUrl("/comic/" + this.pathWord);
-        manga.setTitle(this.name);
-        return manga;
-    }
-}
-"""
-
-    compacted = _compact_decompiled_dto(source)
-
-    assert "private final String pathWord;" in compacted
-    assert 'pathWord -> "path_word"' in compacted
-    assert "toSManga" in compacted
-    assert 'manga.setUrl("/comic/" + this.pathWord);' in compacted
-    assert " copy(" not in compacted
-    assert "equals(" not in compacted
-    assert "hashCode(" not in compacted
-    assert "toString(" not in compacted
