@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import time
 import tomllib
@@ -14,6 +13,7 @@ import httpx
 from .command_execution import command_environment, execute_command
 from .constants import BLOCKED_OUTPUT_MARKERS
 from .errors import InputError, SecurityError
+from .generated_source_metadata import GeneratedSourceMetadata
 from .models import StageKind, ValidationResult, ValidationStage
 from .scaffold import read_generated_files, validate_generated_content
 from .toolchain import find_tool
@@ -187,11 +187,10 @@ def _blocked_site_probe(
 ) -> str | None:
     """Check whether the non-browser validator network is blocked by the site."""
     try:
-        source = json.loads((project / "res" / "source.json").read_text(encoding="utf-8"))
-        url = source["info"]["url"]
-        if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+        url = GeneratedSourceMetadata.load(project).site_url
+        if url is None or not url.startswith(("http://", "https://")):
             return None
-    except (OSError, KeyError, TypeError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return None
     try:
         response = httpx.get(

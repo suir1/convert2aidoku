@@ -1,9 +1,9 @@
-import json
 from pathlib import Path
 
 import pytest
 
 from convert2aidoku.errors import SecurityError
+from convert2aidoku.generated_source_metadata import GeneratedSourceMetadata
 from convert2aidoku.models import DependencyRequest, GeneratedFile, GenerationManifest
 from convert2aidoku.scaffold import apply_generation_manifest
 from tests.scenarios import scaffold_project
@@ -228,8 +228,7 @@ def test_scaffold_declares_minimum_app_version_for_date_host_import(tmp_path: Pa
     )
     apply_generation_manifest(project, ir, manifest, query=None)
 
-    source = json.loads((project / "res" / "source.json").read_text(encoding="utf-8"))
-    assert source["info"]["minAppVersion"] == "0.7.1"
+    assert GeneratedSourceMetadata.load(project).minimum_app_version == "0.7.1"
 
 
 def test_scaffold_declares_minimum_app_version_for_request_timeout(tmp_path: Path) -> None:
@@ -242,8 +241,7 @@ def test_scaffold_declares_minimum_app_version_for_request_timeout(tmp_path: Pat
     )
     apply_generation_manifest(project, ir, manifest, query=None)
 
-    source = json.loads((project / "res" / "source.json").read_text(encoding="utf-8"))
-    assert source["info"]["minAppVersion"] == "0.8.3"
+    assert GeneratedSourceMetadata.load(project).minimum_app_version == "0.8.3"
 
 
 @pytest.mark.parametrize(

@@ -15,6 +15,7 @@ from .constants import (
     MAX_GENERATED_FILE_CHARS,
 )
 from .errors import SecurityError
+from .generated_source_metadata import GeneratedSourceMetadata
 from .icons import create_aidoku_icon
 from .ingest import ResolvedSource, copy_input_license, find_icon
 from .models import (
@@ -238,40 +239,6 @@ def _write_cargo(
     cargo_path.write_text(rendered, encoding="utf-8")
 
 
-def _source_json(ir: SourceIR) -> dict[str, Any]:
-    return {
-        "info": {
-            "id": ir.metadata.source_id,
-            "name": ir.metadata.name,
-            "version": ir.metadata.version,
-            "url": ir.metadata.base_url,
-            "contentRating": ir.metadata.content_rating.aidoku_value,
-            "languages": [ir.metadata.language],
-        }
-    }
-
-
-def _update_min_app_version(destination: Path, manifest: GenerationManifest) -> None:
-    """Keep tool-owned metadata compatible with host imports used by generated Rust."""
-    rust = "\n".join(item.content for item in manifest.files if item.path.endswith(".rs"))
-    source_path = destination / "res" / "source.json"
-    source = json.loads(source_path.read_text(encoding="utf-8"))
-    info = source["info"]
-    minimum_version: str | None = None
-    if re.search(r"\bparse_(?:local_)?date(?:_with_options)?\b", rust):
-        minimum_version = "0.7.1"
-    if re.search(r"\b(?:timeout|set_timeout)\s*\(", rust):
-        minimum_version = "0.8.3"
-    if minimum_version is None:
-        info.pop("minAppVersion", None)
-    else:
-        info["minAppVersion"] = minimum_version
-    source_path.write_text(
-        json.dumps(source, ensure_ascii=False, indent="\t") + "\n",
-        encoding="utf-8",
-    )
-
-
 def create_scaffold(destination: Path, ir: SourceIR, resolved: ResolvedSource) -> None:
     destination.mkdir(parents=True, exist_ok=False)
     (destination / ".cargo").mkdir()
@@ -281,10 +248,7 @@ def create_scaffold(destination: Path, ir: SourceIR, resolved: ResolvedSource) -
     config = _environment().get_template("config.toml.j2").render()
     (destination / ".cargo" / "config.toml").write_text(config, encoding="utf-8")
     _write_cargo(destination, ir, set())
-    (destination / "res" / "source.json").write_text(
-        json.dumps(_source_json(ir), ensure_ascii=False, indent="\t") + "\n",
-        encoding="utf-8",
-    )
+    GeneratedSourceMetadata.from_source_ir(ir).write(destination)
     create_aidoku_icon(
         find_icon(resolved.module_path),
         destination / "res" / "icon.png",
@@ -352,7 +316,9 @@ def apply_generation_manifest(
         target.write_text(content.rstrip() + "\n", encoding="utf-8")
         generated_paths.append(generated.path)
 
-    _update_min_app_version(destination, manifest)
+    GeneratedSourceMetadata.load(destination).with_manifest_requirements(manifest).write(
+        destination
+    )
 
     lib_path = destination / "src" / "lib.rs"
     lib = lib_path.read_text(encoding="utf-8")

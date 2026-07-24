@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import re
 import shutil
@@ -14,6 +13,7 @@ from .checkpoint_store import CheckpointStore, ManifestWrite
 from .config import AISettings
 from .constants import MAX_AI_DIAGNOSTIC_CHARS
 from .errors import AIProviderError, InputError, SecurityError
+from .generated_source_metadata import GeneratedSourceMetadata
 from .ingest import resolve_source
 from .manifest_contract import ContractEvaluation, evaluate_manifest_contract
 from .models import (
@@ -436,18 +436,12 @@ def _refresh_resume_source_ir(
 
 def _bump_completed_resume_version(store: CheckpointStore, ir: SourceIR) -> SourceIR:
     project = store.project
-    source_path = project / "res" / "source.json"
     try:
-        source = json.loads(source_path.read_text(encoding="utf-8"))
-        current = int(source["info"]["version"])
-    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        source = GeneratedSourceMetadata.load(project).with_bumped_version(ir.metadata.version)
+        version = source.version
+        source.write(project)
+    except (OSError, ValueError) as exc:
         raise InputError(f"unable to bump installed source version: {exc}") from exc
-    version = max(ir.metadata.version, current + 1)
-    source["info"]["version"] = version
-    _atomic_write_source_metadata(
-        source_path,
-        json.dumps(source, ensure_ascii=False, indent="\t") + "\n",
-    )
     bumped = ir.model_copy(
         update={
             "metadata": ir.metadata.model_copy(update={"version": version}),
@@ -455,12 +449,6 @@ def _bump_completed_resume_version(store: CheckpointStore, ir: SourceIR) -> Sour
     )
     store.commit(source_ir=bumped)
     return bumped
-
-
-def _atomic_write_source_metadata(path: Path, content: str) -> None:
-    temporary = path.with_name(f".{path.name}.tmp-{uuid.uuid4().hex}")
-    temporary.write_text(content, encoding="utf-8")
-    os.replace(temporary, path)
 
 
 def _check_resume_compatibility(
@@ -659,11 +647,11 @@ def validate_existing(
     proxy: str | None = None,
 ) -> ConversionReport:
     project = project.expanduser().resolve()
-    source_json = project / "res" / "source.json"
-    if not source_json.is_file():
+    if not GeneratedSourceMetadata.exists(project):
         raise InputError(f"not an Aidoku source directory: {project}")
-    data = json.loads(source_json.read_text(encoding="utf-8"))
-    source_id = str(data.get("info", {}).get("id", project.name))
+    source_id = GeneratedSourceMetadata.load(project).source_id
+    if source_id is None:
+        source_id = project.name
     validation: ValidationResult = validate_project(project, live=live, proxy=proxy)
     existing_report = project / "report.json"
     if existing_report.is_file():

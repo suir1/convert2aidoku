@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
 from pathlib import Path
 
@@ -8,6 +7,7 @@ from pydantic import SecretStr
 
 from convert2aidoku.analyzer import analyze_source
 from convert2aidoku.config import AISettings
+from convert2aidoku.generated_source_metadata import GeneratedSourceMetadata
 from convert2aidoku.ingest import resolve_source
 from convert2aidoku.models import SourceFile, SourceIR, SourceMetadata
 from convert2aidoku.scaffold import create_scaffold
@@ -71,10 +71,11 @@ def scaffold_project(
 
 
 def source_metadata_project(parent: Path, *, url: str = "https://example.com") -> Path:
-    resource = parent / "res"
-    resource.mkdir()
-    (resource / "source.json").write_text(
-        json.dumps({"info": {"url": url}}),
-        encoding="utf-8",
+    source_ir = minimal_source_ir()
+    source_ir = source_ir.model_copy(
+        update={
+            "metadata": source_ir.metadata.model_copy(update={"base_url": url}),
+        }
     )
+    GeneratedSourceMetadata.from_source_ir(source_ir).write(parent)
     return parent

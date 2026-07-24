@@ -64,6 +64,10 @@ _Avoid_: JSON helpers, workspace cache
 The staged or installed Aidoku project materialized from an effective **Generation Manifest**.
 _Avoid_: Source
 
+**Generated Source Metadata**:
+The tool-owned Aidoku `res/source.json` identity, site, version, compatibility requirements, and preserved extension fields for one **Generated Source**.
+_Avoid_: Source JSON, info dictionary
+
 **Validation Result**:
 The stage-by-stage build, package, contract, and live-test evidence for a **Generated Source**.
 _Avoid_: Test result
@@ -87,6 +91,7 @@ _Avoid_: Log
 - One **Validation Plan** evaluates one materialized **Generated Source** and produces one ordered **Validation Result**.
 - Git and JADX Input Source ingestion, toolchain operations, and each **Validation Plan** command consume the same **Command Execution** facts while retaining their own domain error policy.
 - One effective **Generation Manifest** materializes one **Generated Source**.
+- One **Generated Source Metadata** document describes one **Generated Source** and projects host compatibility requirements from its effective **Generation Manifest**.
 - One **Validation Result** evaluates one materialized **Generated Source**.
 - One **Conversion Report** summarizes one conversion attempt without storing provider credentials.
 
