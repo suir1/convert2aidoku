@@ -28,7 +28,7 @@ from .models import (
     ValidationResult,
 )
 from .reports import classify_status, write_report
-from .scaffold import apply_generation_manifest
+from .scaffold import apply_generation_manifest, normalize_generation_manifest
 from .targeted_repair import TargetedRepair, repair_required, repair_state_signature
 from .validator import validate_project
 
@@ -86,10 +86,11 @@ class _ConversionRoundRunner:
             effective = manifest.model_copy(update={"files": manifest.files + inherited})
         effective = normalize_decompiled_dto_manifest(self.ir, effective)
         setting_overrides = live_validation_evidence(self.ir).setting_overrides
-        return GeneratedResources(effective).with_defaults(
+        effective = GeneratedResources(effective).with_defaults(
             filter_specs=self.ir.filter_specs,
             setting_overrides=setting_overrides,
         )
+        return normalize_generation_manifest(self.ir, effective)
 
     def evaluate(self, manifest: GenerationManifest) -> None:
         self.manifest = self._effective(manifest)

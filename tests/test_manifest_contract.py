@@ -237,6 +237,64 @@ def test_terminal_rfind_image_resolution_scope_satisfies_contract() -> None:
     assert evaluate_manifest_contract(ir, manifest).messages == []
 
 
+def test_manual_terminal_image_resolution_scope_satisfies_contract() -> None:
+    ir = minimal_source_ir(
+        image_url_policy=ImageUrlPolicy(
+            preserve_cover_urls=False,
+            chapter_resolution_regex=r"\d+(?=x\.(?:jpg|webp)$)",
+        )
+    )
+    manifest = _manifest(
+        """
+        fn replace_resolution(url: &str, resolution: &str) -> String {
+            let suffix_start = if url.ends_with(".jpg") {
+                Some(url.len() - 4)
+            } else if url.ends_with(".webp") {
+                Some(url.len() - 5)
+            } else {
+                None
+            };
+            if let Some(suffix_start) = suffix_start {
+                let before_suffix = &url[..suffix_start];
+                if let Some(x_pos) = before_suffix.rfind('x') {
+                    let before_x = &before_suffix[..x_pos];
+                    let digits_start = before_x
+                        .rfind(|character: char| !character.is_ascii_digit())
+                        .map_or(0, |position| position + 1);
+                    if digits_start < x_pos {
+                        return format!("{}{}{}", &url[..digits_start], resolution, &url[x_pos..]);
+                    }
+                }
+            }
+            url.to_string()
+        }
+        """
+    )
+
+    assert evaluate_manifest_contract(ir, manifest).messages == []
+
+
+def test_exact_recovered_image_resolution_regex_satisfies_contract() -> None:
+    ir = minimal_source_ir(
+        image_url_policy=ImageUrlPolicy(
+            preserve_cover_urls=False,
+            chapter_resolution_regex=r"\d+(?=x\.(?:jpg|webp)$)",
+        )
+    )
+    manifest = _manifest(
+        r"""
+        fn replace_resolution(url: &str, resolution: &str) -> String {
+            Regex::new(r"\d+(?=x\.(?:jpg|webp)$)")
+                .unwrap()
+                .replace(url, resolution)
+                .to_string()
+        }
+        """
+    )
+
+    assert evaluate_manifest_contract(ir, manifest).messages == []
+
+
 def test_decompiled_dto_serialized_name_is_normalized_deterministically() -> None:
     ir = minimal_source_ir(
         source_format="decompiled_apk",

@@ -622,6 +622,9 @@ def _rust_chapter_parser_compiles_regex(rust: RustInspection) -> bool:
 
 
 def _has_terminal_image_suffix_scope(content: str) -> bool:
+    if r"\d+(?=x\.(?:jpg|webp)$)" in content:
+        return True
+
     def scoped(extension: str) -> bool:
         direct = re.search(
             rf'(?:ends_with|strip_suffix)\(\s*"x?\.{extension}"',

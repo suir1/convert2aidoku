@@ -202,9 +202,9 @@ fn generated_core_live_smoke() {
 #[aidoku_test]
 fn generated_static_filters_live_smoke() {
 	let source = {{ source_struct }}::new();
-	let cases: Vec<Vec<FilterValue>> = vec![
+	let cases: Vec<(&str, Vec<FilterValue>)> = vec![
 		{% for case in static_filter_cases %}
-		vec![
+		({{ case.id | tojson }}, vec![
 			{% if case.kind == "select" %}
 			FilterValue::Select {
 				id: {{ case.id | tojson }}.into(),
@@ -217,20 +217,20 @@ fn generated_static_filters_live_smoke() {
 				ascending: {{ "true" if case.ascending else "false" }},
 			},
 			{% endif %}
-		],
+		]),
 		{% endfor %}
 	];
-	for filters in cases {
+	for (filter_id, filters) in cases {
 		let result = source
 			.get_search_manga_list(None, 1, filters)
-			.expect("static filter request failed");
-		assert!(!result.entries.is_empty(), "static filter returned no manga");
+			.unwrap_or_else(|error| panic!("static filter {filter_id} request failed: {error:?}"));
+		assert!(!result.entries.is_empty(), "static filter {filter_id} returned no manga");
 		assert!(
 			result
 				.entries
 				.iter()
 				.all(|entry| !entry.title.trim().is_empty()),
-			"static filter returned a manga with an empty title"
+			"static filter {filter_id} returned a manga with an empty title"
 		);
 	}
 }

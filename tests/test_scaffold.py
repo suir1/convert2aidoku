@@ -4,7 +4,12 @@ import pytest
 
 from convert2aidoku.errors import SecurityError
 from convert2aidoku.generated_source_metadata import GeneratedSourceMetadata
-from convert2aidoku.models import DependencyRequest, GeneratedFile, GenerationManifest
+from convert2aidoku.models import (
+    DependencyRequest,
+    GeneratedFile,
+    GenerationManifest,
+    ImageUrlPolicy,
+)
 from convert2aidoku.scaffold import (
     apply_generation_manifest,
     normalize_pinned_aidoku_rust,
@@ -242,6 +247,84 @@ fn keep_existing_vector(author: Vec<String>) -> Manga {
     assert normalize_pinned_aidoku_rust(normalized) == normalized
 
 
+def test_normalizer_repairs_pinned_struct_import_request_and_resolution_shapes() -> None:
+    content = """#![no_std]
+use aidoku::{
+    alloc::{string::String, vec::Vec},
+    filter::SelectFilter, DeepLinkHandler, DynamicFilters, ListingProvider,
+};
+fn headers() -> Vec<String> { vec![String::new()] }
+fn request() -> Result<Request, RequestError> {
+    let mut req = Request::get("https://example.com")?
+        .header("User-Agent", get_user_agent());
+    if let Some((key, val)) = get_platform_header() {
+        req = req.header(key, val);
+    }
+    Ok(req)
+}
+fn domain() -> String {
+    let domain = defaults_get("platform").unwrap_or_else(|| "stale".to_string());
+    domain
+}
+fn filter() -> SelectFilter {
+    SelectFilter {
+        id: "theme".to_string(),
+        title: Some("Theme".to_string()),
+        ..Default::default()
+    }
+}
+pub fn translate_resolution(url: &str, resolution: &str) -> String {
+    let re = regex::Regex::new(r"\\d+(?=x\\.(?:jpg|webp)$)").unwrap();
+    re.replace(url, resolution).to_string()
+}
+fn manga() -> Manga {
+    Manga {
+        key: String::new(),
+        title: String::new(),
+    }
+}
+fn chapter() -> Chapter {
+    Chapter {
+        key: String::new(),
+        title: None,
+    }
+}
+fn sort(mut chapters: Vec<Chapter>) {
+    chapters.sort_by(|left, right| right.date_uploaded.cmp(&left.date_uploaded));
+}
+register_source!(Source, ListingProvider, DynamicFilters, DeepLinkHandler);
+"""
+
+    normalized = normalize_pinned_aidoku_rust(
+        content,
+        setting_defaults={"platform": "1"},
+    )
+
+    assert "aidoku::filter::SelectFilter" not in normalized
+    assert "filter::SelectFilter" not in normalized
+    assert "SelectFilter" in normalized
+    assert "use aidoku::alloc::vec;" in normalized
+    assert '.header("User-Agent", &get_user_agent())' in normalized
+    assert ".header(key, &val)" in normalized
+    assert "let domain: String = defaults_get::<String>(" in normalized
+    assert 'String::from("1")' in normalized
+    assert 'id: "theme".into()' in normalized
+    assert 'title: Some("Theme".into())' in normalized
+    assert "regex::Regex" not in normalized
+    assert normalized.count("..Default::default()") == 3
+    assert "sort_by_key(|item| core::cmp::Reverse(item.date_uploaded))" in normalized
+    assert "ListingProvider" not in normalized.split("register_source!", 1)[0]
+    assert "DynamicFilters" not in normalized.split("register_source!", 1)[0]
+    assert "DeepLinkHandler" not in normalized.split("register_source!", 1)[0]
+    assert (
+        normalize_pinned_aidoku_rust(
+            normalized,
+            setting_defaults={"platform": "1"},
+        )
+        == normalized
+    )
+
+
 def test_scaffold_applies_declared_setting_default_to_rust_fallback(tmp_path: Path) -> None:
     manifest = _manifest()
     manifest.files[0].content += """
@@ -272,6 +355,146 @@ fn platform_with_stale_fallback() -> String {
     assert 'defaults_get::<String>("platform").unwrap_or_default()' not in lib
     assert lib.count('defaults_get::<String>("platform").unwrap_or_else(|| String::from("1"))') == 2
     assert 'String::from("stale")' not in lib
+
+
+def test_scaffold_maps_prefixed_platform_setting_to_protocol_header(tmp_path: Path) -> None:
+    manifest = _manifest()
+    manifest.files[0].content += """
+use aidoku::imports::defaults::defaults_get;
+fn get_platform_header() -> Option<(&'static str, String)> {
+    let platform: Option<String> = defaults_get("v2.pref.platform");
+    platform.map(|value| ("platform", value))
+}
+"""
+    manifest.files.append(
+        GeneratedFile(
+            path="res/settings.json",
+            content="""[
+                {"type":"group","title":"Request","items":[
+                    {"type":"select","key":"v2.pref.platform","title":"Platform",
+                     "values":["platform.none","platform.blank","platform.one",
+                               "platform.two","platform.three","platform.four",
+                               "platform.five"],
+                     "titles":["None","Blank","1","2","3","4","5"],
+                     "default":"platform.one"}
+                ]}
+            ]""",
+        )
+    )
+    project, ir = scaffold_project(tmp_path)
+
+    apply_generation_manifest(project, ir, manifest, query=None)
+
+    lib = (project / "src" / "lib.rs").read_text(encoding="utf-8")
+    assert '"platform.none" => None' in lib
+    assert '"platform.blank" => Some(("platform", String::from(" ")))' in lib
+    for word, number in (
+        ("one", "1"),
+        ("two", "2"),
+        ("three", "3"),
+        ("four", "4"),
+        ("five", "5"),
+    ):
+        assert f'"platform.{word}" => Some(("platform", String::from("{number}")))' in lib
+    assert 'String::from("platform.one")' in lib
+    assert "platform.map(" not in lib
+
+
+def test_scaffold_maps_prefixed_resolution_setting_to_numeric_value(tmp_path: Path) -> None:
+    manifest = _manifest()
+    manifest.files[0].content += """
+use aidoku::imports::defaults::defaults_get;
+fn resolution() -> String {
+    defaults_get::<String>("v2.pref.resolution")
+        .unwrap_or_else(|| String::from("resolution.r1500"))
+}
+"""
+    manifest.files.append(
+        GeneratedFile(
+            path="res/settings.json",
+            content="""[
+                {"type":"group","title":"Images","items":[
+                    {"type":"select","key":"v2.pref.resolution","title":"Resolution",
+                     "values":["resolution.r800","resolution.r1200","resolution.r1500"],
+                     "titles":["800","1200","1500"],"default":"resolution.r1500"}
+                ]}
+            ]""",
+        )
+    )
+    project, ir = scaffold_project(tmp_path)
+
+    apply_generation_manifest(project, ir, manifest, query=None)
+
+    lib = (project / "src" / "lib.rs").read_text(encoding="utf-8")
+    assert 'Some("resolution.r800") => String::from("800")' in lib
+    assert 'Some("resolution.r1200") => String::from("1200")' in lib
+    assert 'Some("resolution.r1500") => String::from("1500")' in lib
+    assert '_ => String::from("1500")' in lib
+
+
+def test_scaffold_repairs_prequeried_helper_and_preserves_cover_url(tmp_path: Path) -> None:
+    manifest = _manifest()
+    manifest.files[0].content += """
+fn filtered_url(page: i32) -> String {
+    format!("{}?date_type=day", urls::rank_url(page))
+}
+fn to_manga(&self, resolution: &str) -> Manga {
+    let cover = self
+        .cover
+        .as_deref()
+        .map(|value| translate_resolution(value, resolution))
+        .unwrap_or_default();
+    Manga { cover: Some(cover), ..Default::default() }
+}
+"""
+    manifest.files.append(
+        GeneratedFile(
+            path="src/urls.rs",
+            content='fn rank_url(page: i32) -> String { format!("/ranks?offset={}", page) }',
+        )
+    )
+    project, ir = scaffold_project(tmp_path)
+    ir = ir.model_copy(
+        update={
+            "image_url_policy": ImageUrlPolicy(
+                preserve_cover_urls=True,
+                chapter_resolution_regex=r"\d+(?=x\.(?:jpg|webp)$)",
+            )
+        }
+    )
+
+    apply_generation_manifest(project, ir, manifest, query=None)
+
+    lib = (project / "src" / "lib.rs").read_text(encoding="utf-8")
+    assert 'format!("{}&date_type=day", urls::rank_url(page))' in lib
+    assert ".map(|value| translate_resolution(value, resolution))" not in lib
+    assert "let cover = self.cover.clone().unwrap_or_default();" in lib
+
+
+def test_scaffold_optionalizes_unused_decompiled_dto_strings(tmp_path: Path) -> None:
+    manifest = _manifest()
+    manifest.files.append(
+        GeneratedFile(
+            path="src/dto.rs",
+            content="""
+use aidoku::{alloc::string::String, serde::Deserialize};
+#[derive(Deserialize)]
+struct ChapterDetail {
+    group_id: String,
+    name: String,
+}
+fn chapter_name(chapter: &ChapterDetail) -> &str { &chapter.name }
+""",
+        )
+    )
+    project, ir = scaffold_project(tmp_path)
+    ir = ir.model_copy(update={"source_format": "decompiled_apk"})
+
+    apply_generation_manifest(project, ir, manifest, query=None)
+
+    dto = (project / "src" / "dto.rs").read_text(encoding="utf-8")
+    assert "group_id: Option<String>" in dto
+    assert "name: String" in dto
 
 
 @pytest.mark.parametrize(
@@ -339,8 +562,8 @@ def test_smoke_requests_manga_cover_and_exercises_static_filters(tmp_path: Path)
     assert "cover image request failed after retry" in smoke
     assert 'id: "region".into()' in smoke
     assert 'value: "japan".into()' in smoke
-    assert "static filter returned no manga" in smoke
-    assert "static filter returned a manga with an empty title" in smoke
+    assert "static filter {filter_id} returned no manga" in smoke
+    assert "static filter {filter_id} returned a manga with an empty title" in smoke
     assert "first image request failed after retry" in smoke
 
 

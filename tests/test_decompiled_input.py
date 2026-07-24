@@ -134,6 +134,24 @@ def test_dto_shapes_preserve_generic_field_types_and_serialized_names() -> None:
     )
 
 
+def test_dto_shapes_restore_kotlin_boolean_is_prefix_to_snake_case() -> None:
+    files = [
+        SourceFile(
+            path="sources/example/api/dto/ChapterDetail.java",
+            sha256="0",
+            content="""
+            public final class ChapterDetail {
+                private final boolean isLong;
+            }
+            """,
+        )
+    ]
+
+    shapes = decompiled_dto_shapes(files)
+
+    assert shapes[0].fields[0].serialized_name == "is_long"
+
+
 def test_behavior_projection_keeps_distinct_main_and_helper_policies() -> None:
     java = """
 public final class Example extends HttpSource {

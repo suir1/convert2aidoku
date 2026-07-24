@@ -471,6 +471,24 @@ class GeneratedResources:
                     defaults[key] = default
         return defaults
 
+    def setting_values(self) -> dict[str, tuple[str, ...]]:
+        values_by_key: dict[str, tuple[str, ...]] = {}
+        for group in self._data.get(self.SETTINGS, []):
+            if not isinstance(group, dict) or not isinstance(group.get("items"), list):
+                continue
+            for item in group["items"]:
+                if not isinstance(item, dict):
+                    continue
+                key = item.get("key")
+                values = item.get("values")
+                if (
+                    isinstance(key, str)
+                    and isinstance(values, list)
+                    and all(isinstance(value, str) for value in values)
+                ):
+                    values_by_key[key] = tuple(values)
+        return values_by_key
+
     def with_source_filters(self, specs: list[SourceFilterSpec]) -> GenerationManifest:
         if not specs:
             return self._manifest

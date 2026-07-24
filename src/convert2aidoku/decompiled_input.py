@@ -161,10 +161,17 @@ def decompiled_dto_shapes(files: Iterable[SourceFile]) -> tuple[DecompiledDtoSha
                 if name_node is None:
                     continue
                 name = _node_text(raw, name_node)
+                serialized_name = serialized_names.get(name)
+                if (
+                    serialized_name is None
+                    and java_type in {"boolean", "Boolean"}
+                    and re.fullmatch(r"is[A-Z][A-Za-z0-9]*", name)
+                ):
+                    serialized_name = re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
                 fields.append(
                     DecompiledDtoField(
                         name=name,
-                        serialized_name=serialized_names.get(name, name),
+                        serialized_name=serialized_name or name,
                         java_type=java_type,
                     )
                 )

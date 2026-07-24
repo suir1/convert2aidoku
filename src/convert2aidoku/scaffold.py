@@ -22,6 +22,7 @@ from .icons import create_aidoku_icon
 from .ingest import ResolvedSource, copy_input_license, find_icon
 from .models import (
     Capability,
+    GeneratedFile,
     GeneratedResources,
     GenerationManifest,
     SourceIR,
@@ -158,8 +159,8 @@ def _remove_reserved_smoke_marker(content: str) -> str:
 def _alloc_macro_is_imported(content: str, name: str) -> bool:
     inspection = RustInspection.from_content(content)
     pattern = re.compile(
-        rf"\balloc(?:::\{{[^}}]*\b{re.escape(name)}\b[^}}]*\}}|::"
-        rf"{re.escape(name)}\b)"
+        rf"\balloc(?:::\{{[^}}]*\b{re.escape(name)}\b(?!::)[^}}]*\}}|::"
+        rf"{re.escape(name)}\b(?!::))"
     )
     return any(
         (compact := RustInspection.compact_node(node)).startswith("useaidoku::")
@@ -260,6 +261,134 @@ def _normalize_pinned_model_shapes(content: str) -> str:
     return content
 
 
+def _normalize_struct_expression_defaults(content: str) -> str:
+    replacements: list[tuple[str, str]] = []
+    for node in RustInspection.from_content(content).nodes("struct_expression"):
+        name = node.child_by_field_name("name")
+        body = node.child_by_field_name("body")
+        if name is None or body is None:
+            continue
+        type_name = name.text.decode("utf-8", errors="replace")
+        text = node.text.decode("utf-8", errors="replace")
+        if type_name not in {"Manga", "Chapter", "Page"} or "..Default::default()" in text:
+            continue
+        closing = re.search(r"\n(?P<indent>[ \t]*)\}$", text)
+        if closing is None:
+            continue
+        indent = closing.group("indent")
+        head = text[: closing.start()].rstrip()
+        if not head.endswith(","):
+            head += ","
+        replacements.append((text, f"{head}\n{indent}    ..Default::default()\n{indent}}}"))
+    for original, replacement in replacements:
+        content = content.replace(original, replacement, 1)
+    return content
+
+
+def _normalize_resolution_regex(content: str) -> str:
+    replacements: list[tuple[str, str]] = []
+    for function in RustInspection.from_content(content).named("translate_resolution"):
+        if "regex::Regex" not in function.text:
+            continue
+        replacement = """pub fn translate_resolution(url: &str, resolution: &str) -> String {
+    let suffix_start = if url.ends_with(".jpg") {
+        Some(url.len() - 4)
+    } else if url.ends_with(".webp") {
+        Some(url.len() - 5)
+    } else {
+        None
+    };
+    if let Some(suffix_start) = suffix_start {
+        let before_suffix = &url[..suffix_start];
+        if let Some(x_pos) = before_suffix.rfind('x') {
+            let before_x = &before_suffix[..x_pos];
+            let digits_start = before_x
+                .rfind(|character: char| !character.is_ascii_digit())
+                .map_or(0, |position| position + 1);
+            if digits_start < x_pos {
+                return format!("{}{}{}", &url[..digits_start], resolution, &url[x_pos..]);
+            }
+        }
+    }
+    url.to_string()
+}"""
+        replacements.append((function.text, replacement))
+    for original, replacement in replacements:
+        content = content.replace(original, replacement, 1)
+    return content
+
+
+def _normalize_prequeried_url_helpers(content: str, helpers: set[str] | None) -> str:
+    for helper in helpers or set():
+        function = rf"(?:[A-Za-z_][A-Za-z0-9_]*::)*{re.escape(helper)}\s*\("
+        content = re.sub(
+            rf'(?P<head>"\{{\}}(?:\\.|[^"\\])*?)\?'
+            rf'(?P<tail>(?:\\.|[^"\\])*"\s*,\s*{function})',
+            r"\g<head>&\g<tail>",
+            content,
+        )
+    return content
+
+
+def _normalize_preserved_cover_urls(content: str, preserve_cover_urls: bool) -> str:
+    if not preserve_cover_urls:
+        return content
+    return re.sub(
+        r"(?P<receiver>\b[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)"
+        r"\s*\.cover\s*\.as_deref\(\)\s*\.map\(\|\s*(?P<value>[A-Za-z_][A-Za-z0-9_]*)"
+        r"\s*\|\s*(?:[A-Za-z_][A-Za-z0-9_]*::)*"
+        r"[A-Za-z_][A-Za-z0-9_]*resolution[A-Za-z0-9_]*\(\s*(?P=value)\s*,[^)]*\)"
+        r"\)\s*\.unwrap_or_default\(\)",
+        r"\g<receiver>.cover.clone().unwrap_or_default()",
+        content,
+    )
+
+
+def _normalize_select_filter_import(content: str) -> str:
+    replacements: list[tuple[str, str]] = []
+    for node in RustInspection.from_content(content).nodes("use_declaration"):
+        text = node.text.decode("utf-8", errors="replace")
+        if not RustInspection.compact_node(node).startswith("useaidoku::{"):
+            continue
+        normalized = text.replace("std::filters::SelectFilter", "SelectFilter").replace(
+            "filter::SelectFilter", "SelectFilter"
+        )
+        if normalized != text:
+            replacements.append((text, normalized))
+    for original, replacement in replacements:
+        content = content.replace(original, replacement, 1)
+    return content
+
+
+def _remove_macro_only_trait_imports(content: str) -> str:
+    if "register_source!" not in content:
+        return content
+    traits = (
+        "BaseUrlProvider",
+        "DeepLinkHandler",
+        "DynamicFilters",
+        "DynamicListings",
+        "ImageRequestProvider",
+        "ListingProvider",
+    )
+    replacements: list[tuple[str, str]] = []
+    for node in RustInspection.from_content(content).nodes("use_declaration"):
+        text = node.text.decode("utf-8", errors="replace")
+        if not RustInspection.compact_node(node).startswith("useaidoku::{"):
+            continue
+        normalized = text
+        for trait in traits:
+            if f"impl {trait}" in content:
+                continue
+            normalized = re.sub(rf"\b{trait}\s*,\s*", "", normalized)
+            normalized = re.sub(rf",\s*\b{trait}\b", "", normalized)
+        if normalized != text:
+            replacements.append((text, normalized))
+    for original, replacement in replacements:
+        content = content.replace(original, replacement, 1)
+    return content
+
+
 def _normalize_generated_setting_defaults(
     content: str,
     setting_defaults: Mapping[str, str] | None,
@@ -278,6 +407,121 @@ def _normalize_generated_setting_defaults(
             f".unwrap_or_else(|| String::from({default_literal}))",
             content,
         )
+        content = re.sub(
+            rf"(?P<prefix>defaults_get(?:::<String>)?\(\s*{re.escape(key_literal)}\s*\)"
+            rf"[^;]{{0,500}}?\.unwrap_or_else\(\|\|\s*){rust_string}\.to_string\(\)\s*\)",
+            lambda match, literal=default_literal: (
+                f"{match.group('prefix')}String::from({literal}))"
+            ),
+            content,
+        )
+    return content
+
+
+_PLATFORM_PROTOCOL_VALUES: Mapping[str, str | None] = {
+    "platform.none": None,
+    "platform.blank": " ",
+    "platform.one": "1",
+    "platform.two": "2",
+    "platform.three": "3",
+    "platform.four": "4",
+    "platform.five": "5",
+}
+
+
+def _normalize_resolution_setting(
+    content: str,
+    setting_defaults: Mapping[str, str] | None,
+    setting_values: Mapping[str, tuple[str, ...]] | None,
+) -> str:
+    defaults = setting_defaults or {}
+    for key, values in (setting_values or {}).items():
+        if (
+            key.rsplit(".", 1)[-1] != "resolution"
+            or not values
+            or not all(re.fullmatch(r"resolution\.r[1-9][0-9]*", value) for value in values)
+        ):
+            continue
+        default = defaults.get(key, values[-1]).rsplit(".r", 1)[-1]
+        arms = "\n".join(
+            f"Some({json.dumps(value)}) => String::from({json.dumps(value.rsplit('.r', 1)[-1])}),"
+            for value in values
+        )
+        replacement = (
+            f"match defaults_get::<String>({json.dumps(key)}).as_deref() {{\n"
+            f"        {arms}\n"
+            f"        _ => String::from({json.dumps(default)}),\n"
+            "    }"
+        )
+        rust_string = r'"(?:\\.|[^"\\])*"'
+        content = re.sub(
+            rf"defaults_get(?:::<String>)?\(\s*{re.escape(json.dumps(key))}\s*\)"
+            rf"\s*\.unwrap_or_else\(\|\|\s*String::from\(\s*{rust_string}\s*\)\s*\)",
+            lambda _match, value=replacement: value,
+            content,
+        )
+    return content
+
+
+def _normalize_platform_header_setting(
+    content: str,
+    setting_defaults: Mapping[str, str] | None,
+    setting_values: Mapping[str, tuple[str, ...]] | None,
+) -> str:
+    """Translate recovered enum storage keys before sending the platform header."""
+    defaults = setting_defaults or {}
+    candidates = {
+        key: values
+        for key, values in (setting_values or {}).items()
+        if key.rsplit(".", 1)[-1] == "platform"
+        and values
+        and set(values).issubset(_PLATFORM_PROTOCOL_VALUES)
+        and "platform.one" in values
+    }
+    if not candidates:
+        return content
+
+    replacements: list[tuple[str, str]] = []
+    for function in RustInspection.from_content(content).functions:
+        function_text = function.text
+        key = next(
+            (candidate for candidate in candidates if json.dumps(candidate) in function_text),
+            None,
+        )
+        if (
+            key is None
+            or '"platform"' not in function_text
+            or ".map(" not in function_text
+            or "Option<" not in function_text.split("{", 1)[0]
+        ):
+            continue
+        opening = function_text.find("{")
+        if opening < 0:
+            continue
+        default = defaults.get(key, "platform.one")
+        arms = []
+        for stored in candidates[key]:
+            protocol_value = _PLATFORM_PROTOCOL_VALUES[stored]
+            if protocol_value is None:
+                arms.append(f"        {json.dumps(stored)} => None,")
+            else:
+                arms.append(
+                    f'        {json.dumps(stored)} => Some(("platform", '
+                    f"String::from({json.dumps(protocol_value)}))),"
+                )
+        arms.append("        _ => None,")
+        replacement = (
+            function_text[:opening].rstrip()
+            + " {\n"
+            + f"    let platform = defaults_get::<String>({json.dumps(key)})\n"
+            + f"        .unwrap_or_else(|| String::from({json.dumps(default)}));\n"
+            + "    match platform.as_str() {\n"
+            + "\n".join(arms)
+            + "\n    }\n}"
+        )
+        replacements.append((function_text, replacement))
+    for original, replacement in replacements:
+        content = content.replace(original, replacement, 1)
     return content
 
 
@@ -286,6 +530,9 @@ def normalize_pinned_aidoku_rust(
     *,
     allow_dead_code: bool = False,
     setting_defaults: Mapping[str, str] | None = None,
+    setting_values: Mapping[str, tuple[str, ...]] | None = None,
+    prequeried_url_helpers: set[str] | None = None,
+    preserve_cover_urls: bool = False,
 ) -> str:
     """Apply small type-safe compatibility rewrites for the pinned Aidoku/Rust APIs."""
     if allow_dead_code and not re.search(
@@ -294,6 +541,9 @@ def normalize_pinned_aidoku_rust(
     ):
         content = "#![allow(dead_code)]\n" + content.lstrip()
     content = content.replace("aidoku::std::filters::SelectFilter", "aidoku::SelectFilter")
+    content = content.replace("aidoku::filter::SelectFilter", "aidoku::SelectFilter")
+    content = _normalize_select_filter_import(content)
+    content = _remove_macro_only_trait_imports(content)
     content = content.replace("RequestError::new(", "aidoku::AidokuError::message(")
     if content.count("RequestError") == 1:
         content = re.sub(
@@ -310,7 +560,33 @@ def normalize_pinned_aidoku_rust(
     )
     content = _normalize_idempotent_get_retry(content)
     content = _normalize_pinned_model_shapes(content)
+    content = _normalize_struct_expression_defaults(content)
+    content = _normalize_resolution_regex(content)
+    content = _normalize_prequeried_url_helpers(content, prequeried_url_helpers)
+    content = _normalize_preserved_cover_urls(content, preserve_cover_urls)
+    content = re.sub(
+        r"\blet\s+domain\s*=\s*defaults_get\(",
+        "let domain: String = defaults_get(",
+        content,
+    )
+    content = content.replace(
+        "let domain: String = defaults_get(",
+        "let domain: String = defaults_get::<String>(",
+    )
+    content = re.sub(
+        r"(?P<prefix>\b(?:id|title):\s*(?:Some\()?)"
+        r'(?P<literal>"(?:\\.|[^"\\])*")\.to_string\(\)',
+        r"\g<prefix>\g<literal>.into()",
+        content,
+    )
+    content = content.replace(
+        '.header("User-Agent", get_user_agent())',
+        '.header("User-Agent", &get_user_agent())',
+    )
+    content = content.replace(".header(key, val)", ".header(key, &val)")
     content = _normalize_generated_setting_defaults(content, setting_defaults)
+    content = _normalize_resolution_setting(content, setting_defaults, setting_values)
+    content = _normalize_platform_header_setting(content, setting_defaults, setting_values)
     content = _inject_no_std_macro_imports(content)
     content = re.sub(
         r"(\bparse_(?:local_)?date\s*\([^;]{0,800}?\))\s*\.ok\(\)",
@@ -319,11 +595,101 @@ def normalize_pinned_aidoku_rust(
     )
     content = re.sub(
         r"\b(?P<items>[A-Za-z_]\w*)\.sort_by\(\|(?P<left>[A-Za-z_]\w*),\s*"
-        r"(?P<right>[A-Za-z_]\w*)\|\s*(?P=right)\.index\.cmp\(&(?P=left)\.index\)\);",
-        lambda match: f"{match.group('items')}.sort_by_key(|item| core::cmp::Reverse(item.index));",
+        r"(?P<right>[A-Za-z_]\w*)\|\s*(?P=right)\.(?P<field>[A-Za-z_]\w*)"
+        r"\.cmp\(&(?P=left)\.(?P=field)\)\);",
+        lambda match: (
+            f"{match.group('items')}.sort_by_key(|item| "
+            f"core::cmp::Reverse(item.{match.group('field')}));"
+        ),
         content,
     )
     return content
+
+
+def _prequeried_url_helpers(manifest: GenerationManifest) -> set[str]:
+    helpers: set[str] = set()
+    for generated in manifest.files:
+        if not generated.path.endswith(".rs"):
+            continue
+        for function in RustInspection.from_content(generated.content).functions:
+            if re.search(r'"(?:\\.|[^"\\])*\?(?:\\.|[^"\\])*"', function.text):
+                helpers.add(function.name)
+    return helpers
+
+
+def _optionalize_unused_decompiled_dto_strings(
+    files: list[GeneratedFile],
+) -> list[GeneratedFile]:
+    rust_content = "\n".join(
+        generated.content for generated in files if generated.path.endswith(".rs")
+    )
+    updated = []
+    for generated in files:
+        if not generated.path.endswith(".rs"):
+            updated.append(generated)
+            continue
+        raw = bytearray(generated.content.encode())
+        edits: list[tuple[int, int, bytes]] = []
+        for struct in RustInspection.from_content(generated.content).structs:
+            sibling = struct.node.prev_named_sibling
+            attributes = []
+            while sibling is not None and sibling.type == "attribute_item":
+                attributes.append(sibling.text.decode("utf-8", errors="replace"))
+                sibling = sibling.prev_named_sibling
+            if not any("Deserialize" in attribute for attribute in attributes):
+                continue
+            for field in struct.fields:
+                if field.type_text != "String" or re.search(
+                    rf"\.\s*{re.escape(field.name)}\b", rust_content
+                ):
+                    continue
+                type_node = field.node.child_by_field_name("type")
+                if type_node is not None:
+                    edits.append((type_node.start_byte, type_node.end_byte, b"Option<String>"))
+        for start, end, replacement in sorted(edits, reverse=True):
+            raw[start:end] = replacement
+        content = raw.decode()
+        updated.append(
+            generated.model_copy(update={"content": content})
+            if content != generated.content
+            else generated
+        )
+    return updated
+
+
+def normalize_generation_manifest(
+    ir: SourceIR,
+    manifest: GenerationManifest,
+) -> GenerationManifest:
+    """Project deterministic Rust compatibility and recovered behavior into a manifest."""
+    resources = GeneratedResources(manifest)
+    setting_defaults = resources.setting_defaults()
+    setting_values = resources.setting_values()
+    prequeried_url_helpers = _prequeried_url_helpers(manifest)
+    preserve_cover_urls = bool(ir.image_url_policy and ir.image_url_policy.preserve_cover_urls)
+    files = []
+    changed = False
+    for generated in manifest.files:
+        content = generated.content
+        if generated.path.endswith(".rs"):
+            content = normalize_pinned_aidoku_rust(
+                content,
+                allow_dead_code=generated.path != "src/lib.rs",
+                setting_defaults=setting_defaults,
+                setting_values=setting_values,
+                prequeried_url_helpers=prequeried_url_helpers,
+                preserve_cover_urls=preserve_cover_urls,
+            )
+        changed |= content != generated.content
+        files.append(generated.model_copy(update={"content": content}))
+    if ir.source_format == "decompiled_apk":
+        optionalized = _optionalize_unused_decompiled_dto_strings(files)
+        changed |= any(
+            before.content != after.content
+            for before, after in zip(files, optionalized, strict=True)
+        )
+        files = optionalized
+    return manifest.model_copy(update={"files": files}) if changed else manifest
 
 
 def _environment() -> Environment:
@@ -420,8 +786,11 @@ def apply_generation_manifest(
     *,
     query: str | None,
 ) -> list[str]:
+    manifest = normalize_generation_manifest(ir, manifest)
     dependency_names = {item.name for item in manifest.dependencies}
-    setting_defaults = GeneratedResources(manifest).setting_defaults()
+    resources = GeneratedResources(manifest)
+    setting_defaults = resources.setting_defaults()
+    setting_values = resources.setting_values()
     _write_cargo(destination, ir, dependency_names)
 
     manifest_paths = {item.path for item in manifest.files}
@@ -445,6 +814,11 @@ def apply_generation_manifest(
                 content,
                 allow_dead_code=generated.path != "src/lib.rs",
                 setting_defaults=setting_defaults,
+                setting_values=setting_values,
+                prequeried_url_helpers=_prequeried_url_helpers(manifest),
+                preserve_cover_urls=bool(
+                    ir.image_url_policy and ir.image_url_policy.preserve_cover_urls
+                ),
             )
         validate_generated_content(generated.path, content)
         target = _safe_destination(destination, generated.path)
