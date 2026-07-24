@@ -5,16 +5,11 @@ import pytest
 
 from convert2aidoku.analyzer import analyze_source
 from convert2aidoku.converter import (
-    _apply_repair_patch,
-    _diagnostic_file_excerpts,
-    _repair_diagnostics,
-    _should_repair,
     convert_source,
     validate_existing,
 )
 from convert2aidoku.errors import AIProviderError
 from convert2aidoku.ingest import resolve_source
-from convert2aidoku.live_validation_evidence import LiveValidationEvidence
 from convert2aidoku.manifest_contract import (
     ContractDiagnostic,
     ContractEvaluation,
@@ -1116,102 +1111,3 @@ def test_triple_des_request_requires_dependencies_and_live_millisecond_time() ->
 
     assert any("base64, cbc, des" in gap for gap in gaps)
     assert any("live millisecond Unix timestamp" in gap for gap in gaps)
-
-
-def test_blocked_validation_repairs_only_when_contract_has_gaps() -> None:
-    validation = ValidationResult(build_ok=True, package_ok=True, blocked=True)
-
-    assert not _should_repair(validation, [], live=True)
-    assert _should_repair(validation, ["relative URL gap"], live=True)
-
-
-def test_repair_diagnostics_include_live_validation_evidence(monkeypatch) -> None:
-    with resolve_source(str(FIXTURE)) as resolved:
-        ir = analyze_source(resolved)
-    monkeypatch.setattr(
-        "convert2aidoku.converter.live_validation_evidence",
-        lambda _ir: LiveValidationEvidence(repair_context="benchmark context"),
-    )
-
-    diagnostics = _repair_diagnostics(
-        ir,
-        ValidationResult(blocked=True),
-        ["relative URL gap"],
-    )
-
-    assert "benchmark context" in diagnostics
-    assert "relative URL gap" in diagnostics
-
-
-def test_compiler_diagnostics_produce_bounded_source_excerpts(tmp_path: Path) -> None:
-    source = tmp_path / "src"
-    source.mkdir()
-    lines = [f"line {index}" for index in range(1, 41)]
-    (source / "lib.rs").write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-    excerpts = _diagnostic_file_excerpts(
-        tmp_path,
-        "error\n  --> src/lib.rs:20:5\nhelp\n  --> src/lib.rs:24:9",
-        context_lines=3,
-    )
-
-    assert excerpts == [
-        {
-            "path": "src/lib.rs",
-            "start_line": 17,
-            "end_line": 27,
-            "content": "\n".join(lines[16:27]),
-        }
-    ]
-
-
-def test_repair_patch_requires_one_exact_match_and_preserves_manifest_metadata() -> None:
-    manifest = generation_manifest(
-        "let title = title;\n",
-        traits=("DynamicFilters",),
-        dependencies=(DependencyRequest(name="serde"),),
-    )
-    patch = RepairPatch.model_validate(
-        {
-            "edits": [
-                {
-                    "path": "src/lib.rs",
-                    "old_text": "let title = title;",
-                    "new_text": "let title = Some(title);",
-                }
-            ]
-        }
-    )
-
-    repaired = _apply_repair_patch(
-        manifest,
-        [{"path": "src/lib.rs", "content": "let title = title;\n"}],
-        patch,
-        [
-            {
-                "path": "src/lib.rs",
-                "start_line": 1,
-                "end_line": 1,
-                "content": "let title = title;",
-            }
-        ],
-    )
-
-    assert repaired.files[0].content == "let title = Some(title);\n"
-    assert repaired.implemented_traits == ["DynamicFilters"]
-    assert repaired.dependencies == [DependencyRequest(name="serde")]
-
-
-def test_repair_patch_cannot_edit_text_outside_supplied_excerpts() -> None:
-    manifest = generation_manifest("safe();\nother();\n")
-    patch = RepairPatch.model_validate(
-        {"edits": [{"path": "src/lib.rs", "old_text": "other();", "new_text": "changed();"}]}
-    )
-
-    with pytest.raises(AIProviderError, match="not present in a supplied excerpt"):
-        _apply_repair_patch(
-            manifest,
-            [{"path": "src/lib.rs", "content": "safe();\nother();\n"}],
-            patch,
-            [{"path": "src/lib.rs", "content": "safe();"}],
-        )

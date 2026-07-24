@@ -1,0 +1,180 @@
+from pathlib import Path
+
+import pytest
+
+from convert2aidoku.checkpoint_store import CheckpointStore
+from convert2aidoku.errors import AIProviderError
+from convert2aidoku.live_validation_evidence import LiveValidationEvidence
+from convert2aidoku.manifest_contract import ContractEvaluation
+from convert2aidoku.models import (
+    ConversionCheckpoint,
+    DependencyRequest,
+    RepairPatch,
+    ValidationResult,
+    ValidationStage,
+)
+from convert2aidoku.targeted_repair import (
+    TargetedRepair,
+    apply_repair_patch,
+    diagnostic_file_excerpts,
+    repair_diagnostics,
+    repair_required,
+)
+from tests.scenarios import (
+    generation_manifest,
+    minimal_source_ir,
+    provider_settings,
+    scripted_ai_client,
+)
+
+
+def test_blocked_validation_repairs_only_when_contract_has_gaps() -> None:
+    validation = ValidationResult(build_ok=True, package_ok=True, blocked=True)
+
+    assert not repair_required(validation, [], live=True)
+    assert repair_required(validation, ["relative URL gap"], live=True)
+
+
+def test_repair_diagnostics_include_live_validation_evidence(monkeypatch) -> None:
+    ir = minimal_source_ir()
+    monkeypatch.setattr(
+        "convert2aidoku.targeted_repair.live_validation_evidence",
+        lambda _ir: LiveValidationEvidence(repair_context="benchmark context"),
+    )
+
+    diagnostics = repair_diagnostics(
+        ir,
+        ValidationResult(blocked=True),
+        ["relative URL gap"],
+    )
+
+    assert "benchmark context" in diagnostics
+    assert "relative URL gap" in diagnostics
+
+
+def test_compiler_diagnostics_produce_bounded_source_excerpts(tmp_path: Path) -> None:
+    source = tmp_path / "src"
+    source.mkdir()
+    lines = [f"line {index}" for index in range(1, 41)]
+    (source / "lib.rs").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    excerpts = diagnostic_file_excerpts(
+        tmp_path,
+        "error\n  --> src/lib.rs:20:5\nhelp\n  --> src/lib.rs:24:9",
+        context_lines=3,
+    )
+
+    assert excerpts == [
+        {
+            "path": "src/lib.rs",
+            "start_line": 17,
+            "end_line": 27,
+            "content": "\n".join(lines[16:27]),
+        }
+    ]
+
+
+def test_repair_patch_requires_one_exact_match_and_preserves_manifest_metadata() -> None:
+    manifest = generation_manifest(
+        "let title = title;\n",
+        traits=("DynamicFilters",),
+        dependencies=(DependencyRequest(name="serde"),),
+    )
+    patch = RepairPatch.model_validate(
+        {
+            "edits": [
+                {
+                    "path": "src/lib.rs",
+                    "old_text": "let title = title;",
+                    "new_text": "let title = Some(title);",
+                }
+            ]
+        }
+    )
+
+    repaired = apply_repair_patch(
+        manifest,
+        [{"path": "src/lib.rs", "content": "let title = title;\n"}],
+        patch,
+        [
+            {
+                "path": "src/lib.rs",
+                "start_line": 1,
+                "end_line": 1,
+                "content": "let title = title;",
+            }
+        ],
+    )
+
+    assert repaired.files[0].content == "let title = Some(title);\n"
+    assert repaired.implemented_traits == ["DynamicFilters"]
+    assert repaired.dependencies == [DependencyRequest(name="serde")]
+
+
+def test_repair_patch_cannot_edit_text_outside_supplied_excerpts() -> None:
+    manifest = generation_manifest("safe();\nother();\n")
+    patch = RepairPatch.model_validate(
+        {"edits": [{"path": "src/lib.rs", "old_text": "other();", "new_text": "changed();"}]}
+    )
+
+    with pytest.raises(AIProviderError, match="not present in a supplied excerpt"):
+        apply_repair_patch(
+            manifest,
+            [{"path": "src/lib.rs", "content": "safe();\nother();\n"}],
+            patch,
+            [{"path": "src/lib.rs", "content": "safe();"}],
+        )
+
+
+def test_targeted_repair_applies_compiler_patch_without_loading_history(tmp_path: Path) -> None:
+    store = CheckpointStore(tmp_path / "workspace")
+    source = store.project / "src"
+    source.mkdir(parents=True)
+    rust = "let title = title;\n"
+    (source / "lib.rs").write_text(rust, encoding="utf-8")
+    manifest = generation_manifest(rust)
+    patch = RepairPatch.model_validate(
+        {
+            "edits": [
+                {
+                    "path": "src/lib.rs",
+                    "old_text": "let title = title;",
+                    "new_text": "let title = Some(title);",
+                }
+            ]
+        }
+    )
+    adapter, calls = scripted_ai_client(
+        generation=manifest,
+        repair_patch=patch,
+        patch_scope="compiler",
+    )
+    repair = TargetedRepair(
+        ir=minimal_source_ir(),
+        store=store,
+        checkpoint=ConversionCheckpoint(
+            input_ref="fixture",
+            output="generated/en.example",
+            provider_base_url="http://local/v1",
+            model="test",
+        ),
+        manifest=manifest,
+        validation=ValidationResult(
+            stages=[
+                ValidationStage(
+                    name="cargo-check",
+                    kind="check",
+                    ok=False,
+                    output="error\n  --> src/lib.rs:1:1",
+                )
+            ]
+        ),
+        contract=ContractEvaluation(()),
+    )
+
+    with adapter(provider_settings()) as client:
+        result = repair.request(client)
+
+    assert result.value.files[0].content == "let title = Some(title);\n"
+    assert calls.repair_patch == 1
+    assert calls.repair == 0

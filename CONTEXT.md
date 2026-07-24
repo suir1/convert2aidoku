@@ -32,6 +32,10 @@ _Avoid_: AI output, generated files
 The structured diagnostics, targeted-repair scope, and user-readable rendering produced by evaluating one **Generation Manifest** against its **SourceIR**.
 _Avoid_: Capability gap strings, repair keywords
 
+**Targeted Repair**:
+The targeted-first repair policy that selects compiler or contract excerpts, authorizes exact Rust replacements, validates the complete result, and falls back to a full **Generation Manifest** repair with an audit warning.
+_Avoid_: Patch helpers, unrestricted diff, repair routing keywords
+
 **Dependency Policy**:
 The pinned Aidoku revision and optional Cargo crate allowlist, Cargo projection, provider instruction, and **SourceIR** capability requirements applied to every **Generation Manifest**.
 _Avoid_: Dependency dictionary, allowed dependency set
@@ -106,6 +110,7 @@ _Avoid_: Log
 - One **Generation Manifest** owns zero or one filter resource and zero or one settings resource as **Generated Resources**.
 - One **Generation Manifest** yields one **Rust Inspection** of its controlled Rust files during contract evaluation.
 - One **Generation Manifest Contract** evaluates one **Generation Manifest** against one **SourceIR** and may expose a targeted repair only when every diagnostic has a supported repair kind and a relevant Rust excerpt.
+- One **Targeted Repair** may replace only text present in its authorized excerpts; failure preserves its diagnostic as a warning before requesting a full replacement **Generation Manifest**.
 - One **Dependency Policy** evaluates every **Generation Manifest** before provider acceptance, **Generated Source** materialization, and **Generation Manifest Contract** evaluation.
 - Each AI round is produced by one successful **Typed AI Exchange**.
 - Each **Conversion Round** evaluates one effective **Generation Manifest** and records its generated files, contract gaps, and **Validation Result** in the **Checkpoint**.

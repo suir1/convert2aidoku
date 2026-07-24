@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 import shutil
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -10,9 +9,8 @@ from .ai import AIResult, OpenAICompatibleClient, ai_round
 from .analyzer import analyze_source
 from .checkpoint_store import CheckpointStore, ManifestWrite
 from .config import AISettings
-from .constants import MAX_AI_DIAGNOSTIC_CHARS
 from .conversion_completion import ConversionOutcome, complete_conversion
-from .errors import AIProviderError, InputError, SecurityError
+from .errors import InputError
 from .generated_source_metadata import GeneratedSourceMetadata
 from .ingest import resolve_source
 from .live_validation_evidence import live_validation_evidence
@@ -21,10 +19,8 @@ from .models import (
     Capability,
     ConversionCheckpoint,
     ConversionReport,
-    GeneratedFile,
     GeneratedResources,
     GenerationManifest,
-    RepairPatch,
     SourceIR,
     ValidationResult,
 )
@@ -32,147 +28,9 @@ from .reports import classify_status, write_report
 from .scaffold import (
     apply_generation_manifest,
     create_scaffold,
-    normalize_pinned_aidoku_rust,
-    read_generated_files,
-    validate_generated_content,
 )
+from .targeted_repair import TargetedRepair, repair_required
 from .validator import validate_project
-
-_RUST_DIAGNOSTIC_LOCATION = re.compile(
-    r"-->\s+(?P<path>src/[A-Za-z0-9_./-]+\.rs):(?P<line>[1-9][0-9]*):[1-9][0-9]*"
-)
-
-
-def _diagnostic_file_excerpts(
-    project: Path,
-    diagnostics: str,
-    *,
-    context_lines: int = 10,
-) -> list[dict[str, object]]:
-    locations: dict[str, set[int]] = {}
-    for match in _RUST_DIAGNOSTIC_LOCATION.finditer(diagnostics):
-        path = match.group("path")
-        if path == "src/generated_smoke.rs" or ".." in Path(path).parts:
-            continue
-        locations.setdefault(path, set()).add(int(match.group("line")))
-
-    excerpts: list[dict[str, object]] = []
-    for relative, line_numbers in sorted(locations.items()):
-        path = project / relative
-        if not path.is_file() or path.is_symlink():
-            continue
-        resolved = path.resolve()
-        project_resolved = project.resolve()
-        if resolved != project_resolved and project_resolved not in resolved.parents:
-            continue
-        lines = _remove_generated_smoke_for_repair(path.read_text(encoding="utf-8")).splitlines()
-        ranges = sorted(
-            (max(1, line - context_lines), min(len(lines), line + context_lines))
-            for line in line_numbers
-        )
-        merged: list[list[int]] = []
-        for start, end in ranges:
-            if merged and start <= merged[-1][1] + 1:
-                merged[-1][1] = max(merged[-1][1], end)
-            else:
-                merged.append([start, end])
-        for start, end in merged:
-            excerpts.append(
-                {
-                    "path": relative,
-                    "start_line": start,
-                    "end_line": end,
-                    "content": "\n".join(lines[start - 1 : end]),
-                }
-            )
-    return excerpts[:12]
-
-
-def _remove_generated_smoke_for_repair(content: str) -> str:
-    return content.replace("\n#[cfg(test)]\nmod generated_smoke;\n", "\n")
-
-
-def _apply_repair_patch(
-    manifest: GenerationManifest,
-    current_files: list[dict[str, str]],
-    patch: RepairPatch,
-    allowed_excerpts: list[dict[str, object]],
-) -> GenerationManifest:
-    contents = {item["path"]: item["content"] for item in current_files}
-    excerpt_contents: dict[str, list[str]] = {}
-    for excerpt in allowed_excerpts:
-        path = excerpt.get("path")
-        content = excerpt.get("content")
-        if isinstance(path, str) and isinstance(content, str):
-            excerpt_contents.setdefault(path, []).append(content)
-    for edit in patch.edits:
-        if not any(edit.old_text in excerpt for excerpt in excerpt_contents.get(edit.path, [])):
-            raise AIProviderError(
-                f"repair patch old_text was not present in a supplied excerpt: {edit.path}"
-            )
-        content = contents.get(edit.path)
-        if content is None:
-            raise AIProviderError(f"repair patch references a missing current file: {edit.path}")
-        occurrences = content.count(edit.old_text)
-        if occurrences != 1:
-            raise AIProviderError(
-                f"repair patch old_text must match exactly once in {edit.path}; "
-                f"matched {occurrences} times"
-            )
-        contents[edit.path] = content.replace(edit.old_text, edit.new_text, 1)
-
-    payload = manifest.model_dump(mode="json")
-    files = []
-    for path, content in sorted(contents.items()):
-        if path.endswith(".rs"):
-            content = normalize_pinned_aidoku_rust(content)
-        try:
-            validate_generated_content(path, content)
-        except SecurityError as exc:
-            raise AIProviderError(f"repair patch failed safety validation: {exc}") from exc
-        try:
-            generated = GeneratedFile(path=path, content=content)
-        except ValueError as exc:
-            raise AIProviderError(f"repair patch produced an invalid file: {exc}") from exc
-        files.append(generated.model_dump(mode="json"))
-    payload["files"] = files
-    try:
-        return GenerationManifest.model_validate(payload)
-    except ValueError as exc:
-        raise AIProviderError(f"repair patch produced an invalid manifest: {exc}") from exc
-
-
-def _needs_toolchain_installation(validation: ValidationResult) -> bool:
-    return any(stage.kind.value == "toolchain" for stage in validation.stages)
-
-
-def _should_repair(
-    validation: ValidationResult,
-    capability_gaps: list[str],
-    *,
-    live: bool,
-) -> bool:
-    if _needs_toolchain_installation(validation):
-        return False
-    if capability_gaps:
-        return True
-    if validation.blocked:
-        return False
-    return not (validation.build_ok and validation.package_ok and (validation.live_ok or not live))
-
-
-def _repair_diagnostics(
-    ir: SourceIR,
-    validation: ValidationResult,
-    capability_gaps: list[str],
-) -> str:
-    parts = [validation.diagnostics]
-    evidence = live_validation_evidence(ir)
-    if evidence.repair_context:
-        parts.append(evidence.repair_context)
-    if capability_gaps:
-        parts.append("Generated capability/contract gaps:\n- " + "\n- ".join(capability_gaps))
-    return "\n\n".join(part for part in parts if part)
 
 
 def _prepare_output(output: Path, *, force: bool) -> None:
@@ -206,22 +64,6 @@ class _ConversionRoundRunner:
         if self.checkpoint.current_manifest is None:
             raise InputError("resume checkpoint has no saved generation manifest")
         return self.store.read_manifest(self.checkpoint.current_manifest)
-
-    def _history(self) -> list[dict[str, object]]:
-        history: list[dict[str, object]] = []
-        for number in range(1, len(self.checkpoint.ai_rounds) + 1):
-            manifest = self.store.read_round(number)
-            history.append(
-                {
-                    "round": number,
-                    "implemented_traits": manifest.implemented_traits,
-                    "dependencies": [
-                        item.model_dump(mode="json") for item in manifest.dependencies
-                    ],
-                    "file_paths": [item.path for item in manifest.files],
-                }
-            )
-        return history
 
     def _effective(self, manifest: GenerationManifest) -> GenerationManifest:
         """Carry required resources across rounds without altering raw audit manifests."""
@@ -291,78 +133,25 @@ class _ConversionRoundRunner:
         )
         self.evaluate(result.value)
 
-    def request_repair(
-        self,
-        client: OpenAICompatibleClient,
-    ) -> AIResult[GenerationManifest]:
-        current_files = read_generated_files(self.project)
-        targeted_diagnostics = self.validation.diagnostics[-MAX_AI_DIAGNOSTIC_CHARS:]
-        excerpts = _diagnostic_file_excerpts(self.project, targeted_diagnostics)
-        contract_repair = self.contract.repair(self.project)
-        patch_request = None
-        if contract_repair is not None:
-            patch_request = (
-                "contract",
-                contract_repair.excerpts,
-                contract_repair.diagnostics,
-                "contract",
-            )
-        else:
-            failed_stages = {stage.name for stage in self.validation.stages if not stage.ok}
-            if (
-                not self.capability_gaps
-                and excerpts
-                and failed_stages
-                and failed_stages <= {"cargo-check", "clippy", "clippy-fix"}
-            ):
-                patch_request = ("compiler", excerpts, targeted_diagnostics, "targeted")
-
-        fallback_warning = None
-        if patch_request is not None:
-            scope, patch_excerpts, patch_diagnostics, fallback_label = patch_request
-            try:
-                patch_result = client.repair_patch(
-                    self.ir,
-                    current_file_excerpts=patch_excerpts,
-                    diagnostics=patch_diagnostics,
-                    scope=scope,
-                )
-                patched_manifest = _apply_repair_patch(
-                    self.manifest,
-                    current_files,
-                    patch_result.value,
-                    patch_excerpts,
-                )
-                return patch_result.with_value(patched_manifest)
-            except AIProviderError as exc:
-                fallback_warning = f"{fallback_label} patch fallback: {exc}"
-
-        diagnostics = _repair_diagnostics(
-            self.ir,
-            self.validation,
-            self.capability_gaps,
-        )[-MAX_AI_DIAGNOSTIC_CHARS:]
-        repaired = client.repair(
-            self.ir,
-            current_files=current_files,
-            diagnostics=diagnostics,
-            manifest_history=self._history(),
-        )
-        if fallback_warning:
-            repaired.warnings.append(fallback_warning)
-        return repaired
-
     def repair(self, settings: AISettings) -> None:
         repair_number = max(0, len(self.checkpoint.ai_rounds) - 1)
-        if not _should_repair(self.validation, self.capability_gaps, live=self.live):
+        if not repair_required(self.validation, self.capability_gaps, live=self.live):
             return
         with OpenAICompatibleClient(settings) as client:
             while (
-                _should_repair(self.validation, self.capability_gaps, live=self.live)
+                repair_required(self.validation, self.capability_gaps, live=self.live)
                 and repair_number < settings.max_repair_rounds
             ):
                 repair_number += 1
-                self.accept(self.request_repair(client), purpose="repair")
+                repair = TargetedRepair(
+                    ir=self.ir,
+                    store=self.store,
+                    checkpoint=self.checkpoint,
+                    manifest=self.manifest,
+                    validation=self.validation,
+                    contract=self.contract,
+                )
+                self.accept(repair.request(client), purpose="repair")
 
 
 def _refresh_resume_source_ir(
