@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .ai import AIResult, OpenAICompatibleClient, ai_round
 from .analyzer import analyze_source
+from .checkpoint_store import CheckpointStore, ManifestWrite
 from .config import AISettings
 from .constants import MAX_AI_DIAGNOSTIC_CHARS
 from .errors import AIProviderError, InputError, SecurityError
@@ -233,33 +234,10 @@ def _workspace_path(output: Path) -> Path:
     return output.parent / f".{output.name}.c2a-work"
 
 
-def _atomic_write_text(path: Path, content: str) -> None:
-    temporary = path.with_name(f".{path.name}.tmp-{uuid.uuid4().hex}")
-    temporary.write_text(content, encoding="utf-8")
-    os.replace(temporary, path)
-
-
-def _write_checkpoint(workspace: Path, checkpoint: ConversionCheckpoint) -> None:
-    _atomic_write_text(
-        workspace / "checkpoint.json",
-        checkpoint.model_dump_json(indent=2, exclude_none=True) + "\n",
-    )
-
-
-def _load_checkpoint(workspace: Path) -> ConversionCheckpoint:
-    path = workspace / "checkpoint.json"
-    if not path.is_file():
-        raise InputError(f"resume workspace has no checkpoint: {workspace}")
-    try:
-        return ConversionCheckpoint.model_validate_json(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise InputError(f"invalid resume checkpoint {path}: {exc}") from exc
-
-
 @dataclass
 class _ConversionRoundRunner:
     ir: SourceIR
-    workspace: Path
+    store: CheckpointStore
     project: Path
     checkpoint: ConversionCheckpoint
     query: str | None
@@ -270,38 +248,15 @@ class _ConversionRoundRunner:
     capability_gaps: list[str] = field(init=False)
     validation: ValidationResult = field(init=False)
 
-    def _manifest_path(self, relative: str) -> Path:
-        candidate = Path(relative)
-        if (
-            candidate.is_absolute()
-            or ".." in candidate.parts
-            or candidate.parts[:1] != ("manifests",)
-        ):
-            raise InputError(f"invalid manifest path in resume checkpoint: {relative}")
-        path = self.workspace.joinpath(*candidate.parts)
-        if path.is_symlink():
-            raise InputError(f"refusing symbolic-link resume manifest: {path}")
-        return path
-
     def load(self) -> GenerationManifest:
         if self.checkpoint.current_manifest is None:
             raise InputError("resume checkpoint has no saved generation manifest")
-        path = self._manifest_path(self.checkpoint.current_manifest)
-        if not path.is_file():
-            raise InputError(f"saved generation manifest is missing: {path}")
-        try:
-            return GenerationManifest.model_validate_json(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            raise InputError(f"invalid saved generation manifest {path}: {exc}") from exc
+        return self.store.read_manifest(self.checkpoint.current_manifest)
 
     def _history(self) -> list[dict[str, object]]:
         history: list[dict[str, object]] = []
         for number in range(1, len(self.checkpoint.ai_rounds) + 1):
-            path = self._manifest_path(f"manifests/round-{number:02d}.json")
-            try:
-                manifest = GenerationManifest.model_validate_json(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError) as exc:
-                raise InputError(f"invalid saved generation manifest {path}: {exc}") from exc
+            manifest = self.store.read_round(number)
             history.append(
                 {
                     "round": number,
@@ -328,13 +283,7 @@ class _ConversionRoundRunner:
         inherited = []
         if missing:
             for number in range(len(self.checkpoint.ai_rounds) - 1, 0, -1):
-                path = self._manifest_path(f"manifests/round-{number:02d}.json")
-                try:
-                    previous = GenerationManifest.model_validate_json(
-                        path.read_text(encoding="utf-8")
-                    )
-                except (OSError, ValueError) as exc:
-                    raise InputError(f"invalid saved generation manifest {path}: {exc}") from exc
+                previous = self.store.read_round(number)
                 for item in previous.files:
                     if item.path in missing:
                         inherited.append(item)
@@ -374,14 +323,11 @@ class _ConversionRoundRunner:
         self.checkpoint.capability_gaps = self.capability_gaps
         self.checkpoint.validation = self.validation
         self.checkpoint.phase = "validated"
-        _write_checkpoint(self.workspace, self.checkpoint)
+        self.store.commit(checkpoint=self.checkpoint)
 
     def accept(self, result: AIResult[GenerationManifest], *, purpose: str) -> None:
         number = len(self.checkpoint.ai_rounds) + 1
-        relative = f"manifests/round-{number:02d}.json"
-        path = self._manifest_path(relative)
-        path.parent.mkdir(exist_ok=True)
-        _atomic_write_text(path, result.value.model_dump_json(indent=2) + "\n")
+        relative = self.store.round_path(number)
         self.checkpoint.current_manifest = relative
         self.checkpoint.ai_rounds.append(ai_round(number, purpose, result))
         self.checkpoint.warnings.extend(result.warnings)
@@ -389,7 +335,10 @@ class _ConversionRoundRunner:
         self.checkpoint.unsupported_features.extend(result.value.unsupported_features)
         self.checkpoint.phase = "manifest_saved"
         self.checkpoint.validation = None
-        _write_checkpoint(self.workspace, self.checkpoint)
+        self.store.commit(
+            manifest=ManifestWrite(number, result.value),
+            checkpoint=self.checkpoint,
+        )
         self.evaluate(result.value)
 
     def request_repair(
@@ -466,34 +415,11 @@ class _ConversionRoundRunner:
                 self.accept(self.request_repair(client), purpose="repair")
 
 
-def _restore_installed_workspace(output: Path, workspace: Path) -> None:
-    audit = output / ".c2a"
-    checkpoint_path = audit / "checkpoint.json"
-    if not checkpoint_path.is_file():
-        raise InputError(f"no resumable conversion workspace for output: {output}")
-    try:
-        ConversionCheckpoint.model_validate_json(checkpoint_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise InputError(f"invalid installed conversion checkpoint: {exc}") from exc
-    workspace.mkdir()
-    project = workspace / "project"
-    try:
-        os.replace(output, project)
-        shutil.copy2(project / ".c2a" / "checkpoint.json", workspace / "checkpoint.json")
-        shutil.copy2(project / ".c2a" / "source-ir.json", workspace / "source-ir.json")
-        shutil.copytree(project / ".c2a" / "manifests", workspace / "manifests")
-    except BaseException:
-        if project.exists() and not output.exists():
-            os.replace(project, output)
-        shutil.rmtree(workspace, ignore_errors=True)
-        raise
-
-
 def _refresh_resume_source_ir(
     ir: SourceIR,
     *,
     input_ref: str,
-    workspace: Path,
+    store: CheckpointStore,
 ) -> SourceIR:
     if ir.schema_version >= 2:
         return ir
@@ -504,14 +430,12 @@ def _refresh_resume_source_ir(
             "refreshed resume input changed source id from "
             f"{ir.metadata.source_id!r} to {refreshed.metadata.source_id!r}"
         )
-    _atomic_write_text(
-        workspace / "source-ir.json",
-        refreshed.model_dump_json(indent=2, exclude={"license_text"}) + "\n",
-    )
+    store.commit(source_ir=refreshed)
     return refreshed
 
 
-def _bump_completed_resume_version(project: Path, ir: SourceIR) -> SourceIR:
+def _bump_completed_resume_version(store: CheckpointStore, ir: SourceIR) -> SourceIR:
+    project = store.project
     source_path = project / "res" / "source.json"
     try:
         source = json.loads(source_path.read_text(encoding="utf-8"))
@@ -520,7 +444,7 @@ def _bump_completed_resume_version(project: Path, ir: SourceIR) -> SourceIR:
         raise InputError(f"unable to bump installed source version: {exc}") from exc
     version = max(ir.metadata.version, current + 1)
     source["info"]["version"] = version
-    _atomic_write_text(
+    _atomic_write_source_metadata(
         source_path,
         json.dumps(source, ensure_ascii=False, indent="\t") + "\n",
     )
@@ -529,27 +453,14 @@ def _bump_completed_resume_version(project: Path, ir: SourceIR) -> SourceIR:
             "metadata": ir.metadata.model_copy(update={"version": version}),
         }
     )
-    _atomic_write_text(
-        project.parent / "source-ir.json",
-        bumped.model_dump_json(indent=2, exclude={"license_text"}) + "\n",
-    )
+    store.commit(source_ir=bumped)
     return bumped
 
 
-def _copy_conversion_audit(workspace: Path, project: Path) -> list[str]:
-    destination = project / ".c2a"
-    if destination.exists():
-        shutil.rmtree(destination)
-    destination.mkdir()
-    shutil.copy2(workspace / "checkpoint.json", destination / "checkpoint.json")
-    shutil.copy2(workspace / "source-ir.json", destination / "source-ir.json")
-    shutil.copytree(workspace / "manifests", destination / "manifests")
-    files = [".c2a/checkpoint.json", ".c2a/source-ir.json"]
-    files.extend(
-        path.relative_to(project).as_posix()
-        for path in sorted((destination / "manifests").glob("*.json"))
-    )
-    return files
+def _atomic_write_source_metadata(path: Path, content: str) -> None:
+    temporary = path.with_name(f".{path.name}.tmp-{uuid.uuid4().hex}")
+    temporary.write_text(content, encoding="utf-8")
+    os.replace(temporary, path)
 
 
 def _check_resume_compatibility(
@@ -611,17 +522,14 @@ def convert_source(
     if output.exists() and output.is_symlink():
         raise InputError(f"refusing to replace a symbolic-link output: {output}")
     workspace = _workspace_path(output)
-    project = workspace / "project"
+    store = CheckpointStore(workspace)
+    project = store.project
 
     if resume:
-        if workspace.is_symlink():
-            raise InputError(f"refusing symbolic-link resume workspace: {workspace}")
-        if not workspace.is_dir():
-            if output.is_dir():
-                _restore_installed_workspace(output, workspace)
-            else:
-                raise InputError(f"no resumable conversion workspace for output: {output}")
-        checkpoint = _load_checkpoint(workspace)
+        store, checkpoint = CheckpointStore.resume(
+            workspace,
+            installed_output=output,
+        )
         _check_resume_compatibility(
             checkpoint,
             input_ref=input_ref,
@@ -632,18 +540,14 @@ def convert_source(
         )
         if not project.is_dir() or project.is_symlink():
             raise InputError(f"resume staging project is missing or unsafe: {project}")
-        source_ir_path = workspace / "source-ir.json"
-        try:
-            ir = SourceIR.model_validate_json(source_ir_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            raise InputError(f"invalid saved SourceIR {source_ir_path}: {exc}") from exc
+        ir = store.read_source_ir()
         ir = _refresh_resume_source_ir(
             ir,
             input_ref=input_ref,
-            workspace=workspace,
+            store=store,
         )
         if checkpoint.phase == "complete":
-            ir = _bump_completed_resume_version(project, ir)
+            ir = _bump_completed_resume_version(store, ir)
     else:
         _prepare_output(output, force=force)
         if workspace.exists() or workspace.is_symlink():
@@ -658,10 +562,6 @@ def convert_source(
         except BaseException:
             shutil.rmtree(workspace, ignore_errors=True)
             raise
-        _atomic_write_text(
-            workspace / "source-ir.json",
-            ir.model_dump_json(indent=2, exclude={"license_text"}) + "\n",
-        )
         checkpoint = ConversionCheckpoint(
             input_ref=input_ref,
             output=str(output),
@@ -673,12 +573,16 @@ def convert_source(
             warnings=list(ir.warnings),
             unsupported_features=list(ir.unsupported_features),
         )
-        _write_checkpoint(workspace, checkpoint)
+        store = CheckpointStore.initialize(
+            workspace,
+            source_ir=ir,
+            checkpoint=checkpoint,
+        )
 
     template_matches = match_templates(ir)
     rounds = _ConversionRoundRunner(
         ir=ir,
-        workspace=workspace,
+        store=store,
         project=project,
         checkpoint=checkpoint,
         query=query,
@@ -710,11 +614,7 @@ def convert_source(
         deterministic_files.append("LICENSE.input")
     if (project / "package.aix").is_file():
         deterministic_files.append("package.aix")
-    audit_files = [".c2a/checkpoint.json", ".c2a/source-ir.json"]
-    audit_files.extend(
-        f".c2a/manifests/round-{number:02d}.json"
-        for number in range(1, len(checkpoint.ai_rounds) + 1)
-    )
+    audit_files = store.audit_files()
     report = ConversionReport(
         status=classify_status(validation, live_requested=live),
         input_ref=input_ref,
@@ -742,8 +642,8 @@ def convert_source(
     checkpoint.validation = validation
     resumable = report.status.value == "failed" or not validation.contract_ok
     checkpoint.phase = "validated" if resumable else "complete"
-    _write_checkpoint(workspace, checkpoint)
-    _copy_conversion_audit(workspace, project)
+    store.commit(checkpoint=checkpoint)
+    store.publish_audit(project)
 
     if resumable:
         return ConversionOutcome(output=project, report=report, source_ir=ir)

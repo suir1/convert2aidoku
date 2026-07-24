@@ -52,6 +52,10 @@ _Avoid_: Command list, subprocess loop
 The resumable record of conversion phase, AI rounds, current manifest, diagnostics, and validation state.
 _Avoid_: Cache, session file
 
+**Checkpoint Store**:
+The safe, atomic workspace persistence and installed audit mirror for one **Checkpoint**, its **SourceIR**, and raw **Generation Manifest** history.
+_Avoid_: JSON helpers, workspace cache
+
 **Generated Source**:
 The staged or installed Aidoku project materialized from an effective **Generation Manifest**.
 _Avoid_: Source
@@ -69,6 +73,7 @@ _Avoid_: Log
 - One **Input Source** produces one **SourceIR** per conversion.
 - A decompiled APK **Input Source** yields one shared **Decompiled Inspection** whose facts feed **SourceIR** analysis and whose behavior projection feeds generation evidence.
 - One **Checkpoint** records one or more **Generation Manifests** and identifies exactly one current manifest.
+- One **Checkpoint Store** persists one **Checkpoint**, its **SourceIR**, and raw **Generation Manifest** history, then mirrors that audit into the **Generated Source** `.c2a` directory.
 - One **Generation Manifest** owns zero or one filter resource and zero or one settings resource as **Generated Resources**.
 - One **Generation Manifest** yields one **Rust Inspection** of its controlled Rust files during contract evaluation.
 - One **Generation Manifest Contract** evaluates one **Generation Manifest** against one **SourceIR** and may expose a targeted repair only when every diagnostic has a supported repair kind and a relevant Rust excerpt.
