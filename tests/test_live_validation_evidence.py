@@ -32,19 +32,22 @@ def test_setting_defaults_require_matching_source_capability_and_are_fresh() -> 
     assert live_validation_evidence(without_capability).setting_overrides is None
     first = live_validation_evidence(with_capability).setting_overrides
     second = live_validation_evidence(with_capability).setting_overrides
-    assert first == {"v2.pref.api_domain": "mapi.copy20.com"}
+    assert first == {
+        "v2.pref.api_domain": "mapi.copy20.com",
+        "api_domain": "mapi.copy20.com",
+    }
     assert first is not second
 
 
 def test_live_validated_setting_default_stays_inside_generated_allowlist() -> None:
-    def manifest(values: list[str]):
+    def manifest(values: list[str], *, key: str = "v2.pref.api_domain"):
         settings = [
             {
                 "type": "group",
                 "items": [
                     {
                         "type": "select",
-                        "key": "v2.pref.api_domain",
+                        "key": key,
                         "titles": values,
                         "values": values,
                         "default": values[0],
@@ -68,10 +71,17 @@ def test_live_validated_setting_default_stays_inside_generated_allowlist() -> No
     rejected = GeneratedResources(manifest(["api.mangacopy.com"])).with_defaults(
         setting_overrides=overrides
     )
+    normalized_key = GeneratedResources(
+        manifest(["api.mangacopy.com", "mapi.copy20.com"], key="api_domain")
+    ).with_defaults(setting_overrides=overrides)
 
     allowed_settings = json.loads(next(x.content for x in allowed.files if x.path.endswith("json")))
     rejected_settings = json.loads(
         next(x.content for x in rejected.files if x.path.endswith("json"))
     )
+    normalized_key_settings = json.loads(
+        next(x.content for x in normalized_key.files if x.path.endswith("json"))
+    )
     assert allowed_settings[0]["items"][0]["default"] == "mapi.copy20.com"
     assert rejected_settings[0]["items"][0]["default"] == "api.mangacopy.com"
+    assert normalized_key_settings[0]["items"][0]["default"] == "mapi.copy20.com"

@@ -87,8 +87,9 @@ def test_falls_back_when_json_schema_is_rejected() -> None:
         nonlocal calls
         calls += 1
         payload = json.loads(request.content)
-        if "response_format" in payload:
+        if payload.get("response_format", {}).get("type") == "json_schema":
             return httpx.Response(400, text="unsupported response_format")
+        assert payload["response_format"]["type"] == "json_object"
         return httpx.Response(
             200,
             json={"choices": [{"message": {"content": json.dumps(_manifest())}}]},
@@ -103,13 +104,13 @@ def test_falls_back_when_json_schema_is_rejected() -> None:
 
 
 def test_json_schema_rejection_is_remembered_for_later_exchange() -> None:
-    structured_requests: list[bool] = []
+    response_formats: list[str | None] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
-        structured = "response_format" in payload
-        structured_requests.append(structured)
-        if structured:
+        response_format = payload.get("response_format", {}).get("type")
+        response_formats.append(response_format)
+        if response_format == "json_schema":
             return httpx.Response(400, text="response_format unavailable")
         return httpx.Response(
             200,
@@ -121,8 +122,30 @@ def test_json_schema_rejection_is_remembered_for_later_exchange() -> None:
         client._request_manifest([{"role": "user", "content": "first"}])
         second = client._request_manifest([{"role": "user", "content": "second"}])
 
-    assert structured_requests == [True, False, False]
+    assert response_formats == ["json_schema", "json_object", "json_object"]
     assert not second.structured_output
+
+
+def test_json_object_rejection_falls_back_to_plain_json() -> None:
+    response_formats: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        response_format = payload.get("response_format", {}).get("type")
+        response_formats.append(response_format)
+        if response_format is not None:
+            return httpx.Response(400, text="response_format unavailable")
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(_manifest())}}]},
+        )
+
+    settings = provider_settings()
+    with OpenAICompatibleClient(settings, transport=httpx.MockTransport(handler)) as client:
+        result = client._request_manifest([{"role": "user", "content": "test"}])
+
+    assert response_formats == ["json_schema", "json_object", None]
+    assert not result.structured_output
 
 
 def test_typed_exchange_falls_back_for_repair_patch() -> None:
@@ -141,10 +164,11 @@ def test_typed_exchange_falls_back_for_repair_patch() -> None:
         nonlocal calls
         calls += 1
         payload = json.loads(request.content)
-        if "response_format" in payload:
+        if payload.get("response_format", {}).get("type") == "json_schema":
             assert payload["response_format"]["json_schema"]["name"] == "aidoku_repair_patch"
             return httpx.Response(422, text="json_schema unsupported")
-        assert "matching this repair patch schema" in payload["messages"][-2]["content"]
+        assert payload["response_format"]["type"] == "json_object"
+        assert "matching this repair patch schema" in payload["messages"][-1]["content"]
         return httpx.Response(
             200,
             json={"choices": [{"message": {"content": json.dumps(patch)}}]},
@@ -157,6 +181,31 @@ def test_typed_exchange_falls_back_for_repair_patch() -> None:
     assert calls == 2
     assert not result.structured_output
     assert result.value.edits[0].new_text == "new();"
+
+
+def test_response_format_fallback_does_not_consume_validation_retries() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        payload = json.loads(request.content)
+        if payload.get("response_format", {}).get("type") == "json_schema":
+            return httpx.Response(400, text="json_schema unsupported")
+        manifest = _manifest()
+        if calls < 4:
+            manifest["files"] = [{"path": "Cargo.toml", "content": "forbidden"}]
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(manifest)}}]},
+        )
+
+    settings = provider_settings()
+    with OpenAICompatibleClient(settings, transport=httpx.MockTransport(handler)) as client:
+        result = client._request_manifest([{"role": "user", "content": "test"}])
+
+    assert calls == 4
+    assert result.value.source_struct == "Example"
 
 
 def test_manifest_dependency_policy_participates_in_validation_retry() -> None:

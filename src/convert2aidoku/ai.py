@@ -21,6 +21,8 @@ from .generation_context import build_generation_context
 from .models import AIRound, AIUsage, GenerationManifest, RepairPatch, SourceIR
 from .scaffold import validate_generated_content
 
+_ResponseMode = Literal["json_schema", "json_object", "plain"]
+
 _PATCH_SCOPES = {
     "compiler": (
         (
@@ -69,6 +71,10 @@ class AICheckResult(BaseModel):
     ok: bool
     structured_output: bool
     model: str
+
+
+class _ConnectivityResponse(BaseModel):
+    ok: bool
 
 
 def _contract_text() -> str:
@@ -135,7 +141,7 @@ class OpenAICompatibleClient:
     ):
         self.settings = settings
         self._sleep = sleep
-        self._structured_output_supported: bool | None = None
+        self._response_mode: _ResponseMode = "json_schema"
         self._client = httpx.Client(
             timeout=settings.timeout_seconds,
             transport=transport,
@@ -198,12 +204,12 @@ class OpenAICompatibleClient:
         self,
         messages: list[dict[str, str]],
         *,
-        structured: bool,
+        response_mode: _ResponseMode,
         schema_name: str | None = None,
         schema: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"model": self.settings.model, "messages": messages}
-        if structured:
+        if response_mode == "json_schema":
             if schema_name is None or schema is None:
                 raise ValueError("structured AI requests require a schema name and schema")
             body["response_format"] = {
@@ -214,6 +220,8 @@ class OpenAICompatibleClient:
                     "schema": schema,
                 },
             }
+        elif response_mode == "json_object":
+            body["response_format"] = {"type": "json_object"}
         retry_delays = (5.0, 15.0, 30.0)
         for retry in range(len(retry_delays) + 1):
             try:
@@ -253,14 +261,16 @@ class OpenAICompatibleClient:
         validate: Callable[[T], None] | None = None,
     ) -> AIResult[T]:
         errors: list[str] = []
+        warnings: list[str] = []
         usages: list[AIUsage] = []
-        structured = self._structured_output_supported is not False
+        response_mode = self._response_mode
         schema = _strict_model_schema(model)
         label = re.sub(r"(?<!^)(?=[A-Z])", " ", model.__name__).lower()
         schema_name = "aidoku_" + label.replace(" ", "_")
-        for _attempt in range(3):
+        attempts = 0
+        while attempts < 3:
             request_messages = list(messages)
-            if not structured:
+            if response_mode != "json_schema":
                 request_messages.append(
                     {
                         "role": "user",
@@ -283,31 +293,40 @@ class OpenAICompatibleClient:
             try:
                 payload = self._post(
                     request_messages,
-                    structured=structured,
+                    response_mode=response_mode,
                     schema_name=schema_name,
                     schema=schema,
                 )
-                if structured:
-                    self._structured_output_supported = True
                 if usage := self._usage(payload):
                     usages.append(usage)
                 value = model.model_validate_json(_strip_fences(self._content(payload)))
                 if validate is not None:
                     validate(value)
+                self._response_mode = response_mode
                 return AIResult(
                     value=value,
-                    structured_output=structured,
+                    structured_output=response_mode == "json_schema",
                     usage=self._combined_usage(usages),
-                    warnings=errors,
+                    warnings=warnings,
                 )
             except AIProviderError as exc:
-                errors.append(str(exc))
-                if structured and re.search(r"HTTP (?:400|404|415|422)\b", str(exc)):
-                    structured = False
-                    self._structured_output_supported = False
+                diagnostic = str(exc)
+                warnings.append(diagnostic)
+                if response_mode != "plain" and re.search(
+                    r"HTTP (?:400|404|415|422)\b", diagnostic
+                ):
+                    response_mode = "json_object" if response_mode == "json_schema" else "plain"
+                    self._response_mode = response_mode
+                    continue
+                errors.append(diagnostic)
+                attempts += 1
             except (ValidationError, ValueError, SecurityError) as exc:
-                errors.append(str(exc))
-        raise AIProviderError(f"AI failed to return a valid {label}: " + " | ".join(errors))
+                diagnostic = str(exc)
+                errors.append(diagnostic)
+                warnings.append(diagnostic)
+                attempts += 1
+        diagnostics = errors or warnings
+        raise AIProviderError(f"AI failed to return a valid {label}: " + " | ".join(diagnostics))
 
     def _request_manifest(self, messages: list[dict[str, str]]) -> AIResult[GenerationManifest]:
         return self._request_model(
@@ -424,34 +443,14 @@ class OpenAICompatibleClient:
             {"role": "system", "content": "Return a JSON object only."},
             {"role": "user", "content": '{"ok": true}'},
         ]
-        structured = True
-        try:
-            body: dict[str, Any] = {"model": self.settings.model, "messages": messages}
-            body["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "connectivity_check",
-                    "strict": True,
-                    "schema": {
-                        "type": "object",
-                        "properties": {"ok": {"type": "boolean"}},
-                        "required": ["ok"],
-                        "additionalProperties": False,
-                    },
-                },
-            }
-            response = self._client.post(self.settings.chat_completions_url, json=body)
-            if response.status_code >= 400:
-                structured = False
-                payload = self._post(messages, structured=False)
-            else:
-                payload = response.json()
-            parsed = json.loads(_strip_fences(self._content(payload)))
-            if not parsed.get("ok"):
-                raise AIProviderError("AI connectivity response did not confirm ok=true")
-            return AICheckResult(ok=True, structured_output=structured, model=self.settings.model)
-        except (httpx.HTTPError, json.JSONDecodeError, KeyError, TypeError) as exc:
-            raise AIProviderError(f"AI connectivity check failed: {exc}") from exc
+        result = self._request_model(messages, _ConnectivityResponse)
+        if not result.value.ok:
+            raise AIProviderError("AI connectivity response did not confirm ok=true")
+        return AICheckResult(
+            ok=True,
+            structured_output=result.structured_output,
+            model=self.settings.model,
+        )
 
 
 def ai_round[T: BaseModel](number: int, purpose: str, result: AIResult[T]) -> AIRound:

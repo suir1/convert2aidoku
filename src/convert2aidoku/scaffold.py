@@ -215,10 +215,77 @@ def _normalize_idempotent_get_retry(content: str) -> str:
     return content
 
 
+def _normalize_pinned_model_shapes(content: str) -> str:
+    """Repair unambiguous model/request shapes for the pinned Aidoku revision."""
+    content = re.sub(
+        r"(?<!::)\balloc::borrow::Cow\b",
+        "aidoku::alloc::borrow::Cow",
+        content,
+    )
+    replacements: list[tuple[str, str]] = []
+    for function in RustInspection.from_content(content).functions:
+        normalized = function.text
+        for field, value in (("authors", "author"), ("artists", "artist")):
+            binding = re.search(
+                rf"\blet\s+{value}(?P<annotation>\s*:\s*String)?\s*=\s*"
+                r"(?P<expression>[^;]{1,800});",
+                normalized,
+            )
+            if binding is None or not (
+                binding.group("annotation")
+                or "String::" in binding.group("expression")
+                or ".join(" in binding.group("expression")
+            ):
+                continue
+            normalized = re.sub(
+                rf"\b{field}:\s*Some\({value}\),",
+                f"{field}: Some(vec![{value}]),",
+                normalized,
+            )
+        if normalized != function.text:
+            replacements.append((function.text, normalized))
+    for original, replacement in replacements:
+        content = content.replace(original, replacement, 1)
+    content = re.sub(
+        r"(?m)^(?P<indent>\s*)(?P<request>[A-Za-z_]\w*)\.send\(\)\s*$",
+        r"\g<indent>Ok(\g<request>.send()?)",
+        content,
+    )
+    if re.search(r"\blet\s+mut\s+[A-Za-z_]\w*\s*=\s*manga\s*;", content):
+        content = re.sub(
+            r"\blet\s+path\s*=\s*&manga\.key\s*;",
+            "let path = manga.key.clone();",
+            content,
+        )
+    return content
+
+
+def _normalize_generated_setting_defaults(
+    content: str,
+    setting_defaults: Mapping[str, str] | None,
+) -> str:
+    for key, default in (setting_defaults or {}).items():
+        if not default:
+            continue
+        key_literal = json.dumps(key, ensure_ascii=False)
+        default_literal = json.dumps(default, ensure_ascii=False)
+        rust_string = r'"(?:\\.|[^"\\])*"'
+        content = re.sub(
+            rf"defaults_get::<String>\(\s*{re.escape(key_literal)}\s*\)"
+            rf"\s*(?:\.unwrap_or_default\(\)|\.unwrap_or_else\(\|\|\s*"
+            rf"(?:String::from\(\s*{rust_string}\s*\)|{rust_string}\.into\(\))\s*\))",
+            f"defaults_get::<String>({key_literal})"
+            f".unwrap_or_else(|| String::from({default_literal}))",
+            content,
+        )
+    return content
+
+
 def normalize_pinned_aidoku_rust(
     content: str,
     *,
     allow_dead_code: bool = False,
+    setting_defaults: Mapping[str, str] | None = None,
 ) -> str:
     """Apply small type-safe compatibility rewrites for the pinned Aidoku/Rust APIs."""
     if allow_dead_code and not re.search(
@@ -242,6 +309,8 @@ def normalize_pinned_aidoku_rust(
         content,
     )
     content = _normalize_idempotent_get_retry(content)
+    content = _normalize_pinned_model_shapes(content)
+    content = _normalize_generated_setting_defaults(content, setting_defaults)
     content = _inject_no_std_macro_imports(content)
     content = re.sub(
         r"(\bparse_(?:local_)?date\s*\([^;]{0,800}?\))\s*\.ok\(\)",
@@ -352,6 +421,7 @@ def apply_generation_manifest(
     query: str | None,
 ) -> list[str]:
     dependency_names = {item.name for item in manifest.dependencies}
+    setting_defaults = GeneratedResources(manifest).setting_defaults()
     _write_cargo(destination, ir, dependency_names)
 
     manifest_paths = {item.path for item in manifest.files}
@@ -374,6 +444,7 @@ def apply_generation_manifest(
             content = normalize_pinned_aidoku_rust(
                 content,
                 allow_dead_code=generated.path != "src/lib.rs",
+                setting_defaults=setting_defaults,
             )
         validate_generated_content(generated.path, content)
         target = _safe_destination(destination, generated.path)

@@ -457,6 +457,20 @@ class GeneratedResources:
 
         return contains(self._data.get(path, []))
 
+    def setting_defaults(self) -> dict[str, str]:
+        defaults: dict[str, str] = {}
+        for group in self._data.get(self.SETTINGS, []):
+            if not isinstance(group, dict) or not isinstance(group.get("items"), list):
+                continue
+            for item in group["items"]:
+                if not isinstance(item, dict):
+                    continue
+                key = item.get("key")
+                default = item.get("default")
+                if isinstance(key, str) and isinstance(default, str):
+                    defaults[key] = default
+        return defaults
+
     def filter_contract_gaps(
         self,
         specs: list[SourceFilterSpec],

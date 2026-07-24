@@ -50,7 +50,10 @@ _EVIDENCE = {
             "same id and append &theme=<selected path_word> to the /comics request; a visible "
             "filter that does not change its request is incomplete."
         ),
-        setting_defaults=(("v2.pref.api_domain", "mapi.copy20.com"),),
+        setting_defaults=(
+            ("v2.pref.api_domain", "mapi.copy20.com"),
+            ("api_domain", "mapi.copy20.com"),
+        ),
     ),
 }
 _EMPTY_EVIDENCE = LiveValidationEvidence()

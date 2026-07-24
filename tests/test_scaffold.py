@@ -199,6 +199,81 @@ fn request() -> aidoku::Result<Request> {
     assert "Request::get(absolute.clone())?" in lib
 
 
+def test_normalizer_repairs_unambiguous_pinned_model_shapes() -> None:
+    content = """#![no_std]
+use aidoku::alloc::string::String;
+use aidoku::{Manga, Result};
+fn update(manga: Manga) -> Result<()> {
+    let path = &manga.key;
+    let author = String::new();
+    let _detail = Manga {
+        authors: Some(author),
+        ..Default::default()
+    };
+    let _filter: Vec<alloc::borrow::Cow<'static, str>> = Vec::new();
+    let mut output = manga;
+    let mut req = make_request()?;
+    match req.send() {
+        Ok(_) => Ok(()),
+        Err(_) => {
+            req = make_request()?;
+            req.send()
+        }
+    }?;
+    output.key = path.into();
+    Ok(())
+}
+fn keep_existing_vector(author: Vec<String>) -> Manga {
+    Manga {
+        authors: Some(author),
+        ..Default::default()
+    }
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "use aidoku::alloc::vec;" in normalized
+    assert "authors: Some(vec![author])," in normalized
+    assert normalized.count("authors: Some(author),") == 1
+    assert "Vec<aidoku::alloc::borrow::Cow<'static, str>>" in normalized
+    assert "let path = manga.key.clone();" in normalized
+    assert "Ok(req.send()?)" in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
+def test_scaffold_applies_declared_setting_default_to_rust_fallback(tmp_path: Path) -> None:
+    manifest = _manifest()
+    manifest.files[0].content += """
+use aidoku::imports::defaults::defaults_get;
+fn platform() -> String {
+    defaults_get::<String>("platform").unwrap_or_default()
+}
+fn platform_with_stale_fallback() -> String {
+    defaults_get::<String>("platform").unwrap_or_else(|| String::from("stale"))
+}
+"""
+    manifest.files.append(
+        GeneratedFile(
+            path="res/settings.json",
+            content="""[
+                {"type":"group","title":"Request","items":[
+                    {"type":"select","key":"platform","title":"Platform",
+                     "values":["1","2"],"titles":["1","2"],"default":"1"}
+                ]}
+            ]""",
+        )
+    )
+    project, ir = scaffold_project(tmp_path)
+
+    apply_generation_manifest(project, ir, manifest, query=None)
+
+    lib = (project / "src" / "lib.rs").read_text(encoding="utf-8")
+    assert 'defaults_get::<String>("platform").unwrap_or_default()' not in lib
+    assert lib.count('defaults_get::<String>("platform").unwrap_or_else(|| String::from("1"))') == 2
+    assert 'String::from("stale")' not in lib
+
+
 @pytest.mark.parametrize(
     ("dependency", "version"),
     [("aes", "0.8.4"), ("des", "0.8.1"), ("cbc", "0.1.2"), ("hex", "0.4.3")],
