@@ -17,7 +17,7 @@ The format dispatch that sends a resolved **Input Source** to exactly one Kotlin
 _Avoid_: Analyzer helpers, metadata parser
 
 **Decompiled Inspection**:
-The Android manifest facts, normalized JADX Java structure, and deterministic DTO field/generic shapes recovered from a decompiled APK **Input Source** for both **SourceIR** analysis and generation evidence.
+The Android manifest facts, normalized JADX Java structure, and deterministic DTO serialized-name and field/generic shapes recovered from a decompiled APK **Input Source** for both **SourceIR** analysis and generation evidence.
 _Avoid_: Java cleanup helpers, APK parser output
 
 **Input Capability Recognition**:

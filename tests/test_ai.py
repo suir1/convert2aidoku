@@ -102,6 +102,29 @@ def test_falls_back_when_json_schema_is_rejected() -> None:
     assert result.warnings
 
 
+def test_json_schema_rejection_is_remembered_for_later_exchange() -> None:
+    structured_requests: list[bool] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        structured = "response_format" in payload
+        structured_requests.append(structured)
+        if structured:
+            return httpx.Response(400, text="response_format unavailable")
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(_manifest())}}]},
+        )
+
+    settings = provider_settings()
+    with OpenAICompatibleClient(settings, transport=httpx.MockTransport(handler)) as client:
+        client._request_manifest([{"role": "user", "content": "first"}])
+        second = client._request_manifest([{"role": "user", "content": "second"}])
+
+    assert structured_requests == [True, False, False]
+    assert not second.structured_output
+
+
 def test_typed_exchange_falls_back_for_repair_patch() -> None:
     calls = 0
     patch = {
@@ -160,6 +183,66 @@ def test_manifest_dependency_policy_participates_in_validation_retry() -> None:
     assert calls == 2
     assert result.value.dependencies == []
     assert any("disallowed dependencies: reqwest" in warning for warning in result.warnings)
+
+
+def test_manifest_security_violation_is_retried_and_usage_is_accumulated() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        payload = json.loads(request.content)
+        manifest = _manifest()
+        if calls == 1:
+            manifest["files"].append({"path": "Cargo.toml", "content": "forbidden"})
+            usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        else:
+            assert "outside the allowlist: Cargo.toml" in payload["messages"][-1]["content"]
+            usage = {"prompt_tokens": 8, "completion_tokens": 4, "total_tokens": 12}
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": json.dumps(manifest)}}],
+                "usage": usage,
+            },
+        )
+
+    settings = provider_settings()
+    with OpenAICompatibleClient(settings, transport=httpx.MockTransport(handler)) as client:
+        result = client._request_manifest([{"role": "user", "content": "test"}])
+
+    assert calls == 2
+    assert [item.path for item in result.value.files] == ["src/lib.rs"]
+    assert result.usage is not None
+    assert result.usage.prompt_tokens == 18
+    assert result.usage.completion_tokens == 9
+    assert result.usage.total_tokens == 27
+    assert any("outside the allowlist: Cargo.toml" in warning for warning in result.warnings)
+
+
+def test_manifest_rust_content_security_violation_is_retried() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        payload = json.loads(request.content)
+        manifest = _manifest()
+        if calls == 1:
+            manifest["files"][0]["content"] = "use std::fs;"
+        else:
+            assert "generated Rust uses std" in payload["messages"][-1]["content"]
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(manifest)}}]},
+        )
+
+    settings = provider_settings()
+    with OpenAICompatibleClient(settings, transport=httpx.MockTransport(handler)) as client:
+        result = client._request_manifest([{"role": "user", "content": "test"}])
+
+    assert calls == 2
+    assert result.value.files[0].content == "#![no_std]"
 
 
 def test_invalid_filter_shape_is_retried_with_field_diagnostic() -> None:
@@ -233,6 +316,7 @@ def test_generate_sends_deterministic_source_evidence_instead_of_raw_files() -> 
         generation_payload = json.loads(payload["messages"][1]["content"].split("\n\n", 1)[1])
         assert "FilterValue::Select { id: String, value: String }" in system_prompt
         assert "Option<&'a str>" in system_prompt
+        assert "Cargo.toml is forbidden" in payload["messages"][1]["content"]
         assert "source_files" not in generation_payload
         assert generation_payload["source_evidence"][0]["path"] == "src/Example.kt"
         assert generation_payload["context_stats"]["mode"] == "complete_kotlin_source"

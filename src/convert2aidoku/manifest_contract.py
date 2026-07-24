@@ -6,12 +6,12 @@ from pathlib import Path
 from typing import Literal
 
 from .constants import MAX_AI_DIAGNOSTIC_CHARS
-from .decompiled_input import DecompiledDtoField, decompiled_dto_shapes
+from .decompiled_input import DecompiledDtoField, DecompiledDtoShape, decompiled_dto_shapes
 from .dependency_policy import evaluate_dependency_policy
 from .models import Capability, GeneratedResources, GenerationManifest, SourceIR
 from .rust_inspection import RustInspection
 
-RepairKind = Literal["retry", "chapter_regex", "dto_shape"]
+RepairKind = Literal["retry", "chapter_regex", "dto_shape", "image_resolution"]
 
 
 @dataclass(frozen=True)
@@ -273,15 +273,16 @@ def evaluate_manifest_contract(
         ):
             add(
                 "source image policy requires preserving each cover URL exactly; "
-                "generated code applies a chapter-resolution transform to a cover URL"
+                "generated code applies a chapter-resolution transform to a cover URL",
+                "image_resolution",
             )
-        if image_policy.chapter_resolution_regex and not (
-            re.search(r'(?:ends_with|strip_suffix)\(\s*"x?\.jpg"', rust_content)
-            and re.search(r'(?:ends_with|strip_suffix)\(\s*"x?\.webp"', rust_content)
+        if image_policy.chapter_resolution_regex and not _has_terminal_image_suffix_scope(
+            rust_content
         ):
             add(
                 "chapter image resolution translation lacks the recovered exact x.jpg/x.webp "
-                f"suffix scope {image_policy.chapter_resolution_regex!r}"
+                f"suffix scope {image_policy.chapter_resolution_regex!r}",
+                "image_resolution",
             )
     if "date_upload" in input_content and "date_uploaded" not in rust_content:
         add("input chapters expose date_upload but generated chapters omit date_uploaded")
@@ -324,6 +325,67 @@ def evaluate_manifest_contract(
     return ContractEvaluation(tuple(diagnostics))
 
 
+def normalize_decompiled_dto_manifest(
+    ir: SourceIR,
+    manifest: GenerationManifest,
+) -> GenerationManifest:
+    if ir.source_format != "decompiled_apk":
+        return manifest
+    shapes = decompiled_dto_shapes(ir.files)
+    files = []
+    changed = False
+    for generated in manifest.files:
+        content = generated.content
+        if generated.path.endswith(".rs"):
+            content = _normalize_decompiled_dto_content(content, shapes)
+        changed |= content != generated.content
+        files.append(generated.model_copy(update={"content": content}))
+    return manifest.model_copy(update={"files": files}) if changed else manifest
+
+
+def _normalize_decompiled_dto_content(
+    content: str,
+    shapes: tuple[DecompiledDtoShape, ...],
+) -> str:
+    rust = RustInspection.from_content(content)
+    edits: list[tuple[int, int, bytes]] = []
+    for shape in shapes:
+        for field in shape.fields:
+            rust_field = _matching_rust_field(rust, shape.name, field)
+            if rust_field is None or rust_field.serialized_name == field.serialized_name:
+                continue
+            rename_attribute = next(
+                (
+                    attribute
+                    for attribute in rust_field.attributes
+                    if re.search(
+                        r'\brename\s*=\s*"[^"\\]+"',
+                        attribute.text.decode("utf-8", errors="replace"),
+                    )
+                ),
+                None,
+            )
+            if rename_attribute is not None:
+                original = rename_attribute.text.decode("utf-8", errors="replace")
+                replacement = re.sub(
+                    r'(\brename\s*=\s*")[^"\\]+(")',
+                    rf"\g<1>{field.serialized_name}\g<2>",
+                    original,
+                    count=1,
+                ).encode()
+                edits.append((rename_attribute.start_byte, rename_attribute.end_byte, replacement))
+            else:
+                indent = b" " * rust_field.node.start_point[1]
+                insertion = f'#[serde(rename = "{field.serialized_name}")]\n'.encode() + indent
+                edits.append((rust_field.node.start_byte, rust_field.node.start_byte, insertion))
+    if not edits:
+        return content
+    raw = bytearray(content.encode())
+    for start, end, replacement in sorted(edits, reverse=True):
+        raw[start:end] = replacement
+    return raw.decode()
+
+
 def _repair_excerpts(
     project: Path,
     repair_kinds: set[RepairKind],
@@ -355,10 +417,14 @@ def _repair_excerpts(
                     }
                 )
         for function in inspection.functions:
-            include = ("retry" in repair_kinds and ".send()" in function.text) or (
-                "chapter_regex" in repair_kinds
-                and "chapter" in function.name.lower()
-                and "Regex::new" in function.text
+            include = (
+                ("retry" in repair_kinds and ".send()" in function.text)
+                or (
+                    "chapter_regex" in repair_kinds
+                    and "chapter" in function.name.lower()
+                    and "Regex::new" in function.text
+                )
+                or ("image_resolution" in repair_kinds and "resolution" in function.name.lower())
             )
             if not include:
                 continue
@@ -411,7 +477,33 @@ def _unwrapped_generic(type_text: str) -> tuple[str, tuple[str, ...]]:
 
 def _rust_field_names(field: DecompiledDtoField) -> tuple[str, ...]:
     snake = re.sub(r"(?<!^)(?=[A-Z])", "_", field.name).lower()
-    return tuple(dict.fromkeys((field.name, snake, field.serialized_name)))
+    return tuple(
+        dict.fromkeys(
+            (
+                field.name,
+                snake,
+                field.serialized_name,
+                f"{field.name}_",
+                f"{snake}_",
+                f"r#{field.name}",
+            )
+        )
+    )
+
+
+def _matching_rust_field(
+    rust: RustInspection,
+    owner: str,
+    field: DecompiledDtoField,
+):
+    return next(
+        (
+            value
+            for name in _rust_field_names(field)
+            if (value := rust.struct_field(owner, name)) is not None
+        ),
+        None,
+    )
 
 
 def _decompiled_dto_shape_gaps(ir: SourceIR, rust: RustInspection) -> list[str]:
@@ -424,6 +516,16 @@ def _decompiled_dto_shape_gaps(ir: SourceIR, rust: RustInspection) -> list[str]:
         if rust.struct_named(shape.name) is None:
             continue
         for field in shape.fields:
+            rust_field = _matching_rust_field(rust, shape.name, field)
+            if rust_field is None:
+                continue
+            if rust_field.serialized_name != field.serialized_name:
+                gaps.append(
+                    f"decompiled DTO {shape.name}.{field.name} has serialized name "
+                    f"{field.serialized_name!r}, but generated Rust field "
+                    f"{rust_field.name} uses {rust_field.serialized_name!r}; preserve the "
+                    "recovered JSON field name"
+                )
             java_base, java_arguments = _generic_type(field.java_type)
             if java_base != "Map" or len(java_arguments) != 2:
                 continue
@@ -431,16 +533,7 @@ def _decompiled_dto_shape_gaps(ir: SourceIR, rust: RustInspection) -> list[str]:
             expected_key = _simple_type(java_arguments[0])
             if expected_value not in dto_names:
                 continue
-            rust_type = next(
-                (
-                    value
-                    for name in _rust_field_names(field)
-                    if (value := rust.struct_field_type(shape.name, name)) is not None
-                ),
-                None,
-            )
-            if rust_type is None:
-                continue
+            rust_type = rust_field.type_text
             rust_base, rust_arguments = _unwrapped_generic(rust_type)
             actual_key = (
                 _simple_type(rust_arguments[0])
@@ -526,6 +619,28 @@ def _rust_chapter_parser_compiles_regex(rust: RustInspection) -> bool:
         "chapter" in function.name.lower() and "Regex::new" in function.text
         for function in rust.functions
     )
+
+
+def _has_terminal_image_suffix_scope(content: str) -> bool:
+    def scoped(extension: str) -> bool:
+        direct = re.search(
+            rf'(?:ends_with|strip_suffix)\(\s*"x?\.{extension}"',
+            content,
+        )
+        if direct:
+            return True
+        lengths = (len(f".{extension}"), len(f"x.{extension}"))
+        return any(
+            re.search(
+                rf'rfind\(\s*"{prefix}\.{extension}"\s*\)'
+                rf"[\s\S]{{0,160}}?\+\s*{length}\s*==\s*"
+                r"[A-Za-z_][A-Za-z0-9_]*\.len\(\)",
+                content,
+            )
+            for prefix, length in zip(("", "x"), lengths, strict=True)
+        )
+
+    return scoped("jpg") and scoped("webp")
 
 
 def _passes_relative_key_to_request(rust: RustInspection) -> bool:

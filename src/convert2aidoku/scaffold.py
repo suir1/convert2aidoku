@@ -87,15 +87,30 @@ def _first_rust_identifier(node: Any) -> str | None:
     return None
 
 
+def _is_aidoku_imports_std(node: Any) -> bool:
+    relative_import = False
+    current = node.parent
+    while current is not None:
+        compact = RustInspection.compact_node(current)
+        if current.type == "scoped_identifier":
+            if compact.startswith("aidoku::imports::std"):
+                return True
+            if compact.startswith("imports::std"):
+                relative_import = True
+        elif current.type == "scoped_use_list":
+            return relative_import and compact.startswith("aidoku::{")
+        elif current.type in {"use_declaration", "source_file"}:
+            break
+        current = current.parent
+    return False
+
+
 def _validate_generated_rust_ast(path: str, content: str) -> None:
     """Reject compile-time I/O and ways to bypass the tool-owned smoke tests."""
     inspection = RustInspection.from_content(content)
     for node in inspection.nodes():
         identifier = _rust_identifier(node)
-        if identifier == "std" and not (
-            node.parent is not None
-            and RustInspection.compact_node(node.parent) == "aidoku::imports::std"
-        ):
+        if identifier == "std" and not _is_aidoku_imports_std(node):
             raise SecurityError(f"generated Rust uses std, which is forbidden: {path}")
         if identifier == "generated_smoke":
             raise SecurityError(
@@ -141,9 +156,15 @@ def _remove_reserved_smoke_marker(content: str) -> str:
 
 
 def _alloc_macro_is_imported(content: str, name: str) -> bool:
+    inspection = RustInspection.from_content(content)
+    pattern = re.compile(
+        rf"\balloc(?:::\{{[^}}]*\b{re.escape(name)}\b[^}}]*\}}|::"
+        rf"{re.escape(name)}\b)"
+    )
     return any(
-        re.search(rf"\b{re.escape(name)}\b", statement.group(0))
-        for statement in re.finditer(r"\buse\s+aidoku::alloc\b[^;]*;", content)
+        (compact := RustInspection.compact_node(node)).startswith("useaidoku::")
+        and pattern.search(compact) is not None
+        for node in inspection.nodes("use_declaration")
     )
 
 
@@ -164,8 +185,47 @@ def _inject_no_std_macro_imports(content: str) -> str:
     return content[:boundary] + "\n" + imports + "\n" + content[boundary:].lstrip("\n")
 
 
-def normalize_pinned_aidoku_rust(content: str) -> str:
+def _normalize_idempotent_get_retry(content: str) -> str:
+    replacements: list[tuple[str, str]] = []
+    inspection = RustInspection.from_content(content)
+    for function in inspection.functions:
+        text = function.text
+        if (
+            "let make_request" not in text
+            or ".or_else" not in text
+            or text.count("make_request()") < 2
+        ):
+            continue
+        tail = re.search(r"\n(?P<indent>\s*)Ok\(make_request\(\)[\s\S]*\n\}$", text)
+        if tail is None:
+            continue
+        indent = tail.group("indent")
+        replacement = (
+            text[: tail.start()].rstrip()
+            + f"\n\n{indent}let response = match make_request()?.send() {{\n"
+            + f"{indent}    Ok(response) => response,\n"
+            + f"{indent}    Err(_) => make_request()?.send()?,\n"
+            + f"{indent}}};\n"
+            + f"{indent}Ok(response)\n"
+            + "}"
+        )
+        replacements.append((text, replacement))
+    for original, replacement in replacements:
+        content = content.replace(original, replacement, 1)
+    return content
+
+
+def normalize_pinned_aidoku_rust(
+    content: str,
+    *,
+    allow_dead_code: bool = False,
+) -> str:
     """Apply small type-safe compatibility rewrites for the pinned Aidoku/Rust APIs."""
+    if allow_dead_code and not re.search(
+        r"#!\[allow\([^\]]*\bdead_code\b",
+        content,
+    ):
+        content = "#![allow(dead_code)]\n" + content.lstrip()
     content = content.replace("aidoku::std::filters::SelectFilter", "aidoku::SelectFilter")
     content = content.replace("RequestError::new(", "aidoku::AidokuError::message(")
     if content.count("RequestError") == 1:
@@ -181,6 +241,7 @@ def normalize_pinned_aidoku_rust(content: str) -> str:
         lambda match: match.group(0).replace("}//chapters", "}/chapters"),
         content,
     )
+    content = _normalize_idempotent_get_retry(content)
     content = _inject_no_std_macro_imports(content)
     content = re.sub(
         r"(\bparse_(?:local_)?date\s*\([^;]{0,800}?\))\s*\.ok\(\)",
@@ -309,7 +370,11 @@ def apply_generation_manifest(
             content = _remove_reserved_smoke_marker(content)
             if not re.match(r"\s*#!\[no_std\]", content):
                 content = "#![no_std]\n\n" + content.lstrip()
-            content = normalize_pinned_aidoku_rust(content)
+        if generated.path.endswith(".rs"):
+            content = normalize_pinned_aidoku_rust(
+                content,
+                allow_dead_code=generated.path != "src/lib.rs",
+            )
         validate_generated_content(generated.path, content)
         target = _safe_destination(destination, generated.path)
         target.write_text(content.rstrip() + "\n", encoding="utf-8")

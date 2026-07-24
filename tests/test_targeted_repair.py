@@ -5,7 +5,7 @@ import pytest
 from convert2aidoku.checkpoint_store import CheckpointStore
 from convert2aidoku.errors import AIProviderError
 from convert2aidoku.live_validation_evidence import LiveValidationEvidence
-from convert2aidoku.manifest_contract import ContractEvaluation
+from convert2aidoku.manifest_contract import ContractDiagnostic, ContractEvaluation
 from convert2aidoku.models import (
     ConversionCheckpoint,
     DependencyRequest,
@@ -245,5 +245,53 @@ def test_targeted_repair_applies_compiler_patch_without_loading_history(tmp_path
         result = repair.request(client)
 
     assert result.value.files[0].content == "let title = Some(title);\n"
+    assert calls.repair_patch == 1
+    assert calls.repair == 0
+
+
+def test_compiler_patch_is_preferred_when_contract_gap_is_not_targetable(
+    tmp_path: Path,
+) -> None:
+    store = CheckpointStore(tmp_path / "workspace")
+    source = store.project / "src"
+    source.mkdir(parents=True)
+    rust = "fn broken() { old(); }\n"
+    (source / "lib.rs").write_text(rust, encoding="utf-8")
+    manifest = generation_manifest(rust)
+    patch = RepairPatch.model_validate(
+        {"edits": [{"path": "src/lib.rs", "old_text": "old();", "new_text": "fixed();"}]}
+    )
+    adapter, calls = scripted_ai_client(
+        generation=manifest,
+        repair_patch=patch,
+        patch_scope="compiler",
+    )
+    repair = TargetedRepair(
+        ir=minimal_source_ir(),
+        store=store,
+        checkpoint=ConversionCheckpoint(
+            input_ref="fixture",
+            output="generated/en.example",
+            provider_base_url="http://local/v1",
+            model="test",
+        ),
+        manifest=manifest,
+        validation=ValidationResult(
+            stages=[
+                ValidationStage(
+                    name="cargo-check",
+                    kind="check",
+                    ok=False,
+                    output="error\n  --> src/lib.rs:1:15",
+                )
+            ]
+        ),
+        contract=ContractEvaluation((ContractDiagnostic("unscoped contract gap"),)),
+    )
+
+    with adapter(provider_settings()) as client:
+        result = repair.request(client)
+
+    assert "fixed();" in result.value.files[0].content
     assert calls.repair_patch == 1
     assert calls.repair == 0

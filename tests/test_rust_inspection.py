@@ -49,3 +49,19 @@ def test_indexes_struct_field_types() -> None:
     )
     assert inspection.struct_field_type("GroupInfo", "name") == "String"
     assert inspection.struct_field_type("ComicDetailResult", "missing") is None
+
+
+def test_indexes_struct_serialized_field_names() -> None:
+    inspection = RustInspection.from_content(
+        """
+        struct ThemeResult {
+            #[serde(rename = "themeList")]
+            theme_list: Vec<ThemeDetail>,
+        }
+        """
+    )
+
+    field = inspection.struct_field("ThemeResult", "theme_list")
+
+    assert field is not None
+    assert field.serialized_name == "themeList"

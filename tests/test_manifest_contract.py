@@ -6,12 +6,14 @@ from convert2aidoku.manifest_contract import (
     ContractDiagnostic,
     ContractEvaluation,
     evaluate_manifest_contract,
+    normalize_decompiled_dto_manifest,
 )
 from convert2aidoku.models import (
     Capability,
     DependencyRequest,
     GeneratedFile,
     GenerationManifest,
+    ImageUrlPolicy,
     SourceFile,
 )
 from tests.scenarios import minimal_source_ir
@@ -120,6 +122,30 @@ def test_targeted_repair_selects_only_functions_for_declared_kinds(tmp_path: Pat
     assert repair.diagnostics == "retry required\nchapter scan required"
 
 
+def test_image_resolution_contract_gap_selects_only_resolution_function(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "lib.rs").write_text(
+        (
+            "fn replace_resolution(url: &str) -> String { url.to_string() }\n"
+            "fn unrelated() { preserve(); }\n"
+        ),
+        encoding="utf-8",
+    )
+    evaluation = ContractEvaluation(
+        (ContractDiagnostic("chapter image resolution scope is incomplete", "image_resolution"),)
+    )
+
+    repair = evaluation.repair(tmp_path)
+
+    assert repair is not None
+    assert [item["content"] for item in repair.excerpts] == [
+        "fn replace_resolution(url: &str) -> String { url.to_string() }"
+    ]
+
+
 def test_decompiled_dto_map_value_mismatch_is_a_targeted_contract_gap(
     tmp_path: Path,
 ) -> None:
@@ -189,3 +215,81 @@ def test_decompiled_dto_map_value_contract_accepts_matching_rust_shape() -> None
     )
 
     assert evaluate_manifest_contract(ir, manifest).messages == []
+
+
+def test_terminal_rfind_image_resolution_scope_satisfies_contract() -> None:
+    ir = minimal_source_ir(
+        image_url_policy=ImageUrlPolicy(
+            preserve_cover_urls=False,
+            chapter_resolution_regex=r"\d+(?=x\.(?:jpg|webp)$)",
+        )
+    )
+    manifest = _manifest(
+        """
+        fn replace_resolution(url: &str) -> String {
+            let pos = url.rfind("x.jpg").filter(|&p| p + 5 == url.len())
+                .or_else(|| url.rfind("x.webp").filter(|&p| p + 6 == url.len()));
+            url.to_string()
+        }
+        """
+    )
+
+    assert evaluate_manifest_contract(ir, manifest).messages == []
+
+
+def test_decompiled_dto_serialized_name_is_normalized_deterministically() -> None:
+    ir = minimal_source_ir(
+        source_format="decompiled_apk",
+        files=[
+            SourceFile(
+                path="sources/example/api/dto/ThemeResult.java",
+                sha256="0",
+                content="""
+                public final class ThemeResult {
+                    // themeList -> "list"
+                    private final List<ThemeDetail> themeList;
+                }
+                """,
+            )
+        ],
+    )
+    manifest = _manifest(
+        """
+        struct ThemeResult {
+            #[serde(rename = "themeList")]
+            theme_list: Vec<ThemeDetail>,
+        }
+        """
+    )
+
+    assert any(
+        "serialized name 'list'" in gap for gap in evaluate_manifest_contract(ir, manifest).messages
+    )
+
+    normalized = normalize_decompiled_dto_manifest(ir, manifest)
+
+    assert '#[serde(rename = "list")]' in normalized.files[0].content
+    assert evaluate_manifest_contract(ir, normalized).messages == []
+
+
+def test_decompiled_dto_rust_keyword_field_gets_serde_rename() -> None:
+    ir = minimal_source_ir(
+        source_format="decompiled_apk",
+        files=[
+            SourceFile(
+                path="sources/example/api/dto/Recommendation.java",
+                sha256="0",
+                content="""
+                public final class Recommendation {
+                    private final int type;
+                }
+                """,
+            )
+        ],
+    )
+    manifest = _manifest("struct Recommendation { type_: i32 }")
+
+    normalized = normalize_decompiled_dto_manifest(ir, manifest)
+
+    assert '#[serde(rename = "type")]' in normalized.files[0].content
+    assert evaluate_manifest_contract(ir, normalized).messages == []

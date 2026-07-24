@@ -139,7 +139,10 @@ def apply_repair_patch(
     files = []
     for path, content in sorted(contents.items()):
         if path.endswith(".rs"):
-            content = normalize_pinned_aidoku_rust(content)
+            content = normalize_pinned_aidoku_rust(
+                content,
+                allow_dead_code=path != "src/lib.rs",
+            )
         try:
             validate_generated_content(path, content)
         except SecurityError as exc:
@@ -257,12 +260,7 @@ class TargetedRepair:
             )
         excerpts = diagnostic_file_excerpts(self.store.project, diagnostics)
         failed_stages = {stage.name for stage in self.validation.stages if not stage.ok}
-        if (
-            not self.contract.messages
-            and excerpts
-            and failed_stages
-            and failed_stages <= {"cargo-check", "clippy", "clippy-fix"}
-        ):
+        if excerpts and failed_stages and failed_stages <= {"cargo-check", "clippy", "clippy-fix"}:
             return _PatchRequest("compiler", excerpts, diagnostics, "targeted")
         return None
 

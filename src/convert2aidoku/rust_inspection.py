@@ -38,6 +38,9 @@ class RustFunction:
 class RustStructField:
     name: str
     type_text: str
+    serialized_name: str
+    node: Node
+    attributes: tuple[Node, ...]
 
 
 @dataclass(frozen=True)
@@ -54,19 +57,34 @@ class RustStruct:
         if identifier is None or body is None:
             return None
         fields: list[RustStructField] = []
+        attributes: list[Node] = []
         for child in body.named_children:
+            if child.type == "attribute_item":
+                attributes.append(child)
+                continue
             if child.type != "field_declaration":
+                attributes.clear()
                 continue
             name = child.child_by_field_name("name")
             type_node = child.child_by_field_name("type")
             if name is None or type_node is None:
+                attributes.clear()
                 continue
+            field_name = name.text.decode("utf-8", errors="replace")
+            attribute_text = "\n".join(
+                attribute.text.decode("utf-8", errors="replace") for attribute in attributes
+            )
+            rename = re.search(r'\brename\s*=\s*"([^"\\]+)"', attribute_text)
             fields.append(
                 RustStructField(
-                    name=name.text.decode("utf-8", errors="replace"),
+                    name=field_name,
                     type_text=type_node.text.decode("utf-8", errors="replace"),
+                    serialized_name=rename.group(1) if rename else field_name,
+                    node=child,
+                    attributes=tuple(attributes),
                 )
             )
+            attributes.clear()
         return cls(
             name=identifier.text.decode("utf-8", errors="replace"),
             text=node.text.decode("utf-8", errors="replace"),
@@ -146,13 +164,14 @@ class RustInspection:
         return self._structs_by_name.get(name)
 
     def struct_field_type(self, owner: str, field_name: str) -> str | None:
+        field = self.struct_field(owner, field_name)
+        return field.type_text if field is not None else None
+
+    def struct_field(self, owner: str, field_name: str) -> RustStructField | None:
         struct = self.struct_named(owner)
         if struct is None:
             return None
-        return next(
-            (field.type_text for field in struct.fields if field.name == field_name),
-            None,
-        )
+        return next((field for field in struct.fields if field.name == field_name), None)
 
     @staticmethod
     def compact_node(node: Node) -> str:

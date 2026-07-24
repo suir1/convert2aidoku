@@ -13,7 +13,11 @@ from .conversion_intake import ConversionIntake
 from .errors import InputError
 from .generated_source_metadata import GeneratedSourceMetadata
 from .live_validation_evidence import live_validation_evidence
-from .manifest_contract import ContractEvaluation, evaluate_manifest_contract
+from .manifest_contract import (
+    ContractEvaluation,
+    evaluate_manifest_contract,
+    normalize_decompiled_dto_manifest,
+)
 from .models import (
     Capability,
     ConversionCheckpoint,
@@ -80,6 +84,7 @@ class _ConversionRoundRunner:
             if warning not in self.checkpoint.warnings:
                 self.checkpoint.warnings.append(warning)
             effective = manifest.model_copy(update={"files": manifest.files + inherited})
+        effective = normalize_decompiled_dto_manifest(self.ir, effective)
         setting_overrides = live_validation_evidence(self.ir).setting_overrides
         return GeneratedResources(effective).with_defaults(
             filter_specs=self.ir.filter_specs,

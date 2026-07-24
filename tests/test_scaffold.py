@@ -5,7 +5,11 @@ import pytest
 from convert2aidoku.errors import SecurityError
 from convert2aidoku.generated_source_metadata import GeneratedSourceMetadata
 from convert2aidoku.models import DependencyRequest, GeneratedFile, GenerationManifest
-from convert2aidoku.scaffold import apply_generation_manifest
+from convert2aidoku.scaffold import (
+    apply_generation_manifest,
+    normalize_pinned_aidoku_rust,
+    validate_generated_content,
+)
 from tests.scenarios import scaffold_project
 
 
@@ -54,6 +58,63 @@ def test_scaffold_rejects_unapproved_dependency(tmp_path: Path) -> None:
     project, ir = scaffold_project(tmp_path)
     with pytest.raises(SecurityError, match="disallowed dependency"):
         apply_generation_manifest(project, ir, _manifest("reqwest"), query=None)
+
+
+def test_generated_content_allows_grouped_aidoku_std_import_only() -> None:
+    validate_generated_content(
+        "src/parser.rs",
+        "use aidoku::{imports::std::parse_date, alloc::String};",
+    )
+
+    with pytest.raises(SecurityError, match="uses std"):
+        validate_generated_content(
+            "src/parser.rs",
+            "use aidoku::{imports::std::parse_date, alloc::String, std::fs};",
+        )
+
+
+def test_normalizer_recognizes_grouped_alloc_macro_import() -> None:
+    content = """#![no_std]
+use aidoku::{alloc::{String, format}};
+fn render(value: String) -> String { format!("{value}") }
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert normalized.count("format") == content.count("format")
+    assert "use aidoku::alloc::format;" not in normalized
+
+
+def test_normalizer_rewrites_invalid_closure_retry_to_aidoku_error_flow() -> None:
+    content = """#![no_std]
+fn http_get(url: &str) -> Result<Response> {
+    let make_request = || -> Result<Request> {
+        Ok(Request::get(url)?)
+    };
+
+    Ok(make_request()
+        .map_err(|e| RequestError::from(format!("{e:?}")))
+        .and_then(|request| request.send())
+        .or_else(|_| make_request()
+            .map_err(|e| RequestError::from(format!("{e:?}")))
+            .and_then(|request| request.send()))?)
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "let response = match make_request()?.send()" in normalized
+    assert "Err(_) => make_request()?.send()?," in normalized
+    assert "RequestError::from" not in normalized
+
+
+def test_normalizer_adds_idempotent_dead_code_allowance_for_generated_modules() -> None:
+    content = "use aidoku::serde::Deserialize;\nstruct Dto { value: String }\n"
+
+    normalized = normalize_pinned_aidoku_rust(content, allow_dead_code=True)
+
+    assert normalized.startswith("#![allow(dead_code)]\n")
+    assert normalize_pinned_aidoku_rust(normalized, allow_dead_code=True) == normalized
 
 
 def test_scaffold_invalidates_lockfile_when_dependencies_change(tmp_path: Path) -> None:

@@ -16,9 +16,10 @@ from pydantic import BaseModel, ValidationError
 from .config import AISettings
 from .constants import MAX_AI_RESPONSE_BYTES
 from .dependency_policy import evaluate_dependency_policy, render_dependency_policy
-from .errors import AIProviderError
+from .errors import AIProviderError, SecurityError
 from .generation_context import build_generation_context
 from .models import AIRound, AIUsage, GenerationManifest, RepairPatch, SourceIR
+from .scaffold import validate_generated_content
 
 _PATCH_SCOPES = {
     "compiler": (
@@ -104,13 +105,15 @@ def _strict_model_schema(model: type[BaseModel]) -> dict[str, Any]:
     return schema
 
 
-def _validate_manifest_dependencies(manifest: GenerationManifest) -> None:
+def _validate_manifest(manifest: GenerationManifest) -> None:
     evaluation = evaluate_dependency_policy(item.name for item in manifest.dependencies)
     if evaluation.disallowed:
         raise ValueError(
             "generated source requested disallowed dependencies: "
             + ", ".join(evaluation.disallowed)
         )
+    for generated in manifest.files:
+        validate_generated_content(generated.path, generated.content)
 
 
 def _compact_manifest_history(
@@ -132,6 +135,7 @@ class OpenAICompatibleClient:
     ):
         self.settings = settings
         self._sleep = sleep
+        self._structured_output_supported: bool | None = None
         self._client = httpx.Client(
             timeout=settings.timeout_seconds,
             transport=transport,
@@ -160,6 +164,21 @@ class OpenAICompatibleClient:
             prompt_tokens=usage.get("prompt_tokens"),
             completion_tokens=usage.get("completion_tokens"),
             total_tokens=usage.get("total_tokens"),
+        )
+
+    @staticmethod
+    def _combined_usage(usages: list[AIUsage]) -> AIUsage | None:
+        if not usages:
+            return None
+
+        def total(field: str) -> int | None:
+            values = [value for usage in usages if (value := getattr(usage, field)) is not None]
+            return sum(values) if values else None
+
+        return AIUsage(
+            prompt_tokens=total("prompt_tokens"),
+            completion_tokens=total("completion_tokens"),
+            total_tokens=total("total_tokens"),
         )
 
     @staticmethod
@@ -234,7 +253,8 @@ class OpenAICompatibleClient:
         validate: Callable[[T], None] | None = None,
     ) -> AIResult[T]:
         errors: list[str] = []
-        structured = True
+        usages: list[AIUsage] = []
+        structured = self._structured_output_supported is not False
         schema = _strict_model_schema(model)
         label = re.sub(r"(?<!^)(?=[A-Z])", " ", model.__name__).lower()
         schema_name = "aidoku_" + label.replace(" ", "_")
@@ -267,20 +287,25 @@ class OpenAICompatibleClient:
                     schema_name=schema_name,
                     schema=schema,
                 )
+                if structured:
+                    self._structured_output_supported = True
+                if usage := self._usage(payload):
+                    usages.append(usage)
                 value = model.model_validate_json(_strip_fences(self._content(payload)))
                 if validate is not None:
                     validate(value)
                 return AIResult(
                     value=value,
                     structured_output=structured,
-                    usage=self._usage(payload),
+                    usage=self._combined_usage(usages),
                     warnings=errors,
                 )
             except AIProviderError as exc:
                 errors.append(str(exc))
                 if structured and re.search(r"HTTP (?:400|404|415|422)\b", str(exc)):
                     structured = False
-            except (ValidationError, ValueError) as exc:
+                    self._structured_output_supported = False
+            except (ValidationError, ValueError, SecurityError) as exc:
                 errors.append(str(exc))
         raise AIProviderError(f"AI failed to return a valid {label}: " + " | ".join(errors))
 
@@ -288,7 +313,7 @@ class OpenAICompatibleClient:
         return self._request_model(
             messages,
             GenerationManifest,
-            validate=_validate_manifest_dependencies,
+            validate=_validate_manifest,
         )
 
     def generate(self, ir: SourceIR) -> AIResult[GenerationManifest]:
@@ -308,8 +333,10 @@ class OpenAICompatibleClient:
                 "role": "user",
                 "content": (
                     "Generate a complete Aidoku implementation for this standalone source. "
-                    "Use only allowed files and dependencies. Do not omit required core "
-                    "behavior.\n\n" + json.dumps(source_payload, ensure_ascii=False)
+                    "Allowed output paths are only src/**/*.rs, res/filters.json, and "
+                    "res/settings.json. Cargo.toml is forbidden because the tool owns all "
+                    "Cargo metadata. Use only allowed dependencies and do not omit required "
+                    "core behavior.\n\n" + json.dumps(source_payload, ensure_ascii=False)
                 ),
             },
         ]
