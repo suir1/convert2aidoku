@@ -19,6 +19,7 @@ from convert2aidoku.targeted_repair import (
     diagnostic_file_excerpts,
     repair_diagnostics,
     repair_required,
+    repair_state_signature,
 )
 from tests.scenarios import (
     generation_manifest,
@@ -52,6 +53,33 @@ def test_repair_diagnostics_include_live_validation_evidence(monkeypatch) -> Non
     assert "relative URL gap" in diagnostics
 
 
+def test_repair_state_signature_ignores_unstable_rust_line_locations() -> None:
+    first = ValidationResult(
+        stages=[
+            ValidationStage(
+                name="cargo-check",
+                kind="check",
+                ok=False,
+                output="error\n --> src/lib.rs:10:4\n10 | broken()",
+            )
+        ]
+    )
+    shifted = ValidationResult(
+        stages=[
+            ValidationStage(
+                name="cargo-check",
+                kind="check",
+                ok=False,
+                output="error\n --> src/lib.rs:99:8\n99 | broken()",
+            )
+        ]
+    )
+
+    assert repair_state_signature(first, ["same gap"]) == repair_state_signature(
+        shifted, ["same gap"]
+    )
+
+
 def test_compiler_diagnostics_produce_bounded_source_excerpts(tmp_path: Path) -> None:
     source = tmp_path / "src"
     source.mkdir()
@@ -71,6 +99,47 @@ def test_compiler_diagnostics_produce_bounded_source_excerpts(tmp_path: Path) ->
             "end_line": 27,
             "content": "\n".join(lines[16:27]),
         }
+    ]
+
+
+def test_compiler_diagnostics_include_named_type_definition_excerpt(tmp_path: Path) -> None:
+    source = tmp_path / "src"
+    source.mkdir()
+    rust = (
+        "struct Comic { title: String }\n"
+        "\n"
+        "fn unrelated() {}\n"
+        "\n"
+        "fn update(detail: Detail) {\n"
+        "    consume(detail.comic.clone());\n"
+        "}\n"
+    )
+    (source / "lib.rs").write_text(rust, encoding="utf-8")
+
+    excerpts = diagnostic_file_excerpts(
+        tmp_path,
+        """error[E0599]: no method named `clone` found for struct `Comic`
+  --> src/lib.rs:6:26
+   |
+ 1 | struct Comic { title: String }
+   | ------------ method `clone` not found for this struct
+""",
+        context_lines=0,
+    )
+
+    assert excerpts == [
+        {
+            "path": "src/lib.rs",
+            "start_line": 1,
+            "end_line": 1,
+            "content": "struct Comic { title: String }",
+        },
+        {
+            "path": "src/lib.rs",
+            "start_line": 6,
+            "end_line": 6,
+            "content": "    consume(detail.comic.clone());",
+        },
     ]
 
 

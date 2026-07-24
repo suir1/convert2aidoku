@@ -55,6 +55,7 @@ def test_contract_requires_official_metadata_mapping() -> None:
         "encrypted_json",
         "AES-CBC",
         "Dynamic base URLs",
+        "decompiled_dto_shapes",
     ):
         assert requirement in contract
 

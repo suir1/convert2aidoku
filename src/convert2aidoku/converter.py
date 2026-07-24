@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,7 +25,7 @@ from .models import (
 )
 from .reports import classify_status, write_report
 from .scaffold import apply_generation_manifest
-from .targeted_repair import TargetedRepair, repair_required
+from .targeted_repair import TargetedRepair, repair_required, repair_state_signature
 from .validator import validate_project
 
 
@@ -37,6 +38,7 @@ class _ConversionRoundRunner:
     query: str | None
     live: bool
     proxy: str | None
+    progress: Callable[[str], None]
     manifest: GenerationManifest = field(init=False)
     contract: ContractEvaluation = field(init=False)
     capability_gaps: list[str] = field(init=False)
@@ -98,6 +100,15 @@ class _ConversionRoundRunner:
         self.checkpoint.validation = self.validation
         self.checkpoint.phase = "validated"
         self.store.commit(checkpoint=self.checkpoint)
+        round_number = len(self.checkpoint.ai_rounds)
+        if repair_required(self.validation, self.capability_gaps, live=self.live):
+            failed = next(
+                (stage.name for stage in self.validation.stages if not stage.ok),
+                "contract",
+            )
+            self.progress(f"AI round {round_number} validation failed at {failed}")
+        else:
+            self.progress(f"AI round {round_number} validation passed")
 
     def accept(self, result: AIResult[GenerationManifest], *, purpose: str) -> None:
         number = len(self.checkpoint.ai_rounds) + 1
@@ -113,6 +124,9 @@ class _ConversionRoundRunner:
             manifest=ManifestWrite(number, result.value),
             checkpoint=self.checkpoint,
         )
+        total_tokens = result.usage.total_tokens if result.usage is not None else None
+        usage = f" ({total_tokens:,} tokens)" if total_tokens is not None else ""
+        self.progress(f"AI round {number} returned{usage}; validating")
         self.evaluate(result.value)
 
     def repair(self, settings: AISettings) -> None:
@@ -124,7 +138,18 @@ class _ConversionRoundRunner:
                 repair_required(self.validation, self.capability_gaps, live=self.live)
                 and repair_number < settings.max_repair_rounds
             ):
+                signature = repair_state_signature(self.validation, self.capability_gaps)
+                if self.checkpoint.repair_attempt_signatures.count(signature) >= 2:
+                    warning = "repair stopped after two attempts with an unchanged validation state"
+                    if warning not in self.checkpoint.warnings:
+                        self.checkpoint.warnings.append(warning)
+                    self.store.commit(checkpoint=self.checkpoint)
+                    self.progress("Repair stopped: unchanged validation state repeated twice")
+                    break
+                self.checkpoint.repair_attempt_signatures.append(signature)
+                self.store.commit(checkpoint=self.checkpoint)
                 repair_number += 1
+                self.progress(f"Requesting AI repair {repair_number}/{settings.max_repair_rounds}")
                 repair = TargetedRepair(
                     ir=self.ir,
                     store=self.store,
@@ -146,7 +171,9 @@ def convert_source(
     force: bool = False,
     proxy: str | None = None,
     resume: bool = False,
+    progress: Callable[[str], None] | None = None,
 ) -> ConversionOutcome:
+    notify = progress or (lambda _message: None)
     intake = ConversionIntake.prepare(
         input_ref,
         output=output,
@@ -169,10 +196,13 @@ def convert_source(
         query=query,
         live=live,
         proxy=proxy,
+        progress=notify,
     )
     if checkpoint.current_manifest is not None:
+        notify(f"Resuming AI round {len(checkpoint.ai_rounds)} from checkpoint")
         rounds.evaluate(rounds.load())
     else:
+        notify("Requesting initial AI generation")
         with OpenAICompatibleClient(settings) as client:
             rounds.accept(
                 client.generate(ir),

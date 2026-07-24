@@ -721,6 +721,7 @@ class ConversionCheckpoint(BaseModel):
     phase: Literal["analyzed", "manifest_saved", "validated", "complete"] = "analyzed"
     current_manifest: str | None = None
     ai_rounds: list[AIRound] = Field(default_factory=list)
+    repair_attempt_signatures: list[str] = Field(default_factory=list)
     generated_files: list[str] = Field(default_factory=list)
     capability_gaps: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)

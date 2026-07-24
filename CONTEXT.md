@@ -17,7 +17,7 @@ The format dispatch that sends a resolved **Input Source** to exactly one Kotlin
 _Avoid_: Analyzer helpers, metadata parser
 
 **Decompiled Inspection**:
-The Android manifest facts and normalized JADX Java structure recovered from a decompiled APK **Input Source** for both **SourceIR** analysis and generation evidence.
+The Android manifest facts, normalized JADX Java structure, and deterministic DTO field/generic shapes recovered from a decompiled APK **Input Source** for both **SourceIR** analysis and generation evidence.
 _Avoid_: Java cleanup helpers, APK parser output
 
 **Input Capability Recognition**:
@@ -29,7 +29,7 @@ One AI round's complete declaration of controlled Rust files, **Generated Resour
 _Avoid_: AI output, generated files
 
 **Generation Manifest Contract**:
-The structured diagnostics, targeted-repair scope, and user-readable rendering produced by evaluating one **Generation Manifest** against its **SourceIR**.
+The structured diagnostics, targeted-repair scope, DTO-shape preservation, and user-readable rendering produced by evaluating one **Generation Manifest** against its **SourceIR**.
 _Avoid_: Capability gap strings, repair keywords
 
 **Targeted Repair**:
@@ -107,7 +107,7 @@ _Avoid_: Log
 ## Relationships
 
 - One **Input Source** passes through exactly one **SourceIR Analysis** Adapter and produces one **SourceIR** per conversion.
-- A decompiled APK **Input Source** yields one shared **Decompiled Inspection** whose facts feed **SourceIR** analysis and whose behavior projection feeds generation evidence.
+- A decompiled APK **Input Source** yields one shared **Decompiled Inspection** whose facts feed **SourceIR** analysis and whose behavior and DTO-shape projections feed generation evidence.
 - One **Input Capability Recognition** classifies the Kotlin or Decompiled Java content of an **Input Source** into **SourceIR** capabilities and unsupported cryptography facts.
 - One **Checkpoint** records one or more **Generation Manifests** and identifies exactly one current manifest.
 - One **Checkpoint Store** persists one **Checkpoint**, its **SourceIR**, and raw **Generation Manifest** history, then mirrors that audit into the **Generated Source** `.c2a` directory.

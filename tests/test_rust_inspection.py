@@ -32,3 +32,20 @@ def test_walks_error_tolerant_tree_and_compacts_comments() -> None:
 
     assert any(node.type == "function_item" for node in inspection.nodes())
     assert RustInspection.compact_node(function.node) == "fnfetch(){Request::get(url);}"
+
+
+def test_indexes_struct_field_types() -> None:
+    inspection = RustInspection.from_content(
+        """
+        struct ComicDetailResult {
+            groups: BTreeMap<String, GroupInfo>,
+        }
+        struct GroupInfo { name: String }
+        """
+    )
+
+    assert inspection.struct_field_type("ComicDetailResult", "groups") == (
+        "BTreeMap<String, GroupInfo>"
+    )
+    assert inspection.struct_field_type("GroupInfo", "name") == "String"
+    assert inspection.struct_field_type("ComicDetailResult", "missing") is None

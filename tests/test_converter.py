@@ -140,6 +140,71 @@ def test_conversion_orchestrates_atomic_output(
     assert not list(output.parent.glob(f".{output.name}-*"))
 
 
+def test_conversion_reports_generation_and_validation_progress(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _install_ai_scenario(monkeypatch)
+    monkeypatch.setattr(
+        "convert2aidoku.converter.validate_project",
+        lambda *_args, **_kwargs: ValidationResult(
+            build_ok=True,
+            package_ok=True,
+            live_ok=True,
+        ),
+    )
+    progress: list[str] = []
+
+    convert_source(
+        str(FIXTURE),
+        output=tmp_path / "generated" / "en.simple",
+        settings=conversion_settings(),
+        live=True,
+        progress=progress.append,
+    )
+
+    assert progress[0] == "Requesting initial AI generation"
+    assert any("AI round 1 returned" in message for message in progress)
+    assert any("round 1 validation passed" in message for message in progress)
+
+
+def test_repair_stops_after_two_attempts_with_the_same_validation_state(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    ai_calls = _install_ai_scenario(monkeypatch, repair=_baseline_generation())
+    monkeypatch.setattr(
+        "convert2aidoku.converter.validate_project",
+        lambda *_args, **_kwargs: ValidationResult(
+            stages=[
+                ValidationStage(
+                    name="core-live-smoke",
+                    kind="live_test",
+                    ok=False,
+                    output="same live failure",
+                )
+            ],
+            build_ok=True,
+            package_ok=True,
+        ),
+    )
+    progress: list[str] = []
+
+    outcome = convert_source(
+        str(FIXTURE),
+        output=tmp_path / "generated" / "en.simple",
+        settings=conversion_settings(max_repair_rounds=8),
+        live=True,
+        progress=progress.append,
+    )
+
+    assert outcome.report.status is ConversionStatus.FAILED
+    assert ai_calls.repair == 2
+    assert len(outcome.report.ai_rounds) == 3
+    assert any("unchanged validation state" in warning for warning in outcome.report.warnings)
+    assert any("Repair stopped" in message for message in progress)
+
+
 def test_interrupted_conversion_resumes_saved_manifest_without_regeneration(
     tmp_path: Path,
     monkeypatch,

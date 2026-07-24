@@ -67,7 +67,14 @@ def test_decompiled_generation_context_keeps_behavior_and_drops_jadx_noise() -> 
     )
     dto = _file(
         "sources/example/api/dto/Comic.java",
-        "package example; public final class Comic { private final String pathWord; }",
+        (
+            "package example;\n"
+            "// C2A compacted JADX DTO: generated constructors and value methods removed.\n"
+            "public final class Comic {\n"
+            "    // Fields:\n"
+            "    private final String pathWord;\n"
+            "}\n"
+        ),
     )
     manifest = _file("resources/AndroidManifest.xml", "<manifest package='example'/>")
     ir = _ir(main, interceptor, dto, manifest)
@@ -83,10 +90,15 @@ def test_decompiled_generation_context_keeps_behavior_and_drops_jadx_noise() -> 
     assert "generated-noise" not in evidence[main.path]
     assert "component1" not in evidence[interceptor.path]
     assert 'header("User-Agent", fallback)' in evidence[interceptor.path]
-    assert "pathWord" in evidence[dto.path]
+    assert payload["decompiled_dto_shapes"] == ["Comic { pathWord: String }"]
+    assert dto.path not in evidence
     assert manifest.path not in evidence
     assert any(
         item["path"] == manifest.path and item["reason"] == "represented_in_source_ir"
+        for item in payload["omitted_source_files"]
+    )
+    assert any(
+        item["path"] == dto.path and item["reason"] == "represented_in_decompiled_dto_shapes"
         for item in payload["omitted_source_files"]
     )
     assert payload["context_stats"]["evidence_chars"] < payload["context_stats"]["original_chars"]
@@ -116,3 +128,4 @@ def test_kotlin_generation_context_preserves_complete_source_files() -> None:
         kotlin.model_dump(mode="json"),
     ]
     assert payload["omitted_source_files"] == []
+    assert payload["decompiled_dto_shapes"] == []

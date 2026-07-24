@@ -6,11 +6,12 @@ from pathlib import Path
 from typing import Literal
 
 from .constants import MAX_AI_DIAGNOSTIC_CHARS
+from .decompiled_input import DecompiledDtoField, decompiled_dto_shapes
 from .dependency_policy import evaluate_dependency_policy
 from .models import Capability, GeneratedResources, GenerationManifest, SourceIR
 from .rust_inspection import RustInspection
 
-RepairKind = Literal["retry", "chapter_regex"]
+RepairKind = Literal["retry", "chapter_regex", "dto_shape"]
 
 
 @dataclass(frozen=True)
@@ -47,7 +48,7 @@ class ContractEvaluation:
             for diagnostic in self.diagnostics
             if diagnostic.repair_kind is not None
         }
-        excerpts = _repair_excerpts(project, kinds)
+        excerpts = _repair_excerpts(project, kinds, self.messages)
         if not excerpts:
             return None
         return ContractRepair(
@@ -75,6 +76,9 @@ def evaluate_manifest_contract(
 
     def add(message: str, repair_kind: RepairKind | None = None) -> None:
         diagnostics.append(ContractDiagnostic(message, repair_kind))
+
+    for message in _decompiled_dto_shape_gaps(ir, rust):
+        add(message, "dto_shape")
 
     if (Capability.POPULAR in ir.capabilities or Capability.LATEST in ir.capabilities) and (
         "ListingProvider" not in traits
@@ -323,8 +327,14 @@ def evaluate_manifest_contract(
 def _repair_excerpts(
     project: Path,
     repair_kinds: set[RepairKind],
+    diagnostics: list[str],
 ) -> list[dict[str, object]]:
     excerpts: list[dict[str, object]] = []
+    dto_names = {
+        match.group(1)
+        for diagnostic in diagnostics
+        if (match := re.match(r"decompiled DTO ([A-Za-z_][A-Za-z0-9_]*)\.", diagnostic))
+    }
     source_root = project / "src"
     for path in sorted(source_root.rglob("*.rs")):
         if path.name == "generated_smoke.rs" or path.is_symlink():
@@ -332,6 +342,18 @@ def _repair_excerpts(
         content = path.read_text(encoding="utf-8")
         relative = path.relative_to(project).as_posix()
         inspection = RustInspection.from_content(content)
+        if "dto_shape" in repair_kinds:
+            for struct in inspection.structs:
+                if struct.name not in dto_names:
+                    continue
+                excerpts.append(
+                    {
+                        "path": relative,
+                        "start_line": struct.node.start_point[0] + 1,
+                        "end_line": struct.node.end_point[0] + 1,
+                        "content": struct.text,
+                    }
+                )
         for function in inspection.functions:
             include = ("retry" in repair_kinds and ".send()" in function.text) or (
                 "chapter_regex" in repair_kinds
@@ -349,6 +371,100 @@ def _repair_excerpts(
                 }
             )
     return excerpts[:8]
+
+
+def _generic_type(type_text: str) -> tuple[str, tuple[str, ...]]:
+    value = type_text.strip()
+    opening = value.find("<")
+    if opening < 0 or not value.endswith(">"):
+        return value.rsplit("::", 1)[-1].rsplit(".", 1)[-1], ()
+    base = value[:opening].strip().rsplit("::", 1)[-1].rsplit(".", 1)[-1]
+    body = value[opening + 1 : -1]
+    arguments: list[str] = []
+    depth = 0
+    start = 0
+    for index, char in enumerate(body):
+        if char == "<":
+            depth += 1
+        elif char == ">":
+            depth -= 1
+        elif char == "," and depth == 0:
+            arguments.append(body[start:index].strip())
+            start = index + 1
+    arguments.append(body[start:].strip())
+    return base, tuple(arguments)
+
+
+def _simple_type(type_text: str) -> str:
+    base, arguments = _generic_type(type_text)
+    if base in {"Option", "Box", "Cow"} and arguments:
+        return _simple_type(arguments[-1])
+    return base
+
+
+def _unwrapped_generic(type_text: str) -> tuple[str, tuple[str, ...]]:
+    base, arguments = _generic_type(type_text)
+    while base in {"Option", "Box"} and len(arguments) == 1:
+        base, arguments = _generic_type(arguments[0])
+    return base, arguments
+
+
+def _rust_field_names(field: DecompiledDtoField) -> tuple[str, ...]:
+    snake = re.sub(r"(?<!^)(?=[A-Z])", "_", field.name).lower()
+    return tuple(dict.fromkeys((field.name, snake, field.serialized_name)))
+
+
+def _decompiled_dto_shape_gaps(ir: SourceIR, rust: RustInspection) -> list[str]:
+    if ir.source_format != "decompiled_apk":
+        return []
+    shapes = decompiled_dto_shapes(ir.files)
+    dto_names = {shape.name for shape in shapes}
+    gaps: list[str] = []
+    for shape in shapes:
+        if rust.struct_named(shape.name) is None:
+            continue
+        for field in shape.fields:
+            java_base, java_arguments = _generic_type(field.java_type)
+            if java_base != "Map" or len(java_arguments) != 2:
+                continue
+            expected_value = _simple_type(java_arguments[1])
+            expected_key = _simple_type(java_arguments[0])
+            if expected_value not in dto_names:
+                continue
+            rust_type = next(
+                (
+                    value
+                    for name in _rust_field_names(field)
+                    if (value := rust.struct_field_type(shape.name, name)) is not None
+                ),
+                None,
+            )
+            if rust_type is None:
+                continue
+            rust_base, rust_arguments = _unwrapped_generic(rust_type)
+            actual_key = (
+                _simple_type(rust_arguments[0])
+                if rust_base in {"BTreeMap", "HashMap", "Map"} and len(rust_arguments) == 2
+                else ""
+            )
+            actual_value = (
+                _simple_type(rust_arguments[1])
+                if rust_base in {"BTreeMap", "HashMap", "Map"} and len(rust_arguments) == 2
+                else _simple_type(rust_type)
+            )
+            key_matches = expected_key != "String" or actual_key == expected_key
+            if (
+                rust_base in {"BTreeMap", "HashMap", "Map"}
+                and key_matches
+                and actual_value == expected_value
+            ):
+                continue
+            gaps.append(
+                f"decompiled DTO {shape.name}.{field.serialized_name} is "
+                f"{field.java_type}, but the generated Rust field is {rust_type}; preserve "
+                "the recovered map key/value DTO types so detail JSON can deserialize"
+            )
+    return gaps
 
 
 def _dynamic_filter_ids_missing_from_query_mapping(rust: RustInspection) -> set[str]:

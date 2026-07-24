@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
 
-from .decompiled_input import project_java_behavior
+from .decompiled_input import decompiled_dto_shapes, project_java_behavior
 from .errors import InputError
 from .models import SourceFile, SourceIR
 
@@ -15,6 +15,7 @@ DEFAULT_GENERATION_EVIDENCE_CHARS = 110_000
 class GenerationContext:
     source_ir: dict[str, Any]
     source_evidence: list[dict[str, Any]]
+    decompiled_dto_shapes: list[str]
     omitted_source_files: list[dict[str, Any]]
     context_stats: dict[str, Any]
 
@@ -22,6 +23,7 @@ class GenerationContext:
         return {
             "source_ir": self.source_ir,
             "source_evidence": self.source_evidence,
+            "decompiled_dto_shapes": self.decompiled_dto_shapes,
             "omitted_source_files": self.omitted_source_files,
             "context_stats": self.context_stats,
         }
@@ -75,6 +77,7 @@ def build_generation_context(
         return GenerationContext(
             source_ir=source_ir,
             source_evidence=[source.model_dump(mode="json") for source in ir.files],
+            decompiled_dto_shapes=[],
             omitted_source_files=[],
             context_stats={
                 "mode": "complete_kotlin_source",
@@ -85,6 +88,7 @@ def build_generation_context(
             },
         )
 
+    dto_shapes = [shape.render() for shape in decompiled_dto_shapes(ir.files)]
     candidates: list[tuple[int, int, SourceFile, dict[str, Any]]] = []
     omitted: list[dict[str, Any]] = []
     for index, source in enumerate(ir.files):
@@ -95,6 +99,20 @@ def build_generation_context(
                     "sha256": source.sha256,
                     "chars": len(source.content),
                     "reason": "represented_in_source_ir",
+                }
+            )
+            continue
+        if (
+            "/api/dto/" in f"/{source.path}"
+            and "// C2A compacted JADX DTO:" in source.content
+            and "// Source-specific behavior:" not in source.content
+        ):
+            omitted.append(
+                {
+                    "path": source.path,
+                    "sha256": source.sha256,
+                    "chars": len(source.content),
+                    "reason": "represented_in_decompiled_dto_shapes",
                 }
             )
             continue
@@ -135,6 +153,7 @@ def build_generation_context(
     return GenerationContext(
         source_ir=source_ir,
         source_evidence=evidence_files,
+        decompiled_dto_shapes=dto_shapes,
         omitted_source_files=omitted,
         context_stats={
             "mode": "decompiled_behavior_evidence",
@@ -144,5 +163,6 @@ def build_generation_context(
             "original_chars": original_chars,
             "evidence_chars": total,
             "max_evidence_chars": max_chars,
+            "dto_shapes": len(dto_shapes),
         },
     )

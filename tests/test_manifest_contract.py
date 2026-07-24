@@ -12,7 +12,9 @@ from convert2aidoku.models import (
     DependencyRequest,
     GeneratedFile,
     GenerationManifest,
+    SourceFile,
 )
+from tests.scenarios import minimal_source_ir
 
 FIXTURE = Path(__file__).parent / "fixtures" / "simple"
 
@@ -116,3 +118,74 @@ def test_targeted_repair_selects_only_functions_for_declared_kinds(tmp_path: Pat
     assert "Regex::new" in combined
     assert "preserve_everything_here" not in combined
     assert repair.diagnostics == "retry required\nchapter scan required"
+
+
+def test_decompiled_dto_map_value_mismatch_is_a_targeted_contract_gap(
+    tmp_path: Path,
+) -> None:
+    ir = minimal_source_ir(
+        source_format="decompiled_apk",
+        files=[
+            SourceFile(
+                path="sources/example/api/dto/ComicDetailResult.java",
+                sha256="0",
+                content=(
+                    "public final class ComicDetailResult {\n"
+                    "private final Map<String, GroupInfo> groups;\n"
+                    "}\n"
+                ),
+            ),
+            SourceFile(
+                path="sources/example/api/dto/GroupInfo.java",
+                sha256="0",
+                content=("public final class GroupInfo {\nprivate final String name;\n}\n"),
+            ),
+        ],
+    )
+    manifest = _manifest(
+        "use alloc::collections::BTreeMap;\n"
+        "struct ComicDetailResult { groups: BTreeMap<String, String> }\n"
+    )
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "lib.rs").write_text(manifest.files[0].content, encoding="utf-8")
+
+    evaluation = evaluate_manifest_contract(ir, manifest)
+    repair = evaluation.repair(tmp_path)
+
+    assert evaluation.diagnostics == (
+        ContractDiagnostic(
+            "decompiled DTO ComicDetailResult.groups is Map<String, GroupInfo>, but the "
+            "generated Rust field is BTreeMap<String, String>; preserve the recovered map "
+            "key/value DTO types so detail JSON can deserialize",
+            "dto_shape",
+        ),
+    )
+    assert repair is not None
+    assert repair.excerpts[0]["content"] == (
+        "struct ComicDetailResult { groups: BTreeMap<String, String> }"
+    )
+
+
+def test_decompiled_dto_map_value_contract_accepts_matching_rust_shape() -> None:
+    ir = minimal_source_ir(
+        source_format="decompiled_apk",
+        files=[
+            SourceFile(
+                path="sources/example/api/dto/ComicDetailResult.java",
+                sha256="0",
+                content=(
+                    "public final class ComicDetailResult {\n"
+                    "private final Map<String, GroupInfo> groups;\n"
+                    "}\n"
+                ),
+            )
+        ],
+    )
+    manifest = _manifest(
+        "use alloc::collections::BTreeMap;\n"
+        "struct ComicDetailResult { groups: Option<BTreeMap<String, GroupInfo>> }\n"
+        "struct GroupInfo { name: String }\n"
+    )
+
+    assert evaluate_manifest_contract(ir, manifest).messages == []

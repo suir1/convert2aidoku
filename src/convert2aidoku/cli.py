@@ -184,7 +184,7 @@ def convert(
                 raise typer.Abort()
         with console.status(
             "Converting source; AI and Rust validation may take several minutes..."
-        ):
+        ) as status:
             outcome = convert_source(
                 input_ref,
                 output=output,
@@ -194,6 +194,7 @@ def convert(
                 force=force,
                 proxy=proxy,
                 resume=resume,
+                progress=status.update,
             )
     except C2AError as exc:
         _abort(exc)

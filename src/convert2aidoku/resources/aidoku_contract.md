@@ -82,6 +82,10 @@ Mapping rules:
   call `response.get_json_owned()` for plain JSON, and preserve the source's page-to-offset or
   cursor calculation exactly. Keep public unauthenticated behavior separate from optional login
   behavior; do not manufacture credentials or silently make login mandatory.
+- For decompiled JSON sources, `decompiled_dto_shapes` is the deterministic field/type projection
+  recovered from JADX. Preserve its generic collection shapes exactly: a Java
+  `Map<String, GroupInfo>` must decode into a Rust map whose values are `GroupInfo`, never
+  `String` or another scalar. Serialized names marked with `json` remain the serde field names.
 - Tachi `HttpSource` requests use OkHttp, whose idempotent GET path retries transient connection
   failures. For both standard Kotlin modules and `decompiled_apk` JSON sources, preserve that
   behavior with one centralized retry: construct the same GET request again only when the first

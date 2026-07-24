@@ -34,6 +34,47 @@ class RustFunction:
         )
 
 
+@dataclass(frozen=True)
+class RustStructField:
+    name: str
+    type_text: str
+
+
+@dataclass(frozen=True)
+class RustStruct:
+    name: str
+    text: str
+    node: Node
+    fields: tuple[RustStructField, ...]
+
+    @classmethod
+    def from_node(cls, node: Node) -> RustStruct | None:
+        identifier = node.child_by_field_name("name")
+        body = node.child_by_field_name("body")
+        if identifier is None or body is None:
+            return None
+        fields: list[RustStructField] = []
+        for child in body.named_children:
+            if child.type != "field_declaration":
+                continue
+            name = child.child_by_field_name("name")
+            type_node = child.child_by_field_name("type")
+            if name is None or type_node is None:
+                continue
+            fields.append(
+                RustStructField(
+                    name=name.text.decode("utf-8", errors="replace"),
+                    type_text=type_node.text.decode("utf-8", errors="replace"),
+                )
+            )
+        return cls(
+            name=identifier.text.decode("utf-8", errors="replace"),
+            text=node.text.decode("utf-8", errors="replace"),
+            node=node,
+            fields=tuple(fields),
+        )
+
+
 class RustInspection:
     """Parse generated Rust once and expose reusable syntax/function facts."""
 
@@ -50,6 +91,13 @@ class RustInspection:
             by_name.setdefault(function.name, []).append(function)
         self.functions = tuple(functions)
         self._by_name = {name: tuple(items) for name, items in by_name.items()}
+        structs = [
+            item
+            for node in self.nodes("struct_item")
+            if (item := RustStruct.from_node(node)) is not None
+        ]
+        self.structs = tuple(structs)
+        self._structs_by_name = {item.name: item for item in structs}
 
     @classmethod
     def from_content(cls, content: str) -> RustInspection:
@@ -93,6 +141,18 @@ class RustInspection:
                     reachable.add(candidate)
                     pending.append(candidate)
         return reachable
+
+    def struct_named(self, name: str) -> RustStruct | None:
+        return self._structs_by_name.get(name)
+
+    def struct_field_type(self, owner: str, field_name: str) -> str | None:
+        struct = self.struct_named(owner)
+        if struct is None:
+            return None
+        return next(
+            (field.type_text for field in struct.fields if field.name == field_name),
+            None,
+        )
 
     @staticmethod
     def compact_node(node: Node) -> str:

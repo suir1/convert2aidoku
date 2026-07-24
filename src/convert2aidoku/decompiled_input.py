@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path, PurePath
 from xml.etree import ElementTree
@@ -89,6 +90,92 @@ _HTTP_SOURCE_DECLARATION = re.compile(
     r"\bclass\s+([A-Za-z_][A-Za-z0-9_]*)\s+extends\s+([A-Za-z0-9_.$]+)"
     r"(?:\s+implements\s+([^\{]+))?\s*\{"
 )
+_DTO_SERIALIZED_NAME = re.compile(
+    r'^\s*//\s*([A-Za-z_][A-Za-z0-9_]*)\s*->\s*"([^"\\]+)"\s*$',
+    re.MULTILINE,
+)
+
+
+@dataclass(frozen=True)
+class DecompiledDtoField:
+    name: str
+    serialized_name: str
+    java_type: str
+
+
+@dataclass(frozen=True)
+class DecompiledDtoShape:
+    name: str
+    fields: tuple[DecompiledDtoField, ...]
+
+    def render(self) -> str:
+        fields = []
+        for field in self.fields:
+            label = field.name
+            if field.serialized_name != field.name:
+                label += f" (json {field.serialized_name})"
+            fields.append(f"{label}: {field.java_type}")
+        return f"{self.name} {{ {', '.join(fields)} }}"
+
+
+def decompiled_dto_shapes(files: Iterable[SourceFile]) -> tuple[DecompiledDtoShape, ...]:
+    """Recover concise DTO field types without asking the provider to infer Java syntax."""
+    shapes: list[DecompiledDtoShape] = []
+    for source in files:
+        path = f"/{source.path}"
+        if not source.path.endswith(".java") or (
+            "/api/dto/" not in path and "C2A compacted JADX DTO" not in source.content
+        ):
+            continue
+        raw = source.content.encode("utf-8")
+        root = get_parser("java").parse(raw).root_node
+        declaration = next(
+            (node for node in root.named_children if node.type == "class_declaration"),
+            None,
+        )
+        if declaration is None:
+            continue
+        identifier = declaration.child_by_field_name("name")
+        body = declaration.child_by_field_name("body")
+        if identifier is None or body is None:
+            continue
+        serialized_names = dict(_DTO_SERIALIZED_NAME.findall(source.content))
+        fields: list[DecompiledDtoField] = []
+        for member in body.named_children:
+            if member.type != "field_declaration":
+                continue
+            modifiers = next(
+                (child for child in member.named_children if child.type == "modifiers"),
+                None,
+            )
+            if modifiers is not None and "static" in _node_text(raw, modifiers).split():
+                continue
+            type_node = member.child_by_field_name("type")
+            if type_node is None:
+                continue
+            java_type = " ".join(_node_text(raw, type_node).split())
+            for declarator in member.named_children:
+                if declarator.type != "variable_declarator":
+                    continue
+                name_node = declarator.child_by_field_name("name")
+                if name_node is None:
+                    continue
+                name = _node_text(raw, name_node)
+                fields.append(
+                    DecompiledDtoField(
+                        name=name,
+                        serialized_name=serialized_names.get(name, name),
+                        java_type=java_type,
+                    )
+                )
+        if fields:
+            shapes.append(
+                DecompiledDtoShape(
+                    name=_node_text(raw, identifier),
+                    fields=tuple(fields),
+                )
+            )
+    return tuple(shapes)
 
 
 @dataclass(frozen=True)

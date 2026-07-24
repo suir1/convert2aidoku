@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +21,7 @@ from .models import (
     SourceIR,
     ValidationResult,
 )
+from .rust_inspection import RustInspection
 from .scaffold import (
     normalize_pinned_aidoku_rust,
     read_generated_files,
@@ -27,6 +30,11 @@ from .scaffold import (
 
 _RUST_DIAGNOSTIC_LOCATION = re.compile(
     r"-->\s+(?P<path>src/[A-Za-z0-9_./-]+\.rs):(?P<line>[1-9][0-9]*):[1-9][0-9]*"
+)
+_RUST_DIAGNOSTIC_NAMED_TYPE = re.compile(
+    r"^\s*[1-9][0-9]*\s*\|\s*(?:pub(?:\([^)]*\))?\s+)?"
+    r"(?:struct|enum|union)\s+([A-Za-z_][A-Za-z0-9_]*)\b",
+    re.MULTILINE,
 )
 
 
@@ -44,6 +52,7 @@ def diagnostic_file_excerpts(
         locations.setdefault(path, set()).add(int(match.group("line")))
 
     excerpts: list[dict[str, object]] = []
+    named_types = set(_RUST_DIAGNOSTIC_NAMED_TYPE.findall(diagnostics))
     for relative, line_numbers in sorted(locations.items()):
         path = project / relative
         if not path.is_file() or path.is_symlink():
@@ -72,7 +81,25 @@ def diagnostic_file_excerpts(
                     "content": "\n".join(lines[start - 1 : end]),
                 }
             )
-    return excerpts[:12]
+        if named_types:
+            inspection = RustInspection.from_content("\n".join(lines))
+            for name in sorted(named_types):
+                struct = inspection.struct_named(name)
+                if struct is None:
+                    continue
+                excerpts.append(
+                    {
+                        "path": relative,
+                        "start_line": struct.node.start_point[0] + 1,
+                        "end_line": struct.node.end_point[0] + 1,
+                        "content": struct.text,
+                    }
+                )
+    unique = {
+        (str(item["path"]), int(item["start_line"]), int(item["end_line"])): item
+        for item in excerpts
+    }
+    return [unique[key] for key in sorted(unique)][:12]
 
 
 def _remove_generated_smoke(content: str) -> str:
@@ -142,6 +169,34 @@ def repair_required(
     if validation.blocked:
         return False
     return not (validation.build_ok and validation.package_ok and (validation.live_ok or not live))
+
+
+def repair_state_signature(
+    validation: ValidationResult,
+    capability_gaps: list[str],
+) -> str:
+    """Identify repeated repair states while ignoring unstable source locations."""
+
+    def normalize(output: str) -> str:
+        output = re.sub(r"(?<=\.rs):[1-9][0-9]*:[1-9][0-9]*", ":LINE:COL", output)
+        output = re.sub(r"^\s*[1-9][0-9]*\s*\|", "LINE |", output, flags=re.MULTILINE)
+        return " ".join(output.split())
+
+    payload = {
+        "failed_stages": [
+            {
+                "name": stage.name,
+                "kind": stage.kind.value,
+                "blocked": stage.blocked,
+                "output": normalize(stage.output),
+            }
+            for stage in validation.stages
+            if not stage.ok
+        ],
+        "capability_gaps": capability_gaps,
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()
 
 
 def repair_diagnostics(

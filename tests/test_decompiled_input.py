@@ -5,11 +5,13 @@ import pytest
 from convert2aidoku.decompiled_input import (
     DecompiledInputInspection,
     DecompiledManifest,
+    decompiled_dto_shapes,
     normalize_decompiled_java,
     project_java_behavior,
 )
 from convert2aidoku.errors import InputError
 from convert2aidoku.ingest import ResolvedSource, collect_source_files
+from convert2aidoku.models import SourceFile
 
 FIXTURE = Path(__file__).parent / "fixtures" / "decompiled_apk"
 
@@ -100,6 +102,36 @@ public final class Comic {
     assert "equals(" not in compacted
     assert "hashCode(" not in compacted
     assert "toString(" not in compacted
+
+
+def test_dto_shapes_preserve_generic_field_types_and_serialized_names() -> None:
+    detail = SourceFile(
+        path="sources/example/api/dto/ComicDetailResult.java",
+        sha256="0",
+        content="""
+        package example;
+        // C2A compacted JADX DTO: generated constructors and value methods removed.
+        public final class ComicDetailResult {
+            // Serialized field names:
+            // pathWord -> "path_word"
+            // Fields:
+            private final Map<String, GroupInfo> groups;
+            private final String pathWord;
+            public static final Companion INSTANCE = new Companion(null);
+        }
+        """,
+    )
+
+    shapes = decompiled_dto_shapes([detail])
+
+    assert [shape.name for shape in shapes] == ["ComicDetailResult"]
+    assert [(field.name, field.serialized_name, field.java_type) for field in shapes[0].fields] == [
+        ("groups", "groups", "Map<String, GroupInfo>"),
+        ("pathWord", "path_word", "String"),
+    ]
+    assert shapes[0].render() == (
+        "ComicDetailResult { groups: Map<String, GroupInfo>, pathWord (json path_word): String }"
+    )
 
 
 def test_behavior_projection_keeps_distinct_main_and_helper_policies() -> None:
