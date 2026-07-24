@@ -6,8 +6,8 @@ import re
 from .decompiled_input import DecompiledInputInspection
 from .errors import InputError, UnsupportedSourceError
 from .ingest import ResolvedSource, collect_source_files
+from .input_capabilities import InputCapabilityRecognition, recognize_input_capabilities
 from .models import (
-    Capability,
     ChapterPageRoute,
     ChapterPageRouteVariant,
     ContentRating,
@@ -23,6 +23,15 @@ from .models import (
 def _match(pattern: str, text: str, default: str = "") -> str:
     result = re.search(pattern, text, re.MULTILINE | re.DOTALL)
     return result.group(1).strip() if result else default
+
+
+def _input_license(resolved: ResolvedSource) -> tuple[str | None, str | None]:
+    if resolved.license_path is None:
+        return None, None
+    return (
+        resolved.license_path.name,
+        resolved.license_path.read_text(encoding="utf-8", errors="replace"),
+    )
 
 
 def _kotlin_class_declarations(text: str) -> list[str]:
@@ -90,75 +99,15 @@ def _parse_content_rating(build: str) -> ContentRating:
     return ContentRating.SAFE
 
 
-def _capabilities(kotlin: str) -> list[Capability]:
-    mapping: tuple[tuple[Capability, tuple[str, ...]], ...] = (
-        (Capability.SEARCH, ("searchManga", "getSearchMangaList")),
-        (Capability.POPULAR, ("popularManga", "getPopularManga")),
-        (Capability.LATEST, ("latestUpdates", "getLatestUpdates")),
-        (Capability.DETAILS, ("mangaDetails", "getMangaDetails", "fetchMangaUpdate")),
-        (Capability.CHAPTERS, ("chapterList", "fetchAllChapters")),
-        (Capability.PAGES, ("pageList", "getPageList")),
-        (Capability.FILTERS, ("getFilterList",)),
-        (Capability.DYNAMIC_FILTERS, ("resetThemeFilter", "theme/comic/count")),
-        (Capability.SETTINGS, ("setupPreferenceScreen", "ConfigurableSource")),
-        (Capability.IMAGE_HEADERS, ("imageRequest", "headersBuilder")),
-        (Capability.DEEP_LINKS, ("getMangaUrl", "getChapterUrl")),
-        (
-            Capability.JSON_API,
-            ("parseAs<", "decodeFromString<", "get_json_owned", "application/json"),
-        ),
-        (
-            Capability.DYNAMIC_BASE_URLS,
-            ("API_DOMAINS", "apiDomains", "domainPreference", "baseUrlPreference"),
-        ),
-    )
-    capabilities = [
-        capability for capability, markers in mapping if any(x in kotlin for x in markers)
-    ]
-    if re.search(r"\bsupportsLatest\s*=\s*false\b", kotlin):
-        capabilities = [item for item in capabilities if item is not Capability.LATEST]
-    if (
-        "allCategory" in kotlin
-        and re.search(r"\bvar\s+categories\s*:", kotlin)
-        and "getFilterList" in kotlin
-    ):
-        capabilities.append(Capability.DYNAMIC_FILTERS)
-    if _uses_supported_aes_cbc(kotlin):
-        capabilities.append(Capability.ENCRYPTED_JSON)
-    if _uses_supported_3des_cbc(kotlin):
-        capabilities.append(Capability.TRIPLE_DES_CBC)
-    return list(dict.fromkeys(capabilities))
-
-
-def _uses_supported_aes_cbc(kotlin: str) -> bool:
-    transformations = re.findall(r'Cipher\.getInstance\(\s*"([^"]+)"', kotlin)
-    if not transformations:
-        return False
-    supported = {"AES/CBC/PKCS5Padding", "AES/CBC/PKCS7Padding"}
-    return (
-        all(transformation in supported for transformation in transformations)
-        and "SecretKeySpec" in kotlin
-        and "IvParameterSpec" in kotlin
-    )
-
-
-def _uses_supported_3des_cbc(kotlin: str) -> bool:
-    transformations = re.findall(r'Cipher\.getInstance\(\s*"([^"]+)"', kotlin)
-    if not transformations:
-        return False
-    supported = {"DESede/CBC/PKCS5Padding", "DESede/CBC/PKCS7Padding"}
-    return (
-        all(transformation in supported for transformation in transformations)
-        and "SecretKeySpec" in kotlin
-        and "IvParameterSpec" in kotlin
-    )
-
-
 def _uses_relative_url_keys(kotlin: str) -> bool:
     return "setUrlWithoutDomain" in kotlin or bool(re.search(r"\burl\s*=\s*\"/", kotlin))
 
 
-def _unsupported_features(build: str, kotlin: str) -> list[str]:
+def _unsupported_features(
+    build: str,
+    kotlin: str,
+    recognition: InputCapabilityRecognition,
+) -> list[str]:
     checks = {
         "multisrc/theme source": ("themePkg", "SourceFactory", "MultiSource"),
         "coroutine KeiSource": ("KeiSource",),
@@ -182,44 +131,9 @@ def _unsupported_features(build: str, kotlin: str) -> list[str]:
     unsupported = [
         name for name, markers in checks.items() if any(marker in combined for marker in markers)
     ]
-    crypto_markers = ("javax.crypto", "Cipher.getInstance", "SecretKeySpec")
-    crypto_supported = _uses_supported_aes_cbc(kotlin) or _uses_supported_3des_cbc(kotlin)
-    if any(marker in combined for marker in crypto_markers) and not crypto_supported:
+    if recognition.unsupported_crypto:
         unsupported.append("cryptography")
     return unsupported
-
-
-def _java_capabilities(java: str) -> list[Capability]:
-    mapping: tuple[tuple[Capability, tuple[str, ...]], ...] = (
-        (Capability.SEARCH, ("searchMangaRequest", "searchMangaParse")),
-        (Capability.POPULAR, ("popularMangaRequest", "popularMangaParse")),
-        (Capability.LATEST, ("latestUpdatesRequest", "latestUpdatesParse")),
-        (
-            Capability.DETAILS,
-            ("mangaDetailsRequest", "mangaDetailsParse", "fetchMangaDetails"),
-        ),
-        (Capability.CHAPTERS, ("fetchChapterList", "chapterListParse")),
-        (Capability.PAGES, ("fetchPageList", "pageListParse")),
-        (Capability.FILTERS, ("getFilterList",)),
-        (Capability.DYNAMIC_FILTERS, ("resetThemeFilter", "/theme/comic/count")),
-        (Capability.SETTINGS, ("setupPreferenceScreen", "ConfigurableSource")),
-        (Capability.IMAGE_HEADERS, ("imageRequest", "getImageRequest", "headersBuilder")),
-        (Capability.DEEP_LINKS, ("getMangaUrl", "getChapterUrl")),
-        (
-            Capability.JSON_API,
-            ("decodeFromString", "ApiResponse", "application/json", "Json.INSTANCE"),
-        ),
-        (
-            Capability.DYNAMIC_BASE_URLS,
-            ("ApiDomainOption", "getApiDomain", "getApiUrl", "KEY_CUSTOM"),
-        ),
-    )
-    capabilities = [
-        capability for capability, markers in mapping if any(marker in java for marker in markers)
-    ]
-    if _uses_supported_aes_cbc(java):
-        capabilities.append(Capability.ENCRYPTED_JSON)
-    return list(dict.fromkeys(capabilities))
 
 
 def _java_chapter_page_routes(java: str) -> list[ChapterPageRoute]:
@@ -400,6 +314,7 @@ def _analyze_decompiled_apk(resolved: ResolvedSource) -> SourceIR:
             "MVP supports only APK HttpSource classes without custom source interfaces"
         )
     java = inspection.java
+    recognition = recognize_input_capabilities(java, dialect="decompiled_java")
 
     hard_unsupported: list[str] = []
     if any(
@@ -407,8 +322,7 @@ def _analyze_decompiled_apk(resolved: ResolvedSource) -> SourceIR:
         for marker in ("android.graphics.Bitmap", "Unscrambler", "descramble", "scrambleImage")
     ):
         hard_unsupported.append("image decoding or scrambling")
-    crypto_markers = ("javax.crypto", "Cipher.getInstance", "SecretKeySpec")
-    if any(marker in java for marker in crypto_markers) and not _uses_supported_aes_cbc(java):
+    if recognition.unsupported_crypto:
         hard_unsupported.append("cryptography")
     if hard_unsupported:
         raise UnsupportedSourceError(
@@ -456,12 +370,7 @@ def _analyze_decompiled_apk(resolved: ResolvedSource) -> SourceIR:
     if resolved.license_path is None:
         warnings.append("no input license was found beside the APK")
 
-    license_name = resolved.license_path.name if resolved.license_path else None
-    license_text = (
-        resolved.license_path.read_text(encoding="utf-8", errors="replace")
-        if resolved.license_path
-        else None
-    )
+    license_name, license_text = _input_license(resolved)
     return SourceIR(
         input_ref=resolved.input_ref,
         commit=resolved.commit,
@@ -478,7 +387,7 @@ def _analyze_decompiled_apk(resolved: ResolvedSource) -> SourceIR:
         ),
         main_class=main_class,
         parent_classes=parents,
-        capabilities=_java_capabilities(java),
+        capabilities=list(recognition.capabilities),
         method_names=list(inspection.method_names),
         header_names=list(inspection.header_names),
         relative_url_keys=("url2comicPath" in java or "setUrlWithoutDomain" in java),
@@ -505,7 +414,8 @@ def analyze_source(resolved: ResolvedSource) -> SourceIR:
         raise InputError("build.gradle.kts or build.gradle was not collected")
     kotlin = "\n\n".join(item.content for item in files if item.path.endswith(".kt"))
     main_class, parents = _parse_main_class(kotlin)
-    unsupported = _unsupported_features(build_file.content, kotlin)
+    recognition = recognize_input_capabilities(kotlin, dialect="kotlin")
+    unsupported = _unsupported_features(build_file.content, kotlin, recognition)
     if unsupported:
         raise UnsupportedSourceError("source is outside the MVP scope: " + ", ".join(unsupported))
 
@@ -540,11 +450,7 @@ def analyze_source(resolved: ResolvedSource) -> SourceIR:
             "source uses OkHttp interceptors; generated behavior requires manual review"
         )
 
-    license_text = None
-    license_name = None
-    if resolved.license_path:
-        license_name = resolved.license_path.name
-        license_text = resolved.license_path.read_text(encoding="utf-8", errors="replace")
+    license_name, license_text = _input_license(resolved)
 
     metadata = SourceMetadata(
         source_id=f"{language}.{module_slug}",
@@ -561,7 +467,7 @@ def analyze_source(resolved: ResolvedSource) -> SourceIR:
         metadata=metadata,
         main_class=main_class,
         parent_classes=parents,
-        capabilities=_capabilities(kotlin),
+        capabilities=list(recognition.capabilities),
         method_names=method_names,
         header_names=header_names,
         relative_url_keys=_uses_relative_url_keys(kotlin),
@@ -569,7 +475,6 @@ def analyze_source(resolved: ResolvedSource) -> SourceIR:
         license_name=license_name,
         license_text=license_text,
         warnings=warnings,
-        unsupported_features=[],
     )
 
 

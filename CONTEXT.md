@@ -16,6 +16,10 @@ _Avoid_: Parsed source, analysis result
 The Android manifest facts and normalized JADX Java structure recovered from a decompiled APK **Input Source** for both **SourceIR** analysis and generation evidence.
 _Avoid_: Java cleanup helpers, APK parser output
 
+**Input Capability Recognition**:
+The deterministic dialect-aware reading and supported-cryptography capabilities recovered from Kotlin or Decompiled Java content before constructing a **SourceIR**.
+_Avoid_: Capability marker map, crypto check
+
 **Generation Manifest**:
 One AI round's complete declaration of controlled Rust files, **Generated Resources**, traits, dependencies, and warnings.
 _Avoid_: AI output, generated files
@@ -84,6 +88,7 @@ _Avoid_: Log
 
 - One **Input Source** produces one **SourceIR** per conversion.
 - A decompiled APK **Input Source** yields one shared **Decompiled Inspection** whose facts feed **SourceIR** analysis and whose behavior projection feeds generation evidence.
+- One **Input Capability Recognition** classifies the Kotlin or Decompiled Java content of an **Input Source** into **SourceIR** capabilities and unsupported cryptography facts.
 - One **Checkpoint** records one or more **Generation Manifests** and identifies exactly one current manifest.
 - One **Checkpoint Store** persists one **Checkpoint**, its **SourceIR**, and raw **Generation Manifest** history, then mirrors that audit into the **Generated Source** `.c2a` directory.
 - One **Generation Manifest** owns zero or one filter resource and zero or one settings resource as **Generated Resources**.

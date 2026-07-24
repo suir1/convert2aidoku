@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import uuid
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -653,32 +654,24 @@ def validate_existing(
     if source_id is None:
         source_id = project.name
     validation: ValidationResult = validate_project(project, live=live, proxy=proxy)
+    status = classify_status(validation, live_requested=live)
+    report = ConversionReport(
+        status=status,
+        input_ref=str(project),
+        source_id=source_id,
+        generated_files=[],
+        validation=validation,
+    )
     existing_report = project / "report.json"
     if existing_report.is_file():
-        try:
+        with suppress(OSError, ValueError):
             report = ConversionReport.model_validate_json(
                 existing_report.read_text(encoding="utf-8")
             ).model_copy(
                 update={
-                    "status": classify_status(validation, live_requested=live),
+                    "status": status,
                     "validation": validation,
                 }
             )
-        except (OSError, ValueError):
-            report = ConversionReport(
-                status=classify_status(validation, live_requested=live),
-                input_ref=str(project),
-                source_id=source_id,
-                generated_files=[],
-                validation=validation,
-            )
-    else:
-        report = ConversionReport(
-            status=classify_status(validation, live_requested=live),
-            input_ref=str(project),
-            source_id=source_id,
-            generated_files=[],
-            validation=validation,
-        )
     write_report(project, report)
     return report

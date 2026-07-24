@@ -11,12 +11,6 @@ MAX_GENERATED_FILES = 64
 MAX_GENERATED_FILE_CHARS = 500_000
 MAX_GENERATED_TOTAL_CHARS = 2_000_000
 
-ALLOWED_GENERATED_FILES = (
-    "src/**/*.rs",
-    "res/filters.json",
-    "res/settings.json",
-)
-
 BLOCKED_OUTPUT_MARKERS = (
     "http 403",
     "status code: 403",

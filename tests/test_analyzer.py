@@ -199,3 +199,37 @@ def test_analyzes_decompiled_apk_as_public_only(
     assert any("login/authentication" in item for item in ir.unsupported_features)
     assert any("collection/bookcase" in item for item in ir.unsupported_features)
     assert any("chapter comments" in item for item in ir.unsupported_features)
+
+
+def test_analyzes_supported_triple_des_in_decompiled_apk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    apk = tmp_path / "copymanga-3des.apk"
+    apk.write_bytes(b"synthetic apk")
+
+    def fake_jadx(_apk: Path, destination: Path) -> None:
+        shutil.copytree(DECOMPILED_APK_FIXTURE, destination)
+        main = next((destination / "sources").rglob("CopyManga.java"))
+        content = main.read_text(encoding="utf-8")
+        prefix, closing = content.rsplit("}", 1)
+        main.write_text(
+            prefix
+            + """
+            public void signRequest() {
+                Cipher.getInstance("DESede/CBC/PKCS5Padding");
+                new SecretKeySpec(key, "DESede");
+                new IvParameterSpec(iv);
+            }
+            }
+            """
+            + closing,
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(ingest, "_run_jadx", fake_jadx)
+
+    ir = analyze_path(str(apk))
+
+    assert Capability.TRIPLE_DES_CBC in ir.capabilities
+    assert "cryptography" not in ir.unsupported_features
