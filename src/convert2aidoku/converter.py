@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import os
 import re
 import shutil
-import uuid
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -13,6 +11,7 @@ from .analyzer import analyze_source
 from .checkpoint_store import CheckpointStore, ManifestWrite
 from .config import AISettings
 from .constants import MAX_AI_DIAGNOSTIC_CHARS
+from .conversion_completion import ConversionOutcome, complete_conversion
 from .errors import AIProviderError, InputError, SecurityError
 from .generated_source_metadata import GeneratedSourceMetadata
 from .ingest import resolve_source
@@ -37,16 +36,7 @@ from .scaffold import (
     read_generated_files,
     validate_generated_content,
 )
-from .templates import match_templates
 from .validator import validate_project
-
-
-@dataclass(frozen=True)
-class ConversionOutcome:
-    output: Path
-    report: ConversionReport
-    source_ir: SourceIR
-
 
 _RUST_DIAGNOSTIC_LOCATION = re.compile(
     r"-->\s+(?P<path>src/[A-Za-z0-9_./-]+\.rs):(?P<line>[1-9][0-9]*):[1-9][0-9]*"
@@ -437,24 +427,6 @@ def _check_resume_compatibility(
         raise InputError("resume options do not match the saved run: " + ", ".join(mismatches))
 
 
-def _install_output(staged: Path, output: Path) -> None:
-    """Install a completed staging tree while keeping an old output recoverable."""
-    if not output.exists():
-        os.replace(staged, output)
-        return
-    backup = output.parent / f".{output.name}.backup-{uuid.uuid4().hex}"
-    os.replace(output, backup)
-    try:
-        os.replace(staged, output)
-    except BaseException:
-        os.replace(backup, output)
-        raise
-    if backup.is_dir() and not backup.is_symlink():
-        shutil.rmtree(backup, ignore_errors=True)
-    else:
-        backup.unlink(missing_ok=True)
-
-
 def convert_source(
     input_ref: str,
     *,
@@ -527,7 +499,6 @@ def convert_source(
             checkpoint=checkpoint,
         )
 
-    template_matches = match_templates(ir)
     rounds = _ConversionRoundRunner(
         ir=ir,
         store=store,
@@ -547,57 +518,7 @@ def convert_source(
             )
 
     rounds.repair(settings)
-    validation = rounds.validation
-
-    deterministic_files = [
-        ".cargo/config.toml",
-        "Cargo.toml",
-        "res/source.json",
-        "res/icon.png",
-        "PROVENANCE.md",
-        "report.json",
-        "report.md",
-    ]
-    if (project / "LICENSE.input").is_file():
-        deterministic_files.append("LICENSE.input")
-    if (project / "package.aix").is_file():
-        deterministic_files.append("package.aix")
-    audit_files = store.audit_files()
-    report = ConversionReport(
-        status=classify_status(validation, live_requested=live),
-        input_ref=input_ref,
-        source_id=ir.metadata.source_id,
-        provider_base_url=settings.base_url,
-        model=settings.model,
-        ai_rounds=checkpoint.ai_rounds,
-        generated_files=sorted(set(checkpoint.generated_files + deterministic_files + audit_files)),
-        template_matches=template_matches,
-        warnings=list(
-            dict.fromkeys(
-                checkpoint.warnings + checkpoint.manifest_warnings + checkpoint.capability_gaps
-            )
-        ),
-        unsupported_features=list(dict.fromkeys(checkpoint.unsupported_features)),
-        validation=validation,
-        provenance={
-            "input_commit": ir.commit,
-            "input_license": ir.license_name,
-            "input_format": ir.source_format,
-            "feature_scope": ir.feature_scope,
-        },
-    )
-    write_report(project, report)
-    checkpoint.validation = validation
-    resumable = report.status.value == "failed" or not validation.contract_ok
-    checkpoint.phase = "validated" if resumable else "complete"
-    store.commit(checkpoint=checkpoint)
-    store.publish_audit(project)
-
-    if resumable:
-        return ConversionOutcome(output=project, report=report, source_ir=ir)
-    _install_output(project, output)
-    shutil.rmtree(workspace, ignore_errors=True)
-    return ConversionOutcome(output=output, report=report, source_ir=ir)
+    return complete_conversion(store, ir, checkpoint, rounds.validation)
 
 
 def validate_existing(

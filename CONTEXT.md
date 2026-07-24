@@ -48,6 +48,10 @@ _Avoid_: Raw AI response, model call
 One materialization, contract evaluation, validation, and **Checkpoint** update for the current effective **Generation Manifest**.
 _Avoid_: AI call, repair attempt
 
+**Conversion Completion**:
+The terminal report, **Checkpoint**, audit publication, and atomic install policy that either installs a completed **Generated Source** or leaves it in a resumable workspace.
+_Avoid_: Report builder, output move helper
+
 **Test Scenario**:
 A fresh minimal legal provider configuration, **SourceIR**, or project layout used by tests with case-specific differences supplied as explicit overrides.
 _Avoid_: Shared fixture state, convenience helper
@@ -101,6 +105,7 @@ _Avoid_: Log
 - One **Dependency Policy** evaluates every **Generation Manifest** before provider acceptance, **Generated Source** materialization, and **Generation Manifest Contract** evaluation.
 - Each AI round is produced by one successful **Typed AI Exchange**.
 - Each **Conversion Round** evaluates one effective **Generation Manifest** and records its generated files, contract gaps, and **Validation Result** in the **Checkpoint**.
+- One **Conversion Completion** consumes the final **Validation Result**, commits the terminal **Checkpoint** and audit before installing the **Generated Source**, and preserves resumable failures in the workspace.
 - Each **Test Scenario** creates new objects and directories so one test cannot mutate another test's defaults.
 - One **Validation Plan** evaluates one materialized **Generated Source** and produces one ordered **Validation Result**.
 - One **SourceIR** may resolve **Live Validation Evidence**; it cannot invent behavior, bypass a generated allowlist, or by itself prove live verification.
