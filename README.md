@@ -41,6 +41,8 @@ base_url = "http://localhost:50048/v1"
 model = "your-model-id"
 max_repair_rounds = 3
 timeout_seconds = 300
+generation_reasoning_effort = "medium"
+repair_reasoning_effort = "low"
 ```
 
 ```bash
@@ -48,8 +50,15 @@ export C2A_API_KEY='...'
 uv run c2a ai-check
 ```
 
+Reasoning effort accepts `off`, `low`, `medium`, or `high`. Initial generation defaults to
+`medium`; targeted and full repairs default to `low`; `ai-check` disables thinking. Providers that
+reject reasoning controls automatically fall back to their default behavior without consuming a
+manifest validation retry. Environment overrides use `C2A_GENERATION_REASONING_EFFORT` and
+`C2A_REPAIR_REASONING_EFFORT`; `convert` also accepts `--generation-reasoning` and
+`--repair-reasoning`.
+
 The client first requests JSON-Schema structured output. Providers that reject that feature fall
-back to plain JSON, which is still validated locally with Pydantic.
+back to JSON Object mode and then plain JSON, both still validated locally with Pydantic.
 
 For decompiled APKs, the initial prompt uses deterministic Java behavior slices instead of JADX
 boilerplate; Kotlin modules still send their complete selected source files. Compiler and Clippy

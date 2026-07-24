@@ -13,7 +13,7 @@ from typing import Any, Literal
 import httpx
 from pydantic import BaseModel, ValidationError
 
-from .config import AISettings
+from .config import AISettings, ReasoningEffort
 from .constants import MAX_AI_RESPONSE_BYTES
 from .dependency_policy import evaluate_dependency_policy, render_dependency_policy
 from .errors import AIProviderError, SecurityError
@@ -22,6 +22,11 @@ from .models import AIRound, AIUsage, GenerationManifest, RepairPatch, SourceIR
 from .scaffold import validate_generated_content
 
 _ResponseMode = Literal["json_schema", "json_object", "plain"]
+_REASONING_CONTROL_ERROR = re.compile(
+    r"reasoning_effort|\bthinking\b|(?:unknown|unsupported|unrecognized|unexpected)"
+    r".{0,40}(?:parameter|field)",
+    re.IGNORECASE,
+)
 
 _PATCH_SCOPES = {
     "compiler": (
@@ -55,6 +60,7 @@ _PATCH_SCOPES = {
 class AIResult[T: BaseModel]:
     value: T
     structured_output: bool
+    reasoning_effort: ReasoningEffort | None = None
     usage: AIUsage | None = None
     warnings: list[str] = field(default_factory=list)
 
@@ -62,6 +68,7 @@ class AIResult[T: BaseModel]:
         return AIResult(
             value=value,
             structured_output=self.structured_output,
+            reasoning_effort=self.reasoning_effort,
             usage=self.usage,
             warnings=list(self.warnings),
         )
@@ -142,6 +149,8 @@ class OpenAICompatibleClient:
         self.settings = settings
         self._sleep = sleep
         self._response_mode: _ResponseMode = "json_schema"
+        self._reasoning_effort_supported: bool | None = None
+        self._thinking_control_supported: bool | None = None
         self._client = httpx.Client(
             timeout=settings.timeout_seconds,
             transport=transport,
@@ -205,6 +214,7 @@ class OpenAICompatibleClient:
         messages: list[dict[str, str]],
         *,
         response_mode: _ResponseMode,
+        reasoning_effort: ReasoningEffort | None = None,
         schema_name: str | None = None,
         schema: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -222,6 +232,10 @@ class OpenAICompatibleClient:
             }
         elif response_mode == "json_object":
             body["response_format"] = {"type": "json_object"}
+        if reasoning_effort == ReasoningEffort.OFF:
+            body["thinking"] = {"type": "disabled"}
+        elif reasoning_effort is not None:
+            body["reasoning_effort"] = reasoning_effort.value
         retry_delays = (5.0, 15.0, 30.0)
         for retry in range(len(retry_delays) + 1):
             try:
@@ -259,11 +273,20 @@ class OpenAICompatibleClient:
         model: type[T],
         *,
         validate: Callable[[T], None] | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
     ) -> AIResult[T]:
         errors: list[str] = []
         warnings: list[str] = []
         usages: list[AIUsage] = []
         response_mode = self._response_mode
+        if reasoning_effort == ReasoningEffort.OFF:
+            active_reasoning = (
+                reasoning_effort if self._thinking_control_supported is not False else None
+            )
+        else:
+            active_reasoning = (
+                reasoning_effort if self._reasoning_effort_supported is not False else None
+            )
         schema = _strict_model_schema(model)
         label = re.sub(r"(?<!^)(?=[A-Z])", " ", model.__name__).lower()
         schema_name = "aidoku_" + label.replace(" ", "_")
@@ -294,6 +317,7 @@ class OpenAICompatibleClient:
                 payload = self._post(
                     request_messages,
                     response_mode=response_mode,
+                    reasoning_effort=active_reasoning,
                     schema_name=schema_name,
                     schema=schema,
                 )
@@ -303,15 +327,27 @@ class OpenAICompatibleClient:
                 if validate is not None:
                     validate(value)
                 self._response_mode = response_mode
+                if active_reasoning == ReasoningEffort.OFF:
+                    self._thinking_control_supported = True
+                elif active_reasoning is not None:
+                    self._reasoning_effort_supported = True
                 return AIResult(
                     value=value,
                     structured_output=response_mode == "json_schema",
+                    reasoning_effort=active_reasoning,
                     usage=self._combined_usage(usages),
                     warnings=warnings,
                 )
             except AIProviderError as exc:
                 diagnostic = str(exc)
                 warnings.append(diagnostic)
+                if active_reasoning is not None and _REASONING_CONTROL_ERROR.search(diagnostic):
+                    if active_reasoning == ReasoningEffort.OFF:
+                        self._thinking_control_supported = False
+                    else:
+                        self._reasoning_effort_supported = False
+                    active_reasoning = None
+                    continue
                 if response_mode != "plain" and re.search(
                     r"HTTP (?:400|404|415|422)\b", diagnostic
                 ):
@@ -359,7 +395,12 @@ class OpenAICompatibleClient:
                 ),
             },
         ]
-        return self._request_manifest(messages)
+        return self._request_model(
+            messages,
+            GenerationManifest,
+            validate=_validate_manifest,
+            reasoning_effort=self.settings.generation_reasoning_effort,
+        )
 
     def repair(
         self,
@@ -404,7 +445,12 @@ class OpenAICompatibleClient:
                 ),
             },
         ]
-        return self._request_manifest(messages)
+        return self._request_model(
+            messages,
+            GenerationManifest,
+            validate=_validate_manifest,
+            reasoning_effort=self.settings.repair_reasoning_effort,
+        )
 
     def repair_patch(
         self,
@@ -436,14 +482,22 @@ class OpenAICompatibleClient:
                 ),
             },
         ]
-        return self._request_model(messages, RepairPatch)
+        return self._request_model(
+            messages,
+            RepairPatch,
+            reasoning_effort=self.settings.repair_reasoning_effort,
+        )
 
     def check(self) -> AICheckResult:
         messages = [
             {"role": "system", "content": "Return a JSON object only."},
             {"role": "user", "content": '{"ok": true}'},
         ]
-        result = self._request_model(messages, _ConnectivityResponse)
+        result = self._request_model(
+            messages,
+            _ConnectivityResponse,
+            reasoning_effort=ReasoningEffort.OFF,
+        )
         if not result.value.ok:
             raise AIProviderError("AI connectivity response did not confirm ok=true")
         return AICheckResult(
@@ -458,6 +512,7 @@ def ai_round[T: BaseModel](number: int, purpose: str, result: AIResult[T]) -> AI
         round=number,
         purpose=purpose,  # type: ignore[arg-type]
         structured_output=result.structured_output,
+        reasoning_effort=result.reasoning_effort,
         usage=result.usage,
         warnings=result.warnings,
     )

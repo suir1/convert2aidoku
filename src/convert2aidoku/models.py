@@ -717,6 +717,7 @@ class AIRound(BaseModel):
     round: int
     purpose: Literal["generate", "repair"]
     structured_output: bool
+    reasoning_effort: Literal["off", "low", "medium", "high"] | None = None
     usage: AIUsage | None = None
     warnings: list[str] = Field(default_factory=list)
 

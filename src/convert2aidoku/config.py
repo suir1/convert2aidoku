@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import tomllib
+from enum import StrEnum
 from pathlib import Path
 
 from pydantic import BaseModel, SecretStr
@@ -10,12 +11,21 @@ from .constants import DEFAULT_AI_TIMEOUT_SECONDS, DEFAULT_MAX_REPAIR_ROUNDS, MA
 from .errors import ConfigurationError
 
 
+class ReasoningEffort(StrEnum):
+    OFF = "off"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
 class AISettings(BaseModel):
     base_url: str
     model: str
     api_key: SecretStr
     timeout_seconds: float = DEFAULT_AI_TIMEOUT_SECONDS
     max_repair_rounds: int = DEFAULT_MAX_REPAIR_ROUNDS
+    generation_reasoning_effort: ReasoningEffort = ReasoningEffort.MEDIUM
+    repair_reasoning_effort: ReasoningEffort = ReasoningEffort.LOW
 
     @property
     def chat_completions_url(self) -> str:
@@ -44,6 +54,8 @@ def load_ai_settings(
     model: str | None = None,
     config_path: Path | None = None,
     max_repair_rounds: int | None = None,
+    generation_reasoning_effort: ReasoningEffort | str | None = None,
+    repair_reasoning_effort: ReasoningEffort | str | None = None,
 ) -> AISettings:
     config = _read_config(config_path)
     resolved_base_url = base_url or os.getenv("C2A_BASE_URL") or config.get("base_url")
@@ -75,10 +87,36 @@ def load_ai_settings(
     timeout = float(
         os.getenv("C2A_TIMEOUT_SECONDS", config.get("timeout_seconds", DEFAULT_AI_TIMEOUT_SECONDS))
     )
+
+    def reasoning_effort(
+        explicit: ReasoningEffort | str | None,
+        env_name: str,
+        config_name: str,
+        default: ReasoningEffort,
+    ) -> ReasoningEffort:
+        raw = explicit or os.getenv(env_name) or config.get(config_name, default)
+        try:
+            return ReasoningEffort(str(raw))
+        except ValueError as exc:
+            values = ", ".join(item.value for item in ReasoningEffort)
+            raise ConfigurationError(f"{config_name} must be one of: {values}") from exc
+
     return AISettings(
         base_url=str(resolved_base_url),
         model=str(resolved_model),
         api_key=SecretStr(api_key),
         timeout_seconds=timeout,
         max_repair_rounds=rounds,
+        generation_reasoning_effort=reasoning_effort(
+            generation_reasoning_effort,
+            "C2A_GENERATION_REASONING_EFFORT",
+            "generation_reasoning_effort",
+            ReasoningEffort.MEDIUM,
+        ),
+        repair_reasoning_effort=reasoning_effort(
+            repair_reasoning_effort,
+            "C2A_REPAIR_REASONING_EFFORT",
+            "repair_reasoning_effort",
+            ReasoningEffort.LOW,
+        ),
     )

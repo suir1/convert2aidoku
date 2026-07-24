@@ -3,6 +3,7 @@ import json
 import httpx
 
 from convert2aidoku.ai import OpenAICompatibleClient, _contract_text, _strict_model_schema
+from convert2aidoku.config import ReasoningEffort
 from convert2aidoku.models import (
     GenerationManifest,
     RepairPatch,
@@ -208,6 +209,87 @@ def test_response_format_fallback_does_not_consume_validation_retries() -> None:
     assert result.value.source_struct == "Example"
 
 
+def test_reasoning_effort_rejection_is_remembered_without_consuming_retry() -> None:
+    calls = 0
+    reasoning_values: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        payload = json.loads(request.content)
+        reasoning = payload.get("reasoning_effort")
+        reasoning_values.append(reasoning)
+        if reasoning is not None:
+            return httpx.Response(400, text="unsupported parameter reasoning_effort")
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(_manifest())}}]},
+        )
+
+    settings = provider_settings()
+    with OpenAICompatibleClient(settings, transport=httpx.MockTransport(handler)) as client:
+        first = client._request_model(
+            [{"role": "user", "content": "first"}],
+            GenerationManifest,
+            reasoning_effort=ReasoningEffort.LOW,
+        )
+        second = client._request_model(
+            [{"role": "user", "content": "second"}],
+            GenerationManifest,
+            reasoning_effort=ReasoningEffort.LOW,
+        )
+
+    assert calls == 3
+    assert reasoning_values == ["low", None, None]
+    assert first.reasoning_effort is None
+    assert first.warnings
+    assert second.reasoning_effort is None
+
+
+def test_ai_check_disables_thinking() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["thinking"] == {"type": "disabled"}
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": '{"ok":true}'}}]},
+        )
+
+    settings = provider_settings()
+    with OpenAICompatibleClient(settings, transport=httpx.MockTransport(handler)) as client:
+        result = client.check()
+
+    assert result.ok
+    assert result.structured_output
+
+
+def test_thinking_rejection_is_remembered_for_later_check() -> None:
+    calls = 0
+    thinking_values: list[object] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        payload = json.loads(request.content)
+        thinking = payload.get("thinking")
+        thinking_values.append(thinking)
+        if thinking is not None:
+            return httpx.Response(400, text="unknown parameter thinking")
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": '{"ok":true}'}}]},
+        )
+
+    settings = provider_settings()
+    with OpenAICompatibleClient(settings, transport=httpx.MockTransport(handler)) as client:
+        first = client.check()
+        second = client.check()
+
+    assert calls == 3
+    assert thinking_values == [{"type": "disabled"}, None, None]
+    assert first.ok and second.ok
+
+
 def test_manifest_dependency_policy_participates_in_validation_retry() -> None:
     calls = 0
 
@@ -366,6 +448,7 @@ def test_generate_sends_deterministic_source_evidence_instead_of_raw_files() -> 
         assert "FilterValue::Select { id: String, value: String }" in system_prompt
         assert "Option<&'a str>" in system_prompt
         assert "Cargo.toml is forbidden" in payload["messages"][1]["content"]
+        assert payload["reasoning_effort"] == "medium"
         assert "source_files" not in generation_payload
         assert generation_payload["source_evidence"][0]["path"] == "src/Example.kt"
         assert generation_payload["context_stats"]["mode"] == "complete_kotlin_source"
@@ -389,6 +472,7 @@ def test_repair_uses_compact_context_without_original_source_bodies() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
         repair_payload = json.loads(payload["messages"][1]["content"])
+        assert payload["reasoning_effort"] == "low"
         assert "source_files" not in repair_payload
         assert "files" not in repair_payload["source_ir"]
         assert repair_payload["current_files"][0]["content"] == "current rust"
@@ -439,6 +523,7 @@ def test_compiler_repair_sends_only_excerpts_and_returns_exact_edits() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
         assert payload["response_format"]["json_schema"]["name"] == "aidoku_repair_patch"
+        assert payload["reasoning_effort"] == "low"
         repair_payload = json.loads(payload["messages"][1]["content"])
         assert "current_files" not in repair_payload
         assert "source_ir" not in repair_payload

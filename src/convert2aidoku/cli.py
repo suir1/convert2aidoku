@@ -10,7 +10,7 @@ from rich.table import Table
 
 from .ai import OpenAICompatibleClient
 from .analyzer import analyze_path
-from .config import load_ai_settings
+from .config import ReasoningEffort, load_ai_settings
 from .constants import MAX_REPAIR_ROUNDS
 from .converter import convert_source, validate_existing
 from .errors import C2AError
@@ -85,7 +85,7 @@ def ai_check(
             result = client.check()
     except C2AError as exc:
         _abort(exc)
-    mode = "JSON Schema" if result.structured_output else "plain JSON fallback"
+    mode = "JSON Schema" if result.structured_output else "JSON fallback"
     console.print(f"[green]Connected[/green] to [bold]{result.model}[/bold] using {mode}.")
 
 
@@ -147,6 +147,17 @@ def convert(
         int | None,
         typer.Option(min=0, max=MAX_REPAIR_ROUNDS, help="Maximum cumulative AI repair rounds."),
     ] = None,
+    generation_reasoning: Annotated[
+        ReasoningEffort | None,
+        typer.Option(
+            "--generation-reasoning",
+            help="AI reasoning effort for initial source generation.",
+        ),
+    ] = None,
+    repair_reasoning: Annotated[
+        ReasoningEffort | None,
+        typer.Option("--repair-reasoning", help="AI reasoning effort for repair requests."),
+    ] = None,
     live: Annotated[
         bool,
         typer.Option("--live/--no-live", help="Run list/details/chapters/pages/image smoke tests."),
@@ -174,6 +185,8 @@ def convert(
             model=model,
             config_path=config,
             max_repair_rounds=max_repairs,
+            generation_reasoning_effort=generation_reasoning,
+            repair_reasoning_effort=repair_reasoning,
         )
         if not yes:
             console.print(
