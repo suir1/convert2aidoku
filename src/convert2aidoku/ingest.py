@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import re
 import shutil
-import subprocess
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -12,6 +11,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import unquote, urlparse
 
+from .command_execution import execute_command
 from .constants import DEFAULT_MAX_DECOMPILED_INPUT_CHARS, DEFAULT_MAX_INPUT_CHARS
 from .decompiled_input import (
     DecompiledManifest,
@@ -80,18 +80,10 @@ def parse_github_url(value: str) -> GitHubLocation | None:
 
 
 def _run_git(args: list[str], *, cwd: Path | None = None) -> str:
-    try:
-        result = subprocess.run(
-            ["git", *args],
-            cwd=cwd,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise InputError(f"unable to run git: {exc}") from exc
-    if result.returncode != 0:
+    result = execute_command(["git", *args], cwd=cwd, timeout=120)
+    if result.failure is not None:
+        raise InputError(f"unable to run git: {result.error}")
+    if not result.ok:
         detail = (result.stderr or result.stdout).strip()
         raise InputError(f"git command failed: {detail}")
     return result.stdout.strip()
@@ -142,17 +134,13 @@ def _run_jadx(apk: Path, destination: Path) -> None:
         raise InputError(
             "JADX is required for APK input; install it first (for example: brew install jadx)"
         )
-    try:
-        result = subprocess.run(
-            [executable, "--no-debug-info", "-d", str(destination), str(apk)],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=600,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise InputError(f"unable to run JADX: {exc}") from exc
-    if result.returncode != 0:
+    result = execute_command(
+        [executable, "--no-debug-info", "-d", str(destination), str(apk)],
+        timeout=600,
+    )
+    if result.failure is not None:
+        raise InputError(f"unable to run JADX: {result.error}")
+    if not result.ok:
         detail = (result.stderr or result.stdout).strip()[-4_000:]
         raise InputError(f"JADX failed to decompile the APK: {detail}")
     if (

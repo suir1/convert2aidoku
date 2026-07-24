@@ -3,15 +3,16 @@ from pathlib import Path
 import httpx
 import pytest
 
+from convert2aidoku.command_execution import CommandResult, command_environment
 from convert2aidoku.errors import InputError
 from convert2aidoku.models import StageKind, ValidationStage
-from convert2aidoku.toolchain import tool_environment
 from convert2aidoku.validator import (
     _blocked_site_probe,
     _generated_safety_stage,
     _is_runner_network_failure,
     _network_environment,
     _resolve_proxy,
+    _run_stage,
     validate_project,
 )
 from tests.scenarios import source_metadata_project
@@ -160,12 +161,41 @@ def test_proxy_can_come_from_environment_and_rejects_unsupported_scheme(monkeypa
         _resolve_proxy("socks5://127.0.0.1:7891")
 
 
-def test_tool_environment_drops_credentials(monkeypatch) -> None:
+def test_command_environment_drops_credentials(monkeypatch) -> None:
     monkeypatch.setenv("C2A_API_KEY", "secret")
     monkeypatch.setenv("OTHER_TOKEN", "secret")
-    env = tool_environment()
+    env = command_environment()
     assert "C2A_API_KEY" not in env
     assert "OTHER_TOKEN" not in env
+
+
+def test_validation_stage_consumes_command_execution_facts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "convert2aidoku.validator.execute_command",
+        lambda *_args, **_kwargs: CommandResult(
+            command=("cargo", "check"),
+            returncode=1,
+            stdout="compiler output",
+            stderr="compiler error",
+            duration_seconds=1.25,
+        ),
+    )
+
+    stage = _run_stage(
+        "cargo-check",
+        StageKind.CHECK,
+        ["cargo", "check"],
+        tmp_path,
+        600,
+    )
+
+    assert not stage.ok
+    assert stage.command == ["cargo", "check"]
+    assert stage.output == "compiler output\ncompiler error"
+    assert stage.duration_seconds == 1.25
 
 
 @pytest.mark.parametrize(

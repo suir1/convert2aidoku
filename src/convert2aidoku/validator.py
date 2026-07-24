@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import time
 import tomllib
 from collections.abc import Callable
@@ -12,11 +11,12 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from .command_execution import command_environment, execute_command
 from .constants import BLOCKED_OUTPUT_MARKERS
 from .errors import InputError, SecurityError
 from .models import StageKind, ValidationResult, ValidationStage
 from .scaffold import read_generated_files, validate_generated_content
-from .toolchain import find_tool, tool_environment
+from .toolchain import find_tool
 
 _BLOCKED_HTTP_STATUSES = {403, 429, 503, 521, 522, 523, 524}
 _CHALLENGE_BODY_MARKERS = (
@@ -100,7 +100,7 @@ def _resolve_proxy(proxy: str | None) -> str | None:
 
 
 def _network_environment(proxy: str | None) -> dict[str, str]:
-    env = tool_environment()
+    env = command_environment()
     if proxy:
         for name in (
             "HTTP_PROXY",
@@ -122,39 +122,18 @@ def _run_stage(
     timeout: int,
     environment: dict[str, str] | None = None,
 ) -> ValidationStage:
-    started = time.monotonic()
-    try:
-        result = subprocess.run(
-            command,
-            cwd=cwd,
-            env=environment if environment is not None else tool_environment(),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-        output = _trim_output((result.stdout + "\n" + result.stderr).strip())
-        ok = result.returncode == 0
-        return ValidationStage(
-            name=name,
-            kind=kind,
-            ok=ok,
-            command=command,
-            output=output,
-            duration_seconds=time.monotonic() - started,
-            blocked=not ok and name == "core-live-smoke" and _is_blocked(output),
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        output = str(exc)
-        return ValidationStage(
-            name=name,
-            kind=kind,
-            ok=False,
-            command=command,
-            output=output,
-            duration_seconds=time.monotonic() - started,
-            blocked=name == "core-live-smoke" and _is_blocked(output),
-        )
+    result = execute_command(command, cwd=cwd, timeout=timeout, environment=environment)
+    output = result.error if result.failure is not None else result.stdout + "\n" + result.stderr
+    output = _trim_output(output.strip())
+    return ValidationStage(
+        name=name,
+        kind=kind,
+        ok=result.ok,
+        command=command,
+        output=output,
+        duration_seconds=result.duration_seconds,
+        blocked=not result.ok and name == "core-live-smoke" and _is_blocked(output),
+    )
 
 
 def _generated_safety_stage(project: Path) -> ValidationStage:

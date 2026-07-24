@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from convert2aidoku import ingest
+from convert2aidoku.command_execution import CommandFailure, CommandResult
 from convert2aidoku.errors import InputError
 from convert2aidoku.ingest import (
     collect_source_files,
@@ -12,6 +13,26 @@ from convert2aidoku.ingest import (
 )
 
 DECOMPILED_APK_FIXTURE = Path(__file__).parent / "fixtures" / "decompiled_apk"
+
+
+def _command_result(
+    command: list[str],
+    *,
+    returncode: int | None = 0,
+    stdout: str = "",
+    stderr: str = "",
+    failure: CommandFailure | None = None,
+    error: str = "",
+) -> CommandResult:
+    return CommandResult(
+        command=tuple(command),
+        returncode=returncode,
+        stdout=stdout,
+        stderr=stderr,
+        duration_seconds=0.1,
+        failure=failure,
+        error=error,
+    )
 
 
 def test_parse_github_module_url() -> None:
@@ -81,3 +102,57 @@ def test_resolves_apk_with_mocked_jadx(tmp_path: Path, monkeypatch: pytest.Monke
     assert any(path.endswith("CopyManga.java") for path in paths)
     main = next(item for item in files if item.path.endswith("CopyManga.java"))
     assert "compiler noise" not in main.content
+
+
+def test_git_execution_error_keeps_input_domain_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        ingest,
+        "execute_command",
+        lambda command, **_kwargs: _command_result(
+            command,
+            returncode=None,
+            failure="timeout",
+            error="Command timed out after 120 seconds",
+        ),
+    )
+
+    with pytest.raises(InputError, match="unable to run git: Command timed out"):
+        ingest._run_git(["clone", "https://example.com/repo.git"])
+
+
+def test_git_nonzero_exit_keeps_stderr_diagnostic(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        ingest,
+        "execute_command",
+        lambda command, **_kwargs: _command_result(
+            command,
+            returncode=128,
+            stderr="fatal: repository not found",
+        ),
+    )
+
+    with pytest.raises(InputError, match="git command failed: fatal: repository not found"):
+        ingest._run_git(["clone", "https://example.com/repo.git"])
+
+
+def test_jadx_nonzero_exit_keeps_bounded_input_diagnostic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ingest.shutil, "which", lambda _name: "/usr/local/bin/jadx")
+    monkeypatch.setattr(
+        ingest,
+        "execute_command",
+        lambda command, **_kwargs: _command_result(
+            command,
+            returncode=1,
+            stderr="prefix " + "x" * 4_100,
+        ),
+    )
+
+    with pytest.raises(InputError) as failure:
+        ingest._run_jadx(tmp_path / "input.apk", tmp_path / "decompiled")
+
+    assert str(failure.value).startswith("JADX failed to decompile the APK: ")
+    assert "prefix" not in str(failure.value)
+    assert len(str(failure.value).removeprefix("JADX failed to decompile the APK: ")) == 4_000

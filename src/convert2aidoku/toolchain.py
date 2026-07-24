@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import platform
 import shutil
-import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -11,6 +10,7 @@ from pathlib import Path
 
 import httpx
 
+from .command_execution import command_environment, execute_command
 from .constants import AIDOKU_RS_REPOSITORY, AIDOKU_RS_REV
 from .errors import ToolchainError
 
@@ -23,46 +23,16 @@ class ToolStatus:
     detail: str = ""
 
 
-def cargo_home_bin() -> Path:
-    return Path(os.getenv("CARGO_HOME", Path.home() / ".cargo")) / "bin"
-
-
-def tool_environment() -> dict[str, str]:
-    env = os.environ.copy()
-    # Generated Rust and third-party build scripts must never inherit provider
-    # credentials.  The AI client reads the key in-process; cargo/rustup/aidoku
-    # have no reason to receive it.
-    for name in tuple(env):
-        upper = name.upper()
-        if name == "C2A_API_KEY" or any(
-            marker in upper for marker in ("API_KEY", "SECRET", "TOKEN", "PASSWORD")
-        ):
-            env.pop(name, None)
-    cargo_bin = str(cargo_home_bin())
-    path_parts = env.get("PATH", "").split(os.pathsep)
-    if cargo_bin not in path_parts:
-        env["PATH"] = cargo_bin + os.pathsep + env.get("PATH", "")
-    return env
-
-
 def find_tool(name: str) -> str | None:
-    return shutil.which(name, path=tool_environment().get("PATH"))
+    return shutil.which(name, path=command_environment().get("PATH"))
 
 
 def _command_output(command: list[str]) -> tuple[bool, str]:
-    try:
-        result = subprocess.run(
-            command,
-            env=tool_environment(),
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return False, str(exc)
+    result = execute_command(command, timeout=30)
+    if result.failure is not None:
+        return False, result.error
     output = (result.stdout or result.stderr).strip()
-    return result.returncode == 0, output
+    return result.ok, output
 
 
 def doctor() -> list[ToolStatus]:
@@ -112,17 +82,10 @@ def doctor() -> list[ToolStatus]:
 
 
 def _run_setup(command: list[str], *, timeout: int = 1_200) -> None:
-    try:
-        result = subprocess.run(
-            command,
-            env=tool_environment(),
-            check=False,
-            text=True,
-            timeout=timeout,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise ToolchainError(f"setup command failed to run: {command[0]}: {exc}") from exc
-    if result.returncode != 0:
+    result = execute_command(command, timeout=timeout, capture_output=False)
+    if result.failure is not None:
+        raise ToolchainError(f"setup command failed to run: {command[0]}: {result.error}")
+    if not result.ok:
         raise ToolchainError(f"setup command failed ({result.returncode}): {' '.join(command)}")
 
 
