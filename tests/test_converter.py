@@ -14,6 +14,7 @@ from convert2aidoku.converter import (
 )
 from convert2aidoku.errors import AIProviderError
 from convert2aidoku.ingest import resolve_source
+from convert2aidoku.live_validation_evidence import LiveValidationEvidence
 from convert2aidoku.manifest_contract import (
     ContractDiagnostic,
     ContractEvaluation,
@@ -1124,11 +1125,12 @@ def test_blocked_validation_repairs_only_when_contract_has_gaps() -> None:
     assert _should_repair(validation, ["relative URL gap"], live=True)
 
 
-def test_mycomic_repair_diagnostics_distinguish_browser_and_runner() -> None:
+def test_repair_diagnostics_include_live_validation_evidence(monkeypatch) -> None:
     with resolve_source(str(FIXTURE)) as resolved:
         ir = analyze_source(resolved)
-    ir = ir.model_copy(
-        update={"metadata": ir.metadata.model_copy(update={"source_id": "zh.mycomic"})}
+    monkeypatch.setattr(
+        "convert2aidoku.converter.live_validation_evidence",
+        lambda _ir: LiveValidationEvidence(repair_context="benchmark context"),
     )
 
     diagnostics = _repair_diagnostics(
@@ -1137,25 +1139,8 @@ def test_mycomic_repair_diagnostics_distinguish_browser_and_runner() -> None:
         ["relative URL gap"],
     )
 
-    assert "/comics?sort=-views" in diagnostics
-    assert "/comics/54348" in diagnostics
-    assert "/chapters/794527" in diagnostics
-    assert "does not share the browser" in diagnostics
-
-
-def test_copymanga_repair_diagnostics_include_public_api_headers() -> None:
-    with resolve_source(str(FIXTURE)) as resolved:
-        ir = analyze_source(resolved)
-    ir = ir.model_copy(
-        update={"metadata": ir.metadata.model_copy(update={"source_id": "zh.copymanga"})}
-    )
-
-    diagnostics = _repair_diagnostics(ir, ValidationResult(build_ok=True), [])
-
-    assert "mapi.copy20.com/api/v3/comic2/<path>" in diagnostics
-    assert "Version: 2025.11.21" in diagnostics
-    assert "custom HTTP/API code 210" in diagnostics
-    assert "&theme=<selected path_word>" in diagnostics
+    assert "benchmark context" in diagnostics
+    assert "relative URL gap" in diagnostics
 
 
 def test_compiler_diagnostics_produce_bounded_source_excerpts(tmp_path: Path) -> None:
@@ -1230,49 +1215,3 @@ def test_repair_patch_cannot_edit_text_outside_supplied_excerpts() -> None:
             patch,
             [{"path": "src/lib.rs", "content": "safe();"}],
         )
-
-
-def test_live_validated_setting_default_stays_inside_generated_allowlist() -> None:
-    with resolve_source(str(FIXTURE)) as resolved:
-        ir = analyze_source(resolved)
-    ir = ir.model_copy(
-        update={
-            "metadata": ir.metadata.model_copy(update={"source_id": "zh.copymanga"}),
-            "capabilities": list(set(ir.capabilities) | {Capability.DYNAMIC_BASE_URLS}),
-        }
-    )
-
-    def manifest(values: list[str]) -> GenerationManifest:
-        settings = [
-            {
-                "type": "group",
-                "items": [
-                    {
-                        "type": "select",
-                        "key": "v2.pref.api_domain",
-                        "titles": values,
-                        "values": values,
-                        "default": values[0],
-                    }
-                ],
-            }
-        ]
-        return generation_manifest(
-            RUST_SOURCE,
-            resources={"res/settings.json": json.dumps(settings)},
-        )
-
-    overrides = {"v2.pref.api_domain": "mapi.copy20.com"}
-    allowed = GeneratedResources(manifest(["api.mangacopy.com", "mapi.copy20.com"])).with_defaults(
-        setting_overrides=overrides
-    )
-    rejected = GeneratedResources(manifest(["api.mangacopy.com"])).with_defaults(
-        setting_overrides=overrides
-    )
-
-    allowed_settings = json.loads(next(x.content for x in allowed.files if x.path.endswith("json")))
-    rejected_settings = json.loads(
-        next(x.content for x in rejected.files if x.path.endswith("json"))
-    )
-    assert allowed_settings[0]["items"][0]["default"] == "mapi.copy20.com"
-    assert rejected_settings[0]["items"][0]["default"] == "api.mangacopy.com"

@@ -56,6 +56,10 @@ _Avoid_: Shared fixture state, convenience helper
 The ordered fail-fast execution and recording policy for toolchain, build, package, safety, and live stages that produces a **Validation Result**.
 _Avoid_: Command list, subprocess loop
 
+**Live Validation Evidence**:
+Source-specific benchmark observations collected outside generation that may enrich repair diagnostics or prefer a value already present in a finite generated setting allowlist.
+_Avoid_: Source hacks, hardcoded fixes, proof of runner connectivity
+
 **Command Execution**:
 The normalized facts produced by running one external command, including its safe environment, working directory, timeout, output, exit status, and duration.
 _Avoid_: Subprocess result, command helper
@@ -99,6 +103,7 @@ _Avoid_: Log
 - Each **Conversion Round** evaluates one effective **Generation Manifest** and records its generated files, contract gaps, and **Validation Result** in the **Checkpoint**.
 - Each **Test Scenario** creates new objects and directories so one test cannot mutate another test's defaults.
 - One **Validation Plan** evaluates one materialized **Generated Source** and produces one ordered **Validation Result**.
+- One **SourceIR** may resolve **Live Validation Evidence**; it cannot invent behavior, bypass a generated allowlist, or by itself prove live verification.
 - Git and JADX Input Source ingestion, toolchain operations, and each **Validation Plan** command consume the same **Command Execution** facts while retaining their own domain error policy.
 - One effective **Generation Manifest** materializes one **Generated Source**.
 - One **Generated Source Metadata** document describes one **Generated Source** and projects host compatibility requirements from its effective **Generation Manifest**.
