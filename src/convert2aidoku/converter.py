@@ -1,18 +1,16 @@
 from __future__ import annotations
 
-import shutil
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .ai import AIResult, OpenAICompatibleClient, ai_round
-from .analyzer import analyze_source
 from .checkpoint_store import CheckpointStore, ManifestWrite
 from .config import AISettings
 from .conversion_completion import ConversionOutcome, complete_conversion
+from .conversion_intake import ConversionIntake
 from .errors import InputError
 from .generated_source_metadata import GeneratedSourceMetadata
-from .ingest import resolve_source
 from .live_validation_evidence import live_validation_evidence
 from .manifest_contract import ContractEvaluation, evaluate_manifest_contract
 from .models import (
@@ -25,25 +23,9 @@ from .models import (
     ValidationResult,
 )
 from .reports import classify_status, write_report
-from .scaffold import (
-    apply_generation_manifest,
-    create_scaffold,
-)
+from .scaffold import apply_generation_manifest
 from .targeted_repair import TargetedRepair, repair_required
 from .validator import validate_project
-
-
-def _prepare_output(output: Path, *, force: bool) -> None:
-    if output.exists():
-        if not force:
-            raise InputError(f"output already exists: {output}; pass --force to replace it")
-        if output.is_symlink():
-            raise InputError(f"refusing to replace a symbolic-link output: {output}")
-    output.parent.mkdir(parents=True, exist_ok=True)
-
-
-def _workspace_path(output: Path) -> Path:
-    return output.parent / f".{output.name}.c2a-work"
 
 
 @dataclass
@@ -154,68 +136,6 @@ class _ConversionRoundRunner:
                 self.accept(repair.request(client), purpose="repair")
 
 
-def _refresh_resume_source_ir(
-    ir: SourceIR,
-    *,
-    input_ref: str,
-    store: CheckpointStore,
-) -> SourceIR:
-    if ir.schema_version >= 2:
-        return ir
-    with resolve_source(input_ref) as resolved:
-        refreshed = analyze_source(resolved)
-    if refreshed.metadata.source_id != ir.metadata.source_id:
-        raise InputError(
-            "refreshed resume input changed source id from "
-            f"{ir.metadata.source_id!r} to {refreshed.metadata.source_id!r}"
-        )
-    store.commit(source_ir=refreshed)
-    return refreshed
-
-
-def _bump_completed_resume_version(store: CheckpointStore, ir: SourceIR) -> SourceIR:
-    project = store.project
-    try:
-        source = GeneratedSourceMetadata.load(project).with_bumped_version(ir.metadata.version)
-        version = source.version
-        source.write(project)
-    except (OSError, ValueError) as exc:
-        raise InputError(f"unable to bump installed source version: {exc}") from exc
-    bumped = ir.model_copy(
-        update={
-            "metadata": ir.metadata.model_copy(update={"version": version}),
-        }
-    )
-    store.commit(source_ir=bumped)
-    return bumped
-
-
-def _check_resume_compatibility(
-    checkpoint: ConversionCheckpoint,
-    *,
-    input_ref: str,
-    output: Path,
-    settings: AISettings,
-    query: str | None,
-    live: bool,
-) -> None:
-    mismatches = []
-    if checkpoint.input_ref != input_ref:
-        mismatches.append("input")
-    if checkpoint.output != str(output):
-        mismatches.append("output")
-    if checkpoint.provider_base_url.rstrip("/") != settings.base_url.rstrip("/"):
-        mismatches.append("base URL")
-    if checkpoint.model != settings.model:
-        mismatches.append("model")
-    if checkpoint.query != query:
-        mismatches.append("query")
-    if checkpoint.live != live:
-        mismatches.append("live mode")
-    if mismatches:
-        raise InputError("resume options do not match the saved run: " + ", ".join(mismatches))
-
-
 def convert_source(
     input_ref: str,
     *,
@@ -227,66 +147,19 @@ def convert_source(
     proxy: str | None = None,
     resume: bool = False,
 ) -> ConversionOutcome:
-    output = output.expanduser().absolute()
-    if output.exists() and output.is_symlink():
-        raise InputError(f"refusing to replace a symbolic-link output: {output}")
-    workspace = _workspace_path(output)
-    store = CheckpointStore(workspace)
-    project = store.project
-
-    if resume:
-        store, checkpoint = CheckpointStore.resume(
-            workspace,
-            installed_output=output,
-        )
-        _check_resume_compatibility(
-            checkpoint,
-            input_ref=input_ref,
-            output=output,
-            settings=settings,
-            query=query,
-            live=live,
-        )
-        if not project.is_dir() or project.is_symlink():
-            raise InputError(f"resume staging project is missing or unsafe: {project}")
-        ir = store.read_source_ir()
-        ir = _refresh_resume_source_ir(
-            ir,
-            input_ref=input_ref,
-            store=store,
-        )
-        if checkpoint.phase == "complete":
-            ir = _bump_completed_resume_version(store, ir)
-    else:
-        _prepare_output(output, force=force)
-        if workspace.exists() or workspace.is_symlink():
-            raise InputError(
-                f"conversion workspace already exists: {workspace}; pass --resume to continue it"
-            )
-        workspace.mkdir()
-        try:
-            with resolve_source(input_ref) as resolved:
-                ir = analyze_source(resolved)
-                create_scaffold(project, ir, resolved)
-        except BaseException:
-            shutil.rmtree(workspace, ignore_errors=True)
-            raise
-        checkpoint = ConversionCheckpoint(
-            input_ref=input_ref,
-            output=str(output),
-            provider_base_url=settings.base_url,
-            model=settings.model,
-            query=query,
-            live=live,
-            force=force,
-            warnings=list(ir.warnings),
-            unsupported_features=list(ir.unsupported_features),
-        )
-        store = CheckpointStore.initialize(
-            workspace,
-            source_ir=ir,
-            checkpoint=checkpoint,
-        )
+    intake = ConversionIntake.prepare(
+        input_ref,
+        output=output,
+        settings=settings,
+        query=query,
+        live=live,
+        force=force,
+        resume=resume,
+    )
+    store = intake.store
+    project = intake.project
+    ir = intake.source_ir
+    checkpoint = intake.checkpoint
 
     rounds = _ConversionRoundRunner(
         ir=ir,

@@ -185,7 +185,7 @@ def test_interrupted_conversion_resumes_saved_manifest_without_regeneration(
 def test_repair_preserves_source_ir_required_resources(tmp_path: Path, monkeypatch) -> None:
     original_analyze = analyze_source
     monkeypatch.setattr(
-        "convert2aidoku.converter.analyze_source",
+        "convert2aidoku.conversion_intake.analyze_source",
         lambda resolved: original_analyze(resolved).model_copy(
             update={"capabilities": [Capability.FILTERS, Capability.SETTINGS]}
         ),

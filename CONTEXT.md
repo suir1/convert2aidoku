@@ -56,6 +56,10 @@ _Avoid_: Raw AI response, model call
 One materialization, contract evaluation, validation, and **Checkpoint** update for the current effective **Generation Manifest**.
 _Avoid_: AI call, repair attempt
 
+**Conversion Intake**:
+The fresh-or-resume preparation that validates output state and saved options, creates or restores the workspace, and returns its **Checkpoint Store**, **SourceIR**, and **Checkpoint** without persisting provider credentials.
+_Avoid_: Workspace helpers, resume branch, conversion setup
+
 **Conversion Completion**:
 The terminal report, **Checkpoint**, audit publication, and atomic install policy that either installs a completed **Generated Source** or leaves it in a resumable workspace.
 _Avoid_: Report builder, output move helper
@@ -114,6 +118,7 @@ _Avoid_: Log
 - One **Dependency Policy** evaluates every **Generation Manifest** before provider acceptance, **Generated Source** materialization, and **Generation Manifest Contract** evaluation.
 - Each AI round is produced by one successful **Typed AI Exchange**.
 - Each **Conversion Round** evaluates one effective **Generation Manifest** and records its generated files, contract gaps, and **Validation Result** in the **Checkpoint**.
+- One **Conversion Intake** prepares exactly one fresh or resumed conversion state; failed fresh preparation removes its incomplete workspace before returning an error.
 - One **Conversion Completion** consumes the final **Validation Result**, commits the terminal **Checkpoint** and audit before installing the **Generated Source**, and preserves resumable failures in the workspace.
 - Each **Test Scenario** creates new objects and directories so one test cannot mutate another test's defaults.
 - One **Validation Plan** evaluates one materialized **Generated Source** and produces one ordered **Validation Result**.
