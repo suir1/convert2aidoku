@@ -12,6 +12,10 @@ _Avoid_: Source
 The deterministic, provider-independent description recovered from an **Input Source**.
 _Avoid_: Parsed source, analysis result
 
+**SourceIR Analysis**:
+The format dispatch that sends a resolved **Input Source** to exactly one Kotlin Module or Decompiled APK Adapter and constructs its **SourceIR**.
+_Avoid_: Analyzer helpers, metadata parser
+
 **Decompiled Inspection**:
 The Android manifest facts and normalized JADX Java structure recovered from a decompiled APK **Input Source** for both **SourceIR** analysis and generation evidence.
 _Avoid_: Java cleanup helpers, APK parser output
@@ -94,7 +98,7 @@ _Avoid_: Log
 
 ## Relationships
 
-- One **Input Source** produces one **SourceIR** per conversion.
+- One **Input Source** passes through exactly one **SourceIR Analysis** Adapter and produces one **SourceIR** per conversion.
 - A decompiled APK **Input Source** yields one shared **Decompiled Inspection** whose facts feed **SourceIR** analysis and whose behavior projection feeds generation evidence.
 - One **Input Capability Recognition** classifies the Kotlin or Decompiled Java content of an **Input Source** into **SourceIR** capabilities and unsupported cryptography facts.
 - One **Checkpoint** records one or more **Generation Manifests** and identifies exactly one current manifest.
