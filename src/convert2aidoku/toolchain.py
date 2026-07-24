@@ -11,7 +11,7 @@ from pathlib import Path
 import httpx
 
 from .command_execution import command_environment, execute_command
-from .constants import AIDOKU_RS_REPOSITORY, AIDOKU_RS_REV
+from .dependency_policy import AIDOKU_RS_REPOSITORY, AIDOKU_RS_REV
 from .errors import ToolchainError
 
 

@@ -103,12 +103,12 @@ Mapping rules:
   implement features explicitly listed as excluded authenticated options (login, bookcase, or
   comments). Public endpoints and headers used by those core operations remain mandatory.
 - For a source explicitly classified with `encrypted_json`, AES-CBC with PKCS#5/PKCS#7 padding is
-  supported through the pinned `aes` and `cbc` crates. Preserve the exact key derivation, IV
+  supported through the pinned Dependency Policy crates. Preserve the exact key derivation, IV
   extraction, ciphertext encoding, and padding from the input. Use pinned `hex` or `base64` for
   decoding; never guess keys, IVs, or transformations and never execute site-provided code.
 - For a source explicitly classified with `triple_des_cbc`, preserve its exact 24-byte DESede key,
   8-byte IV, payload ordering, timestamp units, base64 variant, and PKCS#5/PKCS#7 padding. Use the
-  pinned `des`, `cbc`, and `base64` crates. If the source creates a random alphanumeric request key,
+  pinned Dependency Policy crates. If the source creates a random alphanumeric request key,
   generate the same length and alphabet locally; do not replace it with a fixed secret or accept
   cryptographic material from the network.
   `aidoku::imports::std::current_date()` is available and returns Unix seconds; multiply by 1000
@@ -251,8 +251,7 @@ Mapping rules:
 
 The tool creates Cargo metadata, source metadata, the icon, and live smoke tests. Do not generate
 those files. Only return allowed Rust files plus optional filters/settings JSON.
-Dependency requests may only use these exact names: `serde`, `serde_json`, `regex`, `base64`,
-`aes`, `cbc`, or `hex`.
+{{DEPENDENCY_POLICY}}
 When using `#[derive(Deserialize)]`, request the allowlisted `serde` dependency as well (derive
 expansion needs the external `serde` crate even if the import uses `aidoku::serde`). JSON parsing
 additionally requires the explicit `serde_json` request and `serde_json::from_str`.

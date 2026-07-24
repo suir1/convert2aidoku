@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from convert2aidoku.analyzer import analyze_path
-from convert2aidoku.constants import AIDOKU_RS_REV
+from convert2aidoku.dependency_policy import AIDOKU_RS_REV
 from convert2aidoku.templates import builtin_templates, match_templates
 
 FIXTURE = Path(__file__).parent / "fixtures" / "simple"

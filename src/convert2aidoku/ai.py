@@ -14,12 +14,11 @@ import httpx
 from pydantic import BaseModel, ValidationError
 
 from .config import AISettings
-from .constants import DEPENDENCY_SPECS, MAX_AI_RESPONSE_BYTES
+from .constants import MAX_AI_RESPONSE_BYTES
+from .dependency_policy import evaluate_dependency_policy, render_dependency_policy
 from .errors import AIProviderError
 from .generation_context import build_generation_context
 from .models import AIRound, AIUsage, GenerationManifest, RepairPatch, SourceIR
-
-_ALLOWED_DEPENDENCIES = frozenset(DEPENDENCY_SPECS)
 
 _PATCH_SCOPES = {
     "compiler": (
@@ -72,11 +71,12 @@ class AICheckResult(BaseModel):
 
 
 def _contract_text() -> str:
-    return (
+    contract = (
         resource_files("convert2aidoku")
         .joinpath("resources", "aidoku_contract.md")
         .read_text(encoding="utf-8")
     )
+    return render_dependency_policy(contract)
 
 
 def _strip_fences(content: str) -> str:
@@ -105,10 +105,11 @@ def _strict_model_schema(model: type[BaseModel]) -> dict[str, Any]:
 
 
 def _validate_manifest_dependencies(manifest: GenerationManifest) -> None:
-    invalid = sorted({item.name for item in manifest.dependencies} - _ALLOWED_DEPENDENCIES)
-    if invalid:
+    evaluation = evaluate_dependency_policy(item.name for item in manifest.dependencies)
+    if evaluation.disallowed:
         raise ValueError(
-            "generated source requested disallowed dependencies: " + ", ".join(invalid)
+            "generated source requested disallowed dependencies: "
+            + ", ".join(evaluation.disallowed)
         )
 
 

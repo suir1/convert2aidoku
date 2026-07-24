@@ -2,17 +2,19 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from importlib.resources import files as resource_files
 from pathlib import Path
 from typing import Any
 
 from jinja2 import Environment, StrictUndefined
 
-from .constants import (
+from .constants import MAX_GENERATED_FILE_CHARS
+from .dependency_policy import (
     AIDOKU_RS_REPOSITORY,
     AIDOKU_RS_REV,
-    DEPENDENCY_SPECS,
-    MAX_GENERATED_FILE_CHARS,
+    PinnedDependency,
+    evaluate_dependency_policy,
 )
 from .errors import SecurityError
 from .generated_source_metadata import GeneratedSourceMetadata
@@ -204,17 +206,14 @@ def _environment() -> Environment:
     )
 
 
-def _dependency_context(names: set[str]) -> dict[str, dict[str, Any]]:
-    dependencies: dict[str, dict[str, Any]] = {}
-    for name in sorted(names):
-        if name not in DEPENDENCY_SPECS:
-            raise SecurityError(f"generated source requested disallowed dependency: {name}")
-        spec = DEPENDENCY_SPECS[name]
-        dependencies[name] = {
-            "version": str(spec["version"]),
-            "features": list(spec.get("features", [])),
-        }
-    return dependencies
+def _dependency_context(names: set[str]) -> Mapping[str, PinnedDependency]:
+    evaluation = evaluate_dependency_policy(names)
+    if evaluation.disallowed:
+        noun = "dependency" if len(evaluation.disallowed) == 1 else "dependencies"
+        raise SecurityError(
+            f"generated source requested disallowed {noun}: " + ", ".join(evaluation.disallowed)
+        )
+    return evaluation.cargo_dependencies
 
 
 def _write_cargo(

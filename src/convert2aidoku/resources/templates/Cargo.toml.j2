@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 aidoku = { git = "{{ aidoku_repository }}", rev = "{{ aidoku_rev }}", features = ["json"] }
 {% for name, spec in dependencies.items() %}
-{{ name }} = { version = "={{ spec.version }}", default-features = false{% if spec.features %}, features = [{% for feature in spec.features %}"{{ feature }}"{% if not loop.last %}, {% endif %}{% endfor %}]{% endif %} }
+{{ name }} = { version = "={{ spec.version }}", default-features = {% if spec.default_features %}true{% else %}false{% endif %}{% if spec.features %}, features = [{% for feature in spec.features %}"{{ feature }}"{% if not loop.last %}, {% endif %}{% endfor %}]{% endif %} }
 {% endfor %}
 
 [dev-dependencies]

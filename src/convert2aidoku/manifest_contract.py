@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Literal
 
 from .constants import MAX_AI_DIAGNOSTIC_CHARS
+from .dependency_policy import evaluate_dependency_policy
 from .models import Capability, GeneratedResources, GenerationManifest, SourceIR
 from .rust_inspection import RustInspection
 
@@ -62,6 +63,10 @@ def evaluate_manifest_contract(
     resources = GeneratedResources(manifest)
     traits = set(manifest.implemented_traits)
     dependencies = {item.name for item in manifest.dependencies}
+    dependency_evaluation = evaluate_dependency_policy(
+        dependencies,
+        capabilities=ir.capabilities,
+    )
     rust_files = [item for item in manifest.files if item.path.endswith(".rs")]
     rust_content = "\n".join(item.content for item in rust_files)
     rust = RustInspection(item.content for item in rust_files)
@@ -154,8 +159,8 @@ def evaluate_manifest_contract(
             )
     if Capability.DEEP_LINKS in ir.capabilities and "DeepLinkHandler" not in traits:
         add("source declares deep links but generated no DeepLinkHandler")
-    if Capability.JSON_API in ir.capabilities and "serde" not in dependencies:
-        add("JSON API source generated no pinned serde dependency")
+    for message in dependency_evaluation.diagnostics:
+        add(message)
     update_uses_combined_helper = (
         rust.function_contains("get_manga_update", "needs_details")
         and rust.function_contains("get_manga_update", "needs_chapters")
@@ -225,29 +230,13 @@ def evaluate_manifest_contract(
             "does not compile a regex and pull regex runtime cost into the WASM hot path",
             "chapter_regex",
         )
-    if Capability.ENCRYPTED_JSON in ir.capabilities:
-        missing_crypto = sorted({"aes", "cbc", "serde", "serde_json"} - dependencies)
-        if missing_crypto:
-            add(
-                "encrypted JSON source omitted required pinned dependencies: "
-                + ", ".join(missing_crypto)
-            )
-        if not dependencies.intersection({"base64", "hex"}):
-            add("encrypted JSON source requested neither hex nor base64 decoding")
-    if Capability.TRIPLE_DES_CBC in ir.capabilities:
-        missing_crypto = sorted({"des", "cbc", "base64"} - dependencies)
-        if missing_crypto:
-            add(
-                "3DES-CBC request signing omitted required pinned dependencies: "
-                + ", ".join(missing_crypto)
-            )
-        if "current_date" not in rust_content or re.search(
-            r"\blet\s+time\s*=\s*\"0\"", rust_content
-        ):
-            add(
-                "3DES-CBC request signing uses no live millisecond Unix timestamp; "
-                "call aidoku::imports::std::current_date() and multiply its seconds by 1000"
-            )
+    if Capability.TRIPLE_DES_CBC in ir.capabilities and (
+        "current_date" not in rust_content or re.search(r"\blet\s+time\s*=\s*\"0\"", rust_content)
+    ):
+        add(
+            "3DES-CBC request signing uses no live millisecond Unix timestamp; "
+            "call aidoku::imports::std::current_date() and multiply its seconds by 1000"
+        )
     if Capability.DYNAMIC_BASE_URLS in ir.capabilities:
         if not resources.has(GeneratedResources.SETTINGS):
             add("dynamic base URL source generated no res/settings.json")

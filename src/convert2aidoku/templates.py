@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .constants import AIDOKU_RS_REV
+from .dependency_policy import AIDOKU_RS_REV
 from .models import Capability, SourceIR, TemplateMatch, TemplateSlot, TemplateSpec
 
 _PROVENANCE = (
