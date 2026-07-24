@@ -3,9 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from convert2aidoku.ai import AIResult
 from convert2aidoku.analyzer import analyze_source
-from convert2aidoku.config import AISettings
 from convert2aidoku.converter import (
     _apply_repair_patch,
     _diagnostic_file_excerpts,
@@ -40,7 +38,13 @@ from convert2aidoku.models import (
     ValidationResult,
     ValidationStage,
 )
-from tests.scenarios import conversion_settings, scaffold_project
+from tests.scenarios import (
+    ScriptedAICalls,
+    conversion_settings,
+    generation_manifest,
+    scaffold_project,
+    scripted_ai_client,
+)
 
 FIXTURE = Path(__file__).parent / "fixtures" / "simple"
 ENCRYPTED_API_FIXTURE = Path(__file__).parent / "fixtures" / "encrypted_api"
@@ -88,198 +92,39 @@ register_source!(Simple);
 """
 
 
-class FakeClient:
-    def __init__(self, settings: AISettings):
-        self.settings = settings
-
-    def __enter__(self) -> "FakeClient":
-        return self
-
-    def __exit__(self, *_: object) -> None:
-        return None
-
-    def generate(self, _ir: object) -> AIResult:
-        return AIResult(
-            value=GenerationManifest(
-                source_struct="Simple",
-                implemented_traits=["ListingProvider", "ImageRequestProvider"],
-                files=[
-                    GeneratedFile(path="src/lib.rs", content=RUST_SOURCE),
-                    GeneratedFile(path="res/filters.json", content="[]"),
-                    GeneratedFile(path="res/settings.json", content="[]"),
-                ],
-            ),
-            structured_output=True,
-        )
-
-    def repair(
-        self,
-        _ir: object,
-        *,
-        current_files: object,
-        diagnostics: str,
-        manifest_history: object | None = None,
-    ) -> AIResult:
-        return self.generate(_ir)
+def _baseline_generation() -> GenerationManifest:
+    return generation_manifest(
+        RUST_SOURCE,
+        traits=("ListingProvider", "ImageRequestProvider"),
+        resources={"res/filters.json": "[]", "res/settings.json": "[]"},
+    )
 
 
-class RepairingGapClient(FakeClient):
-    def generate(self, _ir: object) -> AIResult:
-        return AIResult(
-            value=GenerationManifest(
-                source_struct="Simple",
-                files=[GeneratedFile(path="src/lib.rs", content=RUST_SOURCE)],
-            ),
-            structured_output=True,
-        )
-
-    def repair(
-        self,
-        _ir: object,
-        *,
-        current_files: object,
-        diagnostics: str,
-        manifest_history: object | None = None,
-    ) -> AIResult:
-        return FakeClient.generate(self, _ir)
-
-
-class CountingClient(FakeClient):
-    generate_calls = 0
-
-    def generate(self, _ir: object) -> AIResult:
-        type(self).generate_calls += 1
-        return super().generate(_ir)
-
-
-class ResourceDroppingRepairClient(FakeClient):
-    def generate(self, _ir: object) -> AIResult:
-        result = super().generate(_ir)
-        return AIResult(
-            value=result.value.model_copy(
-                update={
-                    "files": [
-                        item for item in result.value.files if not item.path.startswith("res/")
-                    ]
-                    + [
-                        GeneratedFile(
-                            path="res/filters.json",
-                            content=(
-                                '[{"type":"select","id":"filter","options":["All"],"ids":["all"]}]'
-                            ),
-                        ),
-                        GeneratedFile(
-                            path="res/settings.json",
-                            content='[{"type":"group","title":"Settings","items":[]}]',
-                        ),
-                    ]
-                }
-            ),
-            structured_output=True,
-        )
-
-    def repair(
-        self,
-        _ir: object,
-        *,
-        current_files: object,
-        diagnostics: str,
-        manifest_history: object | None = None,
-    ) -> AIResult:
-        return AIResult(
-            value=GenerationManifest(
-                source_struct="Simple",
-                files=[GeneratedFile(path="src/lib.rs", content=RUST_SOURCE)],
-            ),
-            structured_output=True,
-        )
-
-
-class PatchFallbackClient(FakeClient):
-    patch_calls = 0
-    full_repair_calls = 0
-
-    def repair_patch(
-        self,
-        _ir: object,
-        *,
-        current_file_excerpts: object,
-        diagnostics: str,
-        scope: str = "compiler",
-    ) -> AIResult:
-        type(self).patch_calls += 1
-        assert scope == "compiler"
-        assert diagnostics
-        assert current_file_excerpts
-        raise AIProviderError("synthetic invalid patch")
-
-    def repair(
-        self,
-        _ir: object,
-        *,
-        current_files: object,
-        diagnostics: str,
-        manifest_history: object | None = None,
-    ) -> AIResult:
-        type(self).full_repair_calls += 1
-        return super().repair(
-            _ir,
-            current_files=current_files,
-            diagnostics=diagnostics,
-            manifest_history=manifest_history,
-        )
-
-
-class ContractPatchFallbackClient(PatchFallbackClient):
-    def generate(self, _ir: object) -> AIResult:
-        result = FakeClient.generate(self, _ir)
-        files = [
-            item.model_copy(
-                update={
-                    "content": (
-                        item.content
-                        + "\nfn fetch(url: String) -> Result<Response> {\n"
-                        + "Request::get(url)?.send()\n}\n"
-                    )
-                }
-            )
-            if item.path == "src/lib.rs"
-            else item
-            for item in result.value.files
-        ]
-        return result.with_value(result.value.model_copy(update={"files": files}))
-
-    def repair_patch(
-        self,
-        _ir: object,
-        *,
-        current_file_excerpts: object,
-        diagnostics: str,
-        scope: str = "compiler",
-    ) -> AIResult:
-        type(self).patch_calls += 1
-        assert scope == "contract"
-        assert "standard Kotlin HttpSource" in diagnostics
-        assert current_file_excerpts
-        raise AIProviderError("synthetic invalid contract patch")
-
-    def repair(
-        self,
-        _ir: object,
-        *,
-        current_files: object,
-        diagnostics: str,
-        manifest_history: object | None = None,
-    ) -> AIResult:
-        type(self).full_repair_calls += 1
-        return FakeClient.generate(self, _ir)
+def _install_ai_scenario(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    generation: GenerationManifest | None = None,
+    repair: GenerationManifest | None = None,
+    repair_patch: RepairPatch | BaseException | None = None,
+    patch_scope: str | None = None,
+    patch_diagnostic: str | None = None,
+) -> ScriptedAICalls:
+    adapter, calls = scripted_ai_client(
+        generation=generation or _baseline_generation(),
+        repair=repair,
+        repair_patch=repair_patch,
+        patch_scope=patch_scope,
+        patch_diagnostic=patch_diagnostic,
+    )
+    monkeypatch.setattr("convert2aidoku.converter.OpenAICompatibleClient", adapter)
+    return calls
 
 
 def test_conversion_orchestrates_atomic_output(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr("convert2aidoku.converter.OpenAICompatibleClient", FakeClient)
+    _install_ai_scenario(monkeypatch)
     monkeypatch.setattr(
         "convert2aidoku.converter.validate_project",
         lambda *_args, **_kwargs: ValidationResult(build_ok=True, package_ok=True, live_ok=True),
@@ -303,8 +148,7 @@ def test_interrupted_conversion_resumes_saved_manifest_without_regeneration(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    CountingClient.generate_calls = 0
-    monkeypatch.setattr("convert2aidoku.converter.OpenAICompatibleClient", CountingClient)
+    ai_calls = _install_ai_scenario(monkeypatch)
     validation_calls = 0
 
     def interrupted_validation(*_args, **_kwargs) -> ValidationResult:
@@ -337,7 +181,7 @@ def test_interrupted_conversion_resumes_saved_manifest_without_regeneration(
     )
 
     assert outcome.report.status is ConversionStatus.VERIFIED
-    assert CountingClient.generate_calls == 1
+    assert ai_calls.generate == 1
     assert (output / ".c2a" / "manifests" / "round-01.json").is_file()
     assert not workspace.exists()
 
@@ -350,9 +194,20 @@ def test_repair_preserves_source_ir_required_resources(tmp_path: Path, monkeypat
             update={"capabilities": [Capability.FILTERS, Capability.SETTINGS]}
         ),
     )
-    monkeypatch.setattr(
-        "convert2aidoku.converter.OpenAICompatibleClient",
-        ResourceDroppingRepairClient,
+
+    _install_ai_scenario(
+        monkeypatch,
+        generation=generation_manifest(
+            RUST_SOURCE,
+            traits=("ListingProvider", "ImageRequestProvider"),
+            resources={
+                "res/filters.json": (
+                    '[{"type":"select","id":"filter","options":["All"],"ids":["all"]}]'
+                ),
+                "res/settings.json": '[{"type":"group","title":"Settings","items":[]}]',
+            },
+        ),
+        repair=generation_manifest(RUST_SOURCE),
     )
     validations = iter(
         [
@@ -383,11 +238,10 @@ def test_targeted_patch_failure_falls_back_to_full_repair(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    PatchFallbackClient.patch_calls = 0
-    PatchFallbackClient.full_repair_calls = 0
-    monkeypatch.setattr(
-        "convert2aidoku.converter.OpenAICompatibleClient",
-        PatchFallbackClient,
+    ai_calls = _install_ai_scenario(
+        monkeypatch,
+        repair_patch=AIProviderError("synthetic invalid patch"),
+        patch_scope="compiler",
     )
     validations = iter(
         [
@@ -418,8 +272,8 @@ def test_targeted_patch_failure_falls_back_to_full_repair(
     )
 
     assert outcome.report.status is ConversionStatus.VERIFIED
-    assert PatchFallbackClient.patch_calls == 1
-    assert PatchFallbackClient.full_repair_calls == 1
+    assert ai_calls.repair_patch == 1
+    assert ai_calls.repair == 1
     assert len(outcome.report.ai_rounds) == 2
     assert any("targeted patch fallback" in warning for warning in outcome.report.warnings)
     checkpoint = ConversionCheckpoint.model_validate_json(
@@ -433,11 +287,19 @@ def test_contract_patch_failure_keeps_warning_and_round_order(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    ContractPatchFallbackClient.patch_calls = 0
-    ContractPatchFallbackClient.full_repair_calls = 0
-    monkeypatch.setattr(
-        "convert2aidoku.converter.OpenAICompatibleClient",
-        ContractPatchFallbackClient,
+    ai_calls = _install_ai_scenario(
+        monkeypatch,
+        generation=generation_manifest(
+            RUST_SOURCE
+            + "\nfn fetch(url: String) -> Result<Response> {\n"
+            + "Request::get(url)?.send()\n}\n",
+            traits=("ListingProvider", "ImageRequestProvider"),
+            resources={"res/filters.json": "[]", "res/settings.json": "[]"},
+        ),
+        repair=_baseline_generation(),
+        repair_patch=AIProviderError("synthetic invalid contract patch"),
+        patch_scope="contract",
+        patch_diagnostic="standard Kotlin HttpSource",
     )
     monkeypatch.setattr(
         "convert2aidoku.converter.validate_project",
@@ -457,14 +319,14 @@ def test_contract_patch_failure_keeps_warning_and_round_order(
     )
 
     assert outcome.report.status is ConversionStatus.VERIFIED
-    assert ContractPatchFallbackClient.patch_calls == 1
-    assert ContractPatchFallbackClient.full_repair_calls == 1
+    assert ai_calls.repair_patch == 1
+    assert ai_calls.repair == 1
     assert [round_.purpose for round_ in outcome.report.ai_rounds] == ["generate", "repair"]
     assert any("contract patch fallback" in warning for warning in outcome.report.warnings)
 
 
 def test_forced_failed_conversion_preserves_existing_output(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("convert2aidoku.converter.OpenAICompatibleClient", FakeClient)
+    _install_ai_scenario(monkeypatch)
     monkeypatch.setattr(
         "convert2aidoku.converter.validate_project",
         lambda *_args, **_kwargs: ValidationResult(),
@@ -485,7 +347,7 @@ def test_contract_incomplete_build_stays_in_resumable_workspace(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr("convert2aidoku.converter.OpenAICompatibleClient", FakeClient)
+    _install_ai_scenario(monkeypatch)
     monkeypatch.setattr(
         "convert2aidoku.converter.validate_project",
         lambda *_args, **_kwargs: ValidationResult(
@@ -519,7 +381,11 @@ def test_resolved_contract_gaps_are_not_reported_as_final_warnings(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr("convert2aidoku.converter.OpenAICompatibleClient", RepairingGapClient)
+    _install_ai_scenario(
+        monkeypatch,
+        generation=generation_manifest(RUST_SOURCE),
+        repair=_baseline_generation(),
+    )
     monkeypatch.setattr(
         "convert2aidoku.converter.validate_project",
         lambda *_args, **_kwargs: ValidationResult(
