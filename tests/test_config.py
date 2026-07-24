@@ -11,7 +11,7 @@ def test_loads_env_key_without_exposing_it(monkeypatch: pytest.MonkeyPatch) -> N
     settings = load_ai_settings(base_url="http://localhost/v1", model="model")
     assert settings.api_key.get_secret_value() == "secret-value"
     assert "secret-value" not in repr(settings)
-    assert settings.generation_reasoning_effort == ReasoningEffort.MEDIUM
+    assert settings.generation_reasoning_effort == ReasoningEffort.AUTO
     assert settings.repair_reasoning_effort == ReasoningEffort.LOW
 
 

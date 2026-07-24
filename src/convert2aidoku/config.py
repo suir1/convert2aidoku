@@ -12,6 +12,7 @@ from .errors import ConfigurationError
 
 
 class ReasoningEffort(StrEnum):
+    AUTO = "auto"
     OFF = "off"
     LOW = "low"
     MEDIUM = "medium"
@@ -24,7 +25,7 @@ class AISettings(BaseModel):
     api_key: SecretStr
     timeout_seconds: float = DEFAULT_AI_TIMEOUT_SECONDS
     max_repair_rounds: int = DEFAULT_MAX_REPAIR_ROUNDS
-    generation_reasoning_effort: ReasoningEffort = ReasoningEffort.MEDIUM
+    generation_reasoning_effort: ReasoningEffort = ReasoningEffort.AUTO
     repair_reasoning_effort: ReasoningEffort = ReasoningEffort.LOW
 
     @property
@@ -111,7 +112,7 @@ def load_ai_settings(
             generation_reasoning_effort,
             "C2A_GENERATION_REASONING_EFFORT",
             "generation_reasoning_effort",
-            ReasoningEffort.MEDIUM,
+            ReasoningEffort.AUTO,
         ),
         repair_reasoning_effort=reasoning_effort(
             repair_reasoning_effort,

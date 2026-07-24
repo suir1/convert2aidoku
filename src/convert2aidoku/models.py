@@ -471,6 +471,39 @@ class GeneratedResources:
                     defaults[key] = default
         return defaults
 
+    def with_source_filters(self, specs: list[SourceFilterSpec]) -> GenerationManifest:
+        if not specs:
+            return self._manifest
+        filters: list[dict[str, Any]] = []
+        for spec in specs:
+            values = [option.value for option in spec.options]
+            item: dict[str, Any] = {
+                "type": spec.kind,
+                "id": spec.id,
+                "title": spec.title,
+                "options": [option.title for option in spec.options],
+                "ids": values,
+            }
+            if spec.kind == "sort":
+                item.update(
+                    {
+                        "default": {
+                            "index": spec.default_index,
+                            "ascending": bool(spec.default_ascending),
+                        },
+                        "canAscend": True,
+                    }
+                )
+            else:
+                item["default"] = values[spec.default_index]
+            filters.append(item)
+        generated = GeneratedFile(
+            path=self.FILTERS,
+            content=json.dumps(filters, ensure_ascii=False),
+        )
+        files = [item for item in self._manifest.files if item.path != self.FILTERS]
+        return self._manifest.model_copy(update={"files": [*files, generated]})
+
     def filter_contract_gaps(
         self,
         specs: list[SourceFilterSpec],
@@ -717,7 +750,7 @@ class AIRound(BaseModel):
     round: int
     purpose: Literal["generate", "repair"]
     structured_output: bool
-    reasoning_effort: Literal["off", "low", "medium", "high"] | None = None
+    reasoning_effort: Literal["auto", "off", "low", "medium", "high"] | None = None
     usage: AIUsage | None = None
     warnings: list[str] = Field(default_factory=list)
 

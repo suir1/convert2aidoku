@@ -4,7 +4,13 @@ import pytest
 from pydantic import ValidationError
 
 from convert2aidoku.errors import SecurityError
-from convert2aidoku.models import GeneratedFile, GenerationManifest
+from convert2aidoku.models import (
+    GeneratedFile,
+    GeneratedResources,
+    GenerationManifest,
+    SourceFilterOption,
+    SourceFilterSpec,
+)
 
 
 @pytest.mark.parametrize(
@@ -39,6 +45,39 @@ def test_manifest_rejects_unknown_optional_trait() -> None:
             implemented_traits=["MangaProvider"],
             files=[GeneratedFile(path="src/lib.rs", content="#![no_std]")],
         )
+
+
+def test_static_filter_resource_is_built_from_source_ir_specs() -> None:
+    manifest = GenerationManifest(
+        source_struct="Source",
+        files=[GeneratedFile(path="src/lib.rs", content="#![no_std]")],
+    )
+    spec = SourceFilterSpec(
+        source_class="AudienceFilter",
+        id="audience",
+        title="Audience",
+        kind="select",
+        options=[
+            SourceFilterOption(title="Male", value="male"),
+            SourceFilterOption(title="Female", value="female"),
+        ],
+        default_index=0,
+    )
+
+    generated = GeneratedResources(manifest).with_source_filters([spec])
+
+    resource = next(item for item in generated.files if item.path == "res/filters.json")
+    filters = json.loads(resource.content)
+    assert filters == [
+        {
+            "type": "select",
+            "id": "audience",
+            "title": "Audience",
+            "options": ["Male", "Female"],
+            "ids": ["male", "female"],
+            "default": "male",
+        }
+    ]
 
 
 def test_filter_object_options_are_normalized_to_parallel_arrays() -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
@@ -9,6 +10,17 @@ from .errors import InputError
 from .models import SourceFile, SourceIR
 
 DEFAULT_GENERATION_EVIDENCE_CHARS = 110_000
+DEFAULT_SETTINGS_EVIDENCE_CHARS = 50_000
+_SETTING_DECLARATION = re.compile(
+    r"Preference|SharedPreferences|setupPreferenceScreen|initPreferences|"
+    r"\b(?:KEY|DEFAULT|ENTRIES|ENTRY_KEYS)\b|defaults_get|settings\.json",
+    re.IGNORECASE,
+)
+_SETTING_USAGE = re.compile(
+    r"Preference|SharedPreferences|setupPreferenceScreen|initPreferences|defaults_get|"
+    r"settings\.json",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -166,3 +178,75 @@ def build_generation_context(
             "dto_shapes": len(dto_shapes),
         },
     )
+
+
+def _settings_excerpt(
+    content: str,
+    *,
+    pattern: re.Pattern[str] = _SETTING_DECLARATION,
+    context_lines: int = 24,
+) -> str:
+    lines = content.splitlines()
+    ranges: list[tuple[int, int]] = []
+    for index, line in enumerate(lines):
+        if pattern.search(line):
+            ranges.append(
+                (max(0, index - context_lines), min(len(lines), index + context_lines + 1))
+            )
+    merged: list[list[int]] = []
+    for start, end in ranges:
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return "\n\n".join("\n".join(lines[start:end]) for start, end in merged)
+
+
+def build_settings_context(
+    ir: SourceIR,
+    *,
+    max_chars: int = DEFAULT_SETTINGS_EVIDENCE_CHARS,
+) -> dict[str, Any]:
+    """Project only setting declarations/defaults into a bounded resource-generation prompt."""
+    candidates: list[tuple[int, int, dict[str, Any]]] = []
+    for index, source in enumerate(ir.files):
+        stem = PurePosixPath(source.path).stem
+        path_relevant = any(marker in stem for marker in ("Option", "Preference", "Setting"))
+        if not path_relevant and _SETTING_USAGE.search(source.content) is None:
+            continue
+        excerpt = _settings_excerpt(
+            source.content,
+            pattern=_SETTING_DECLARATION if path_relevant else _SETTING_USAGE,
+            context_lines=24 if path_relevant else 12,
+        )
+        if not excerpt:
+            continue
+        candidates.append(
+            (
+                1_000 if path_relevant else 500,
+                index,
+                {
+                    "path": source.path,
+                    "content": excerpt,
+                    "sha256": source.sha256,
+                    "representation": "settings_evidence_slice",
+                },
+            )
+        )
+    selected: list[dict[str, Any]] = []
+    total = 0
+    for _priority, _index, evidence in sorted(candidates, key=lambda item: (-item[0], item[1])):
+        size = len(evidence["content"])
+        if total + size > max_chars:
+            continue
+        selected.append(evidence)
+        total += size
+    return {
+        "source": ir.model_dump(mode="json", exclude={"files", "license_text"}),
+        "settings_evidence": selected,
+        "context_stats": {
+            "evidence_files": len(selected),
+            "evidence_chars": total,
+            "max_evidence_chars": max_chars,
+        },
+    }

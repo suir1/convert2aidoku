@@ -41,7 +41,7 @@ base_url = "http://localhost:50048/v1"
 model = "your-model-id"
 max_repair_rounds = 3
 timeout_seconds = 300
-generation_reasoning_effort = "medium"
+generation_reasoning_effort = "auto"
 repair_reasoning_effort = "low"
 ```
 
@@ -50,8 +50,9 @@ export C2A_API_KEY='...'
 uv run c2a ai-check
 ```
 
-Reasoning effort accepts `off`, `low`, `medium`, or `high`. Initial generation defaults to
-`medium`; targeted and full repairs default to `low`; `ai-check` disables thinking. Providers that
+Reasoning effort accepts `auto`, `off`, `low`, `medium`, or `high`. Initial generation defaults to
+provider-controlled `auto`; targeted and full repairs default to `low`; `ai-check` disables
+thinking. Providers that
 reject reasoning controls automatically fall back to their default behavior without consuming a
 manifest validation retry. Environment overrides use `C2A_GENERATION_REASONING_EFFORT` and
 `C2A_REPAIR_REASONING_EFFORT`; `convert` also accepts `--generation-reasoning` and
@@ -61,12 +62,15 @@ The client first requests JSON-Schema structured output. Providers that reject t
 back to JSON Object mode and then plain JSON, both still validated locally with Pydantic.
 
 For decompiled APKs, the initial prompt uses deterministic Java behavior slices instead of JADX
-boilerplate; Kotlin modules still send their complete selected source files. Compiler and Clippy
-repairs first use bounded source excerpts and exact `old_text` → `new_text` replacements. Each
-replacement must come from a supplied excerpt, match once, stay inside the generated-file
-allowlist, and pass the same Rust safety checks. Live-behavior failures retain the full repair
-context. This keeps repair prompts small without weakening path, dependency, or code-execution
-boundaries.
+boilerplate; Kotlin modules still send their complete selected source files. The primary AI call
+returns Rust files only. Static filters are generated deterministically from `SourceIR`, while
+settings use a separate bounded evidence prompt whose response contains real JSON objects rather
+than JSON text nested inside a manifest string. Compiler and Clippy repairs first use bounded
+source excerpts and exact `old_text` → `new_text` replacements. Each replacement must come from a
+supplied excerpt, match once, stay inside the generated-file allowlist, and pass the same Rust
+safety checks. Full repair fallback is also Rust-only and inherits tool-owned resources.
+Live-behavior failures retain the full repair context. This keeps repair prompts small without
+weakening path, dependency, or code-execution boundaries.
 
 ## Analyze and convert
 

@@ -5,9 +5,12 @@ import httpx
 from convert2aidoku.ai import OpenAICompatibleClient, _contract_text, _strict_model_schema
 from convert2aidoku.config import ReasoningEffort
 from convert2aidoku.models import (
+    Capability,
     GenerationManifest,
     RepairPatch,
     SourceFile,
+    SourceFilterOption,
+    SourceFilterSpec,
 )
 from tests.scenarios import minimal_source_ir, provider_settings
 
@@ -448,7 +451,8 @@ def test_generate_sends_deterministic_source_evidence_instead_of_raw_files() -> 
         assert "FilterValue::Select { id: String, value: String }" in system_prompt
         assert "Option<&'a str>" in system_prompt
         assert "Cargo.toml is forbidden" in payload["messages"][1]["content"]
-        assert payload["reasoning_effort"] == "medium"
+        assert "reasoning_effort" not in payload
+        assert "thinking" not in payload
         assert "source_files" not in generation_payload
         assert generation_payload["source_evidence"][0]["path"] == "src/Example.kt"
         assert generation_payload["context_stats"]["mode"] == "complete_kotlin_source"
@@ -466,6 +470,94 @@ def test_generate_sends_deterministic_source_evidence_instead_of_raw_files() -> 
         result = client.generate(ir)
 
     assert result.value.source_struct == "Example"
+    assert result.reasoning_effort == ReasoningEffort.AUTO
+
+
+def test_generate_structures_settings_and_owns_static_filters() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        payload = json.loads(request.content)
+        if calls == 1:
+            assert "only src/**/*.rs" in payload["messages"][1]["content"]
+            assert "filters.json or settings.json" in payload["messages"][1]["content"]
+            response = _manifest()
+            usage = {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}
+        else:
+            assert payload["reasoning_effort"] == "low"
+            assert "unrelated-settings-test-marker" not in request.content.decode()
+            response = {
+                "groups": [
+                    {
+                        "type": "group",
+                        "title": "Request",
+                        "items": [
+                            {
+                                "type": "select",
+                                "key": "platform",
+                                "title": "Platform",
+                                "values": ["1", "2"],
+                                "titles": ["1", "2"],
+                                "default": "1",
+                            }
+                        ],
+                    }
+                ]
+            }
+            usage = {"prompt_tokens": 30, "completion_tokens": 10, "total_tokens": 40}
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": json.dumps(response)}}],
+                "usage": usage,
+            },
+        )
+
+    ir = minimal_source_ir(
+        capabilities=[Capability.FILTERS, Capability.SETTINGS],
+        filter_specs=[
+            SourceFilterSpec(
+                source_class="SortFilter",
+                id="sort",
+                title="Sort",
+                kind="sort",
+                options=[
+                    SourceFilterOption(title="Popular", value="popular"),
+                    SourceFilterOption(title="Updated", value="updated"),
+                ],
+                default_index=1,
+                default_ascending=True,
+            )
+        ],
+        files=[
+            SourceFile(
+                path="src/PlatformOption.kt",
+                content='const val KEY = "platform"\nconst val DEFAULT = "1"',
+                sha256="0",
+            ),
+            SourceFile(
+                path="src/Unrelated.kt",
+                content='const val value = "unrelated-settings-test-marker"',
+                sha256="1",
+            ),
+        ],
+    )
+    settings = provider_settings()
+
+    with OpenAICompatibleClient(settings, transport=httpx.MockTransport(handler)) as client:
+        result = client.generate(ir)
+
+    assert calls == 2
+    assert result.usage and result.usage.total_tokens == 160
+    resources = {item.path: item.content for item in result.value.files}
+    assert set(resources) == {"src/lib.rs", "res/filters.json", "res/settings.json"}
+    assert json.loads(resources["res/filters.json"])[0]["default"] == {
+        "index": 1,
+        "ascending": True,
+    }
+    assert json.loads(resources["res/settings.json"])[0]["items"][0]["default"] == "1"
 
 
 def test_repair_uses_compact_context_without_original_source_bodies() -> None:
@@ -476,6 +568,8 @@ def test_repair_uses_compact_context_without_original_source_bodies() -> None:
         assert "source_files" not in repair_payload
         assert "files" not in repair_payload["source_ir"]
         assert repair_payload["current_files"][0]["content"] == "current rust"
+        assert len(repair_payload["current_files"]) == 1
+        assert b"current-resource-marker" not in request.content
         assert repair_payload["prior_generation_manifests"][0]["round"] == 1
         assert "resource_files" not in repair_payload["prior_generation_manifests"][0]
         assert b"original-source-body-marker" not in request.content
@@ -499,7 +593,10 @@ def test_repair_uses_compact_context_without_original_source_bodies() -> None:
     with OpenAICompatibleClient(settings, transport=httpx.MockTransport(handler)) as client:
         result = client.repair(
             ir,
-            current_files=[{"path": "src/lib.rs", "content": "current rust"}],
+            current_files=[
+                {"path": "src/lib.rs", "content": "current rust"},
+                {"path": "res/settings.json", "content": "current-resource-marker"},
+            ],
             diagnostics="compile error",
             manifest_history=[
                 {

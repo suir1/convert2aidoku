@@ -5,7 +5,7 @@ import hashlib
 import pytest
 
 from convert2aidoku.errors import InputError
-from convert2aidoku.generation_context import build_generation_context
+from convert2aidoku.generation_context import build_generation_context, build_settings_context
 from convert2aidoku.models import SourceFile, SourceIR
 from tests.scenarios import minimal_source_ir
 
@@ -129,3 +129,23 @@ def test_kotlin_generation_context_preserves_complete_source_files() -> None:
     ]
     assert payload["omitted_source_files"] == []
     assert payload["decompiled_dto_shapes"] == []
+
+
+def test_settings_context_keeps_only_bounded_preference_evidence() -> None:
+    option = _file(
+        "sources/example/PlatformOption.java",
+        'enum PlatformOption { ONE("1", "Platform 1"); '
+        'public static final String KEY = "platform"; '
+        'private static final String DEFAULT = "1"; }',
+    )
+    unrelated = _file(
+        "sources/example/api/ComicApi.java",
+        'class ComicApi { String endpoint = "/comics"; String marker = "unrelated-body"; }',
+    )
+
+    payload = build_settings_context(_ir(option, unrelated))
+
+    assert [item["path"] for item in payload["settings_evidence"]] == [option.path]
+    assert 'KEY = "platform"' in payload["settings_evidence"][0]["content"]
+    assert "unrelated-body" not in str(payload)
+    assert payload["context_stats"]["evidence_chars"] <= 50_000
