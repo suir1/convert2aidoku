@@ -261,6 +261,248 @@ def _normalize_pinned_model_shapes(content: str) -> str:
     return content
 
 
+def _normalize_aidoku_api_paths(content: str) -> str:
+    content = content.replace("error::AidokuError", "AidokuError")
+    content = content.replace("aidoku::Request", "Request")
+    content = content.replace("uri::encode(", "uri::encode_uri(")
+    content = re.sub(
+        r"\b(?P<response>resp|response)\.code\(\)",
+        r"\g<response>.status_code()",
+        content,
+    )
+    content = content.replace(".get_body_string()", ".get_string()")
+    return content
+
+
+def _aidoku_root_imported(content: str, name: str) -> bool:
+    for node in RustInspection.from_content(content).nodes("use_declaration"):
+        compact = RustInspection.compact_node(node)
+        if compact.startswith(f"useaidoku::{name}"):
+            return True
+        if compact.startswith("useaidoku::{") and re.search(
+            rf"(?:\{{|,)\s*{re.escape(name)}(?:\s*[,}}])",
+            compact.removeprefix("useaidoku::"),
+        ):
+            return True
+    return False
+
+
+def _aidoku_to_string_imported(content: str) -> bool:
+    return any(
+        (compact := RustInspection.compact_node(node)).startswith("useaidoku::")
+        and re.search(r"alloc::(?:\{[^}]*?)?string(?:::\{[^}]*?)?::ToString\b", compact) is not None
+        for node in RustInspection.from_content(content).nodes("use_declaration")
+    )
+
+
+def _aidoku_request_imported(content: str) -> bool:
+    return any(
+        (compact := RustInspection.compact_node(node)).startswith("useaidoku::")
+        and (
+            "imports::net::Request" in compact
+            or re.search(r"imports::\{[^}]*net::\{?[^}]*Request", compact) is not None
+        )
+        for node in RustInspection.from_content(content).nodes("use_declaration")
+    )
+
+
+def _inject_import(content: str, statement: str) -> str:
+    crate_attributes = re.match(r"(?:\s*#!\[[^\n]*\]\s*\n)+", content)
+    if crate_attributes is None:
+        return statement + "\n" + content.lstrip()
+    boundary = crate_attributes.end()
+    return content[:boundary] + statement + "\n" + content[boundary:]
+
+
+def _inject_required_aidoku_imports(content: str) -> str:
+    if re.search(r"\bResult\s*<", content) and not _aidoku_root_imported(content, "Result"):
+        content = _inject_import(content, "use aidoku::Result;")
+    has_request_identifier = any(
+        _rust_identifier(node) == "Request" for node in RustInspection.from_content(content).nodes()
+    )
+    if has_request_identifier and not _aidoku_request_imported(content):
+        content = _inject_import(content, "use aidoku::imports::net::Request;")
+    if ".to_string()" in content and not _aidoku_to_string_imported(content):
+        content = _inject_import(content, "use aidoku::alloc::string::ToString;")
+    return content
+
+
+def _inject_source_new(content: str) -> str:
+    inspection = RustInspection.from_content(content)
+    structs = {struct.name: struct for struct in inspection.structs}
+    replacements: list[tuple[str, str]] = []
+    for node in inspection.nodes("impl_item"):
+        text = node.text.decode("utf-8", errors="replace")
+        header = re.match(r"impl\s+Source\s+for\s+(?P<name>[A-Za-z_]\w*)\s*\{", text)
+        if header is None or re.search(r"\bfn\s+new\s*\(", text):
+            continue
+        name = header.group("name")
+        struct = structs.get(name)
+        is_unit = re.search(rf"\bstruct\s+{re.escape(name)}\s*;", content) is not None
+        expression = (
+            "Self" if is_unit or (struct is not None and not struct.fields) else "Self::default()"
+        )
+        replacement = (
+            text[: header.end()]
+            + f"\n    fn new() -> Self {{ {expression} }}\n"
+            + text[header.end() :]
+        )
+        replacements.append((text, replacement))
+    for original, replacement in replacements:
+        content = content.replace(original, replacement, 1)
+    return content
+
+
+def _normalize_mutated_aidoku_models(content: str) -> str:
+    content = re.sub(
+        r"(?P<target>\b[A-Za-z_]\w*)\.author\s*=\s*"
+        r"(?P<expression>[\s\S]{1,700}?\.collect(?:::\s*<Vec<_>>)?\(\))"
+        r"\s*\.join\([^;]{0,120}\)\s*;",
+        r"\g<target>.authors = Some(\g<expression>);",
+        content,
+    )
+
+    def wrap_optional(match: re.Match[str]) -> str:
+        expression = match.group("expression").strip()
+        if expression.startswith("Some("):
+            return match.group(0)
+        return (
+            f"{match.group('indent')}{match.group('target')}.{match.group('field')} = "
+            f"Some({expression});"
+        )
+
+    content = re.sub(
+        r"(?m)^(?P<indent>[ \t]*)(?P<target>manga)\."
+        r"(?P<field>cover|description)\s*=\s*(?P<expression>[^;\n]+);",
+        wrap_optional,
+        content,
+    )
+    content = re.sub(
+        r"(?m)^(?P<indent>[ \t]*)(?P<target>chapter)\."
+        r"(?P<field>title)\s*=\s*(?P<expression>[^;\n]+);",
+        wrap_optional,
+        content,
+    )
+    return content
+
+
+def _normalize_page_index_fields(content: str) -> str:
+    replacements: list[tuple[str, str]] = []
+    for node in RustInspection.from_content(content).nodes("struct_expression"):
+        name = node.child_by_field_name("name")
+        if name is None or name.text.decode("utf-8", errors="replace") != "Page":
+            continue
+        original = node.text.decode("utf-8", errors="replace")
+        normalized = re.sub(r"(?m)^[ \t]*index\s*:\s*[^,\n]+,\s*\n?", "", original)
+        normalized = re.sub(r"\{\s*index\s*:\s*[^,}]+,\s*", "{ ", normalized)
+        if normalized != original:
+            replacements.append((original, normalized))
+    for original, replacement in replacements:
+        content = content.replace(original, replacement, 1)
+    return content
+
+
+def _normalize_select_filter_constructors(content: str) -> str:
+    return re.sub(
+        r"aidoku::Filter::select\(\s*(?P<id>\"(?:\\.|[^\"\\])*\")\s*,\s*"
+        r"(?P<title>\"(?:\\.|[^\"\\])*\")\s*,\s*"
+        r"(?P<options>[A-Za-z_]\w*)\s*,\s*Some\((?P<ids>[A-Za-z_]\w*)\)\s*\)",
+        r"aidoku::SelectFilter { id: \g<id>.into(), title: Some(\g<title>.into()), "
+        r"options: \g<options>, ids: Some(\g<ids>), ..Default::default() }.into()",
+        content,
+    )
+
+
+def _normalize_request_builder_helpers(
+    content: str,
+    known_helpers: set[str] | None = None,
+) -> str:
+    helper_names = set(known_helpers or ())
+    replacements: list[tuple[str, str]] = []
+    for function in RustInspection.from_content(content).functions:
+        text = function.text
+        if "Request::get" not in text or ".header(" not in text:
+            continue
+        header = re.search(r"->\s*Request\s*\{", text)
+        binding = re.search(
+            r"let\s+mut\s+(?P<name>[A-Za-z_]\w*)\s*=\s*Request::get\((?P<url>[^;]+)\);",
+            text,
+        )
+        if header is None or binding is None:
+            continue
+        normalized = text[: header.start()] + "-> Result<Request> {" + text[header.end() :]
+        normalized = normalized.replace(binding.group(0), binding.group(0)[:-1] + "?;")
+        variable = binding.group("name")
+        normalized = re.sub(
+            rf"(?m)^(?P<indent>[ \t]*){re.escape(variable)}\s*\n\}}$",
+            rf"\g<indent>Ok({variable})\n}}",
+            normalized,
+        )
+        if normalized != text:
+            helper_names.add(function.name)
+            replacements.append((text, normalized))
+    for original, replacement in replacements:
+        content = content.replace(original, replacement, 1)
+    for name in helper_names:
+        content = re.sub(
+            rf"(?P<call>\b{re.escape(name)}\([^;\n]+\))(?=\.send\()",
+            r"\g<call>?",
+            content,
+        )
+        content = re.sub(
+            rf"(?P<prefix>=\s*)(?P<call>\b{re.escape(name)}\([^;\n]+\))(?P<suffix>\s*;)",
+            r"\g<prefix>\g<call>?\g<suffix>",
+            content,
+        )
+    return content
+
+
+def _normalize_parse_date_option_patterns(content: str) -> str:
+    return re.sub(
+        r"if\s+let\s+Ok\((?P<value>[A-Za-z_]\w*)\)\s*=\s*"
+        r"(?P<call>(?:aidoku::)?imports::std::parse_(?:local_)?date\([^\n]+\))",
+        r"if let Some(\g<value>) = \g<call>",
+        content,
+    )
+
+
+def _normalize_chapter_group_scope(content: str) -> str:
+    extension = re.search(
+        r"(?P<collection>[A-Za-z_]\w*)\.extend\((?P<list>[A-Za-z_]\w*)\);",
+        content,
+    )
+    if extension is not None and re.search(r"\blet\s+group_name\s*=", content):
+        collection = extension.group("collection")
+        list_name = extension.group("list")
+        content = content.replace(
+            extension.group(0),
+            f"{collection}.extend({list_name}.into_iter()"
+            ".map(|chapter| (chapter, group_name.clone())));",
+            1,
+        )
+        content = re.sub(
+            rf"{re.escape(collection)}\.sort_by_key\(\|item\|\s*"
+            r"core::cmp::Reverse\(item\.index\)\)",
+            f"{collection}.sort_by_key(|item| core::cmp::Reverse(item.0.index))",
+            content,
+        )
+        content = re.sub(
+            rf"(?P<prefix>{re.escape(collection)}\.into_iter\(\)\.enumerate\(\)"
+            r"\.map\(\|\()(?P<index>[A-Za-z_]\w*)\s*,\s*"
+            r"(?P<chapter>[A-Za-z_]\w*)(?P<suffix>\)\|)",
+            r"\g<prefix>\g<index>, (\g<chapter>, group_name)\g<suffix>",
+            content,
+        )
+    content = re.sub(
+        r"(?P<prefix>\bif\s+(?:[A-Za-z_]\w*\.)?total)\s*>=\s*"
+        r"(?P<right>(?:[A-Za-z_]\w*\.)?offset\s*\+\s*"
+        r"(?:[A-Za-z_]\w*\.)?limit)(?P<suffix>\s*\{\s*break\s*;)",
+        r"\g<prefix> <= \g<right>\g<suffix>",
+        content,
+    )
+    return content
+
+
 def _normalize_safe_std_paths(content: str, *, remove_extern_std: bool) -> str:
     """Project allocation/core-only std paths into the no_std Aidoku runtime."""
     if remove_extern_std:
@@ -468,6 +710,19 @@ def _normalize_discarded_enumerate_index(content: str) -> str:
         replacements.append((original, replacement))
     for original, replacement in replacements:
         content = content.replace(original, replacement, 1)
+    iterator_pattern = re.compile(
+        r"(?P<prefix>\.enumerate\(\)\s*\.map\(\|\(\s*"
+        r"(?P<index>[A-Za-z_]\w*)\s*,\s*"
+        r"(?P<item>\([^|]+\)|[A-Za-z_]\w*)\s*\)\|\s*\{)"
+        r"(?P<body>[\s\S]{0,3000}?)(?P<suffix>\}\))"
+    )
+
+    def replace_iterator(match: re.Match[str]) -> str:
+        if re.search(rf"\b{re.escape(match.group('index'))}\b", match.group("body")):
+            return match.group(0)
+        return f".map(|{match.group('item')}| {{{match.group('body')}{match.group('suffix')}"
+
+    content = iterator_pattern.sub(replace_iterator, content)
     return content
 
 
@@ -522,6 +777,25 @@ def _normalize_public_absolute_url(content: str, public_base_url: str | None) ->
         replacements.append((function.text, replacement))
     for original, replacement in replacements:
         content = content.replace(original, replacement, 1)
+    base = public_base_url.rstrip("/")
+    if "impl Source for" in content and not re.search(r"\babsolute_url\s*\(", content):
+        content = (
+            content.rstrip()
+            + "\n\nfn absolute_url(relative: &str) -> String {\n"
+            + f'    format!("{{}}/{{}}", {json.dumps(base)}, '
+            + "relative.trim_start_matches('/'))\n}\n"
+        )
+    if re.search(r"\babsolute_url\s*\(", content):
+        content = re.sub(
+            r"(?m)^(?P<indent>[ \t]*)(?P<target>manga|chapter)\.key\s*=\s*"
+            r"(?P<value>[^;\n]+);(?!\s*\n[ \t]*(?P=target)\.url\s*=)",
+            lambda match: (
+                match.group(0)
+                + f"\n{match.group('indent')}{match.group('target')}.url = "
+                + f"Some(absolute_url(&{match.group('target')}.key));"
+            ),
+            content,
+        )
     return content
 
 
@@ -740,7 +1014,8 @@ def _normalize_platform_header_setting(
             rust_string = r'"(?:\\.|[^"\\])*"'
             binding = re.search(
                 rf"(?P<indent>^[ \t]*)let\s+(?P<variable>[A-Za-z_]\w*)"
-                rf"(?:\s*:\s*String)?\s*=\s*defaults_get(?:::<String>)?\(\s*"
+                rf"(?:\s*:\s*String)?\s*=\s*"
+                rf"(?:aidoku::imports::defaults::)?defaults_get(?:::<String>)?\(\s*"
                 rf"{re.escape(json.dumps(key))}\s*\)\s*\.unwrap_or_else\(\|\|\s*"
                 rf"String::from\(\s*{rust_string}\s*\)\s*\)\s*;",
                 function_text,
@@ -774,9 +1049,8 @@ def _normalize_platform_header_setting(
                 arms.append(f"{indent}    _ => {default_expression},")
                 replacement = (
                     f"{indent}let {binding.group('variable')} = "
-                    f"match defaults_get::<String>({json.dumps(key)}).as_deref() {{\n"
-                    + "\n".join(arms)
-                    + f"\n{indent}}};"
+                    "match aidoku::imports::defaults::defaults_get::<String>"
+                    f"({json.dumps(key)}).as_deref() {{\n" + "\n".join(arms) + f"\n{indent}}};"
                 )
                 normalized = (
                     function_text[: binding.start()] + replacement + function_text[binding.end() :]
@@ -808,7 +1082,8 @@ def _normalize_platform_header_setting(
         replacement = (
             function_text[:opening].rstrip()
             + " {\n"
-            + f"    let platform = defaults_get::<String>({json.dumps(key)})\n"
+            + "    let platform = aidoku::imports::defaults::defaults_get::<String>"
+            + f"({json.dumps(key)})\n"
             + f"        .unwrap_or_else(|| String::from({json.dumps(default)}));\n"
             + "    match platform.as_str() {\n"
             + "\n".join(arms)
@@ -830,10 +1105,19 @@ def normalize_pinned_aidoku_rust(
     preserve_cover_urls: bool = False,
     public_base_url: str | None = None,
     chapter_key_templates: tuple[str, ...] | None = None,
+    request_builder_helpers: set[str] | None = None,
     remove_extern_std: bool = False,
 ) -> str:
     """Apply small type-safe compatibility rewrites for the pinned Aidoku/Rust APIs."""
     content = _normalize_safe_std_paths(content, remove_extern_std=remove_extern_std)
+    content = _normalize_aidoku_api_paths(content)
+    content = _normalize_request_builder_helpers(content, request_builder_helpers)
+    content = _inject_source_new(content)
+    content = _normalize_mutated_aidoku_models(content)
+    content = _normalize_page_index_fields(content)
+    content = _normalize_select_filter_constructors(content)
+    content = _normalize_parse_date_option_patterns(content)
+    content = _normalize_chapter_group_scope(content)
     if allow_dead_code and not re.search(
         r"#!\[allow\([^\]]*\bdead_code\b",
         content,
@@ -897,6 +1181,7 @@ def normalize_pinned_aidoku_rust(
     content = _normalize_resolution_setting(content, setting_defaults, setting_values)
     content = _normalize_platform_header_setting(content, setting_defaults, setting_values)
     content = _inject_no_std_macro_imports(content)
+    content = _inject_required_aidoku_imports(content)
     content = re.sub(
         r"(\bparse_(?:local_)?date\s*\([^;]{0,800}?\))\s*\.ok\(\)",
         r"\1",
@@ -951,6 +1236,17 @@ def _prequeried_url_helpers(manifest: GenerationManifest) -> set[str]:
     return helpers
 
 
+def _request_builder_helpers(manifest: GenerationManifest) -> set[str]:
+    helpers: set[str] = set()
+    for generated in manifest.files:
+        if not generated.path.endswith(".rs"):
+            continue
+        for function in RustInspection.from_content(generated.content).functions:
+            if "Request::get" in function.text and ".header(" in function.text:
+                helpers.add(function.name)
+    return helpers
+
+
 def _skip_unused_decompiled_dto_fields(
     files: list[GeneratedFile],
 ) -> list[GeneratedFile]:
@@ -973,7 +1269,10 @@ def _skip_unused_decompiled_dto_fields(
             if not any("Deserialize" in attribute for attribute in attributes):
                 continue
             for field in struct.fields:
-                if re.search(rf"\.\s*{re.escape(field.name)}\b", rust_content):
+                if re.search(
+                    rf"\.\s*{re.escape(field.name)}\b(?!\s*\()",
+                    rust_content,
+                ):
                     continue
                 type_node = field.node.child_by_field_name("type")
                 if type_node is not None and not field.type_text.startswith("Option<"):
@@ -1012,6 +1311,7 @@ def normalize_generation_manifest(
     setting_defaults = resources.setting_defaults()
     setting_values = resources.setting_values()
     prequeried_url_helpers = _prequeried_url_helpers(manifest)
+    request_builder_helpers = _request_builder_helpers(manifest)
     preserve_cover_urls = bool(ir.image_url_policy and ir.image_url_policy.preserve_cover_urls)
     files = []
     changed = False
@@ -1025,10 +1325,11 @@ def normalize_generation_manifest(
                 setting_values=setting_values,
                 prequeried_url_helpers=prequeried_url_helpers,
                 preserve_cover_urls=preserve_cover_urls,
-                public_base_url=ir.metadata.base_url,
+                public_base_url=ir.metadata.base_url if ir.relative_url_keys else None,
                 chapter_key_templates=tuple(
                     route.chapter_key_template for route in ir.chapter_page_routes
                 ),
+                request_builder_helpers=request_builder_helpers,
             )
         changed |= content != generated.content
         files.append(generated.model_copy(update={"content": content}))
@@ -1169,10 +1470,11 @@ def apply_generation_manifest(
                 preserve_cover_urls=bool(
                     ir.image_url_policy and ir.image_url_policy.preserve_cover_urls
                 ),
-                public_base_url=ir.metadata.base_url,
+                public_base_url=ir.metadata.base_url if ir.relative_url_keys else None,
                 chapter_key_templates=tuple(
                     route.chapter_key_template for route in ir.chapter_page_routes
                 ),
+                request_builder_helpers=_request_builder_helpers(manifest),
             )
         validate_generated_content(generated.path, content)
         target = _safe_destination(destination, generated.path)

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from convert2aidoku.analyzer import analyze_source
@@ -7,6 +8,7 @@ from convert2aidoku.manifest_contract import (
     ContractEvaluation,
     evaluate_manifest_contract,
     normalize_decompiled_dto_manifest,
+    normalize_decompiled_setting_manifest,
 )
 from convert2aidoku.models import (
     Capability,
@@ -351,3 +353,43 @@ def test_decompiled_dto_rust_keyword_field_gets_serde_rename() -> None:
 
     assert '#[serde(rename = "type")]' in normalized.files[0].content
     assert evaluate_manifest_contract(ir, normalized).messages == []
+
+
+def test_decompiled_enum_setting_names_are_projected_to_storage_values() -> None:
+    ir = minimal_source_ir(
+        source_format="decompiled_apk",
+        files=[
+            SourceFile(
+                path="sources/example/ApiDomainOption.java",
+                sha256="0",
+                content="""
+                public enum ApiDomainOption {
+                    COPY1("api.example", "api.example", "Primary"),
+                    COPY2("api2.example", "api2.example", "Secondary"),
+                    CUSTOM("custom", "custom", "Custom");
+                    public static final String KEY = "v2.pref.api_domain";
+                }
+                """,
+            )
+        ],
+    )
+    manifest = _manifest("struct Source;")
+    manifest.files.append(
+        GeneratedFile(
+            path="res/settings.json",
+            content="""[
+                {"type":"group","items":[
+                    {"type":"select","key":"v2.pref.api_domain","title":"Domain",
+                     "values":["COPY1","COPY2","CUSTOM"],
+                     "titles":["Primary","Secondary","Custom"],"default":"COPY1"}
+                ]}
+            ]""",
+        )
+    )
+
+    normalized = normalize_decompiled_setting_manifest(ir, manifest)
+
+    settings_file = next(file for file in normalized.files if file.path == "res/settings.json")
+    setting = json.loads(settings_file.content)[0]["items"][0]
+    assert setting["values"] == ["api.example", "api2.example", "custom"]
+    assert setting["default"] == "api.example"

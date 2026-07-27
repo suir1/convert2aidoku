@@ -373,6 +373,128 @@ pub fn resolve_image(url: &str, resolution: &str) -> String {
     assert normalize_pinned_aidoku_rust(normalized) == normalized
 
 
+def test_normalizer_repairs_common_aidoku_api_compile_shapes() -> None:
+    content = r"""
+use aidoku::{
+    Chapter, Filter, Manga, Page, PageContent, Source,
+    error::AidokuError,
+    helpers::uri,
+};
+pub struct CopyManga;
+impl Source for CopyManga {}
+fn map_manga(c: Comic) -> Manga {
+    let mut manga = Manga::default();
+    manga.key = format!("/comic/{}", c.path_word);
+    manga.author = c.author.into_iter().map(|a| a.name).collect::<Vec<_>>().join(", ");
+    manga.cover = c.cover;
+    manga.description = c.brief;
+    manga
+}
+fn map_chapter(ci: ChapterInfo) -> Chapter {
+    let mut chapter = Chapter::default();
+    chapter.key = format!("/comic/x/chapter/{}", ci.uuid);
+    chapter.title = format!("{}", ci.name);
+    chapter
+}
+fn page(ci: ContentItem) -> Page {
+    Page { index: 0, content: PageContent::url(ci.url), ..Default::default() }
+}
+fn pages(items: Vec<ContentItem>) -> Vec<Page> {
+    items.iter().enumerate().map(|(i, ci)| {
+        Page { index: i as i32, content: PageContent::url(ci.url.clone()), ..Default::default() }
+    }).collect()
+}
+fn filter(
+    options: Vec<aidoku::alloc::borrow::Cow<'static, str>>,
+    ids: Vec<aidoku::alloc::borrow::Cow<'static, str>>,
+) -> Filter {
+    aidoku::Filter::select("theme", "Theme", options, Some(ids))
+}
+fn search(query: &str) -> String { uri::encode(query) }
+fn create_request(url: String) -> aidoku::Request {
+    let mut request = aidoku::Request::get(&url);
+    request = request.header("Accept", "application/json");
+    request
+}
+fn send_request(url: &str) -> Result<String> {
+    let request = create_request(url.to_string());
+    request.send()?.get_body_string()
+}
+fn response_status(resp: Response) -> i32 { let _ = resp.get_body_string(); resp.code() }
+fn parsed(value: &str) -> i64 {
+    if let Ok(timestamp) = aidoku::imports::std::parse_date(value, "yyyy-MM-dd") {
+        timestamp
+    } else { 0 }
+}
+fn grouped_chapters(groups: Vec<Group>) -> Vec<Chapter> {
+    let mut all_chapters = Vec::new();
+    for group in groups {
+        let group_name = group.name;
+        let list = group.chapters;
+        all_chapters.extend(list);
+        if group.total >= group.offset + group.limit { break; }
+    }
+    all_chapters.sort_by_key(|item| core::cmp::Reverse(item.index));
+    all_chapters.into_iter().enumerate().map(|(i, ci)| {
+        let prefix = if group_name.is_empty() || ci.group_path_word == "default" {
+            String::new()
+        } else { format!("{}：", group_name) };
+        let mut chapter = Chapter::default();
+        chapter.title = format!("{}{}", prefix, ci.name);
+        chapter.date_uploaded = Some(i as i64);
+        chapter
+    }).collect()
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(
+        content,
+        public_base_url="https://example.com",
+    )
+
+    assert "error::AidokuError" not in normalized
+    assert "use aidoku::Result;" in normalized
+    assert "use aidoku::alloc::string::ToString;" in normalized
+    assert "fn new() -> Self { Self }" in normalized
+    assert "manga.authors = Some(" in normalized
+    assert ".join(" not in normalized
+    assert "manga.cover = Some(c.cover);" in normalized
+    assert "manga.description = Some(c.brief);" in normalized
+    assert "chapter.title = Some(format!" in normalized
+    assert "index: 0" not in normalized
+    assert "items.iter().map(|ci|" in normalized
+    assert "aidoku::SelectFilter" in normalized
+    assert "uri::encode_uri(query)" in normalized
+    assert "aidoku::Request" not in normalized
+    assert "fn create_request(url: String) -> Result<Request>" in normalized
+    assert "let mut request = Request::get(&url)?;" in normalized
+    assert "Ok(request)" in normalized
+    assert "let request = create_request(url.to_string())?;" in normalized
+    assert ".get_body_string()" not in normalized
+    assert "resp.status_code()" in normalized
+    assert "if let Some(timestamp)" in normalized
+    assert "all_chapters.extend(list.into_iter().map(|chapter|" in normalized
+    assert ".map(|(i, (ci, group_name))|" in normalized
+    assert "Reverse(item.0.index)" in normalized
+    assert "if group.total <= group.offset + group.limit" in normalized
+    assert "fn absolute_url(relative: &str) -> String" in normalized
+    assert "manga.url = Some(absolute_url(&manga.key));" in normalized
+    assert "chapter.url = Some(absolute_url(&chapter.key));" in normalized
+    cross_file_call = normalize_pinned_aidoku_rust(
+        "fn send(url: String) -> Result<()> { "
+        "let request = create_request(url); request.send()?; Ok(()) }",
+        request_builder_helpers={"create_request"},
+    )
+    assert "let request = create_request(url)?;" in cross_file_call
+    assert (
+        normalize_pinned_aidoku_rust(
+            normalized,
+            public_base_url="https://example.com",
+        )
+        == normalized
+    )
+
+
 def test_normalizer_repairs_pinned_struct_import_request_and_resolution_shapes() -> None:
     content = """#![no_std]
 use aidoku::{
@@ -571,7 +693,7 @@ use aidoku::alloc::{String, Vec};
 use aidoku::imports::defaults::defaults_get;
 fn build_headers() -> Vec<(String, String)> {
     let mut headers = Vec::new();
-    let platform: String = defaults_get("v2.pref.platform")
+    let platform: String = aidoku::imports::defaults::defaults_get("v2.pref.platform")
         .unwrap_or_else(|| "platform.one".into());
     if !platform.is_empty() {
         headers.push(("platform".into(), platform));
@@ -684,6 +806,7 @@ fn absolute_url(relative: &str) -> String {
 }
 """
     project, ir = scaffold_project(tmp_path)
+    ir = ir.model_copy(update={"relative_url_keys": True})
 
     apply_generation_manifest(project, ir, manifest, query=None)
 
@@ -737,10 +860,12 @@ struct ChapterDetail {
     group_id: String,
     name: String,
     region: Region,
+    next: String,
 }
 #[derive(Deserialize)]
 struct Region { value: String }
 fn chapter_name(chapter: &ChapterDetail) -> &str { &chapter.name }
+fn iterator_next(values: &mut impl Iterator<Item = String>) { let _ = values.next(); }
 """,
         )
     )
@@ -750,9 +875,10 @@ fn chapter_name(chapter: &ChapterDetail) -> &str { &chapter.name }
     apply_generation_manifest(project, ir, manifest, query=None)
 
     dto = (project / "src" / "dto.rs").read_text(encoding="utf-8")
-    assert dto.count("#[serde(skip_deserializing)]") == 3
+    assert dto.count("#[serde(skip_deserializing)]") == 4
     assert "group_id: Option<String>" in dto
     assert "region: Option<Region>" in dto
+    assert "next: Option<String>" in dto
     assert "name: String" in dto
 
 

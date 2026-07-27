@@ -17,6 +17,7 @@ from .manifest_contract import (
     ContractEvaluation,
     evaluate_manifest_contract,
     normalize_decompiled_dto_manifest,
+    normalize_decompiled_setting_manifest,
 )
 from .models import (
     Capability,
@@ -85,6 +86,7 @@ class _ConversionRoundRunner:
                 self.checkpoint.warnings.append(warning)
             effective = manifest.model_copy(update={"files": manifest.files + inherited})
         effective = normalize_decompiled_dto_manifest(self.ir, effective)
+        effective = normalize_decompiled_setting_manifest(self.ir, effective)
         setting_overrides = live_validation_evidence(self.ir).setting_overrides
         effective = GeneratedResources(effective).with_defaults(
             filter_specs=self.ir.filter_specs,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -338,6 +339,67 @@ def normalize_decompiled_dto_manifest(
         content = generated.content
         if generated.path.endswith(".rs"):
             content = _normalize_decompiled_dto_content(content, shapes)
+        changed |= content != generated.content
+        files.append(generated.model_copy(update={"content": content}))
+    return manifest.model_copy(update={"files": files}) if changed else manifest
+
+
+def normalize_decompiled_setting_manifest(
+    ir: SourceIR,
+    manifest: GenerationManifest,
+) -> GenerationManifest:
+    if ir.source_format != "decompiled_apk":
+        return manifest
+    enum_values: dict[str, dict[str, str]] = {}
+    for source in ir.files:
+        key_match = re.search(
+            r'public\s+static\s+final\s+String\s+KEY\s*=\s*"([^"]+)"', source.content
+        )
+        enum_match = re.search(
+            r"public\s+enum\s+[A-Za-z_]\w*\s*\{(?P<body>[\s\S]{1,12000}?)\s*;",
+            source.content,
+        )
+        if key_match is None or enum_match is None:
+            continue
+        values = {
+            found.group("name"): found.group("value")
+            for found in re.finditer(
+                r'^\s*(?P<name>[A-Z][A-Z0-9_]*)\(\s*"(?:\\.|[^"\\])*"\s*,\s*'
+                r'"(?P<value>(?:\\.|[^"\\])*)"',
+                enum_match.group("body"),
+                re.MULTILINE,
+            )
+        }
+        if values:
+            enum_values[key_match.group(1)] = values
+    if not enum_values:
+        return manifest
+
+    files = []
+    changed = False
+    for generated in manifest.files:
+        content = generated.content
+        if generated.path == GeneratedResources.SETTINGS:
+            data = json.loads(content)
+            for group in data:
+                if not isinstance(group, dict) or not isinstance(group.get("items"), list):
+                    continue
+                for item in group["items"]:
+                    if not isinstance(item, dict):
+                        continue
+                    mapping = enum_values.get(item.get("key"))
+                    values = item.get("values")
+                    if (
+                        mapping
+                        and isinstance(values, list)
+                        and values
+                        and all(isinstance(value, str) and value in mapping for value in values)
+                    ):
+                        item["values"] = [mapping[value] for value in values]
+                        default = item.get("default")
+                        if isinstance(default, str) and default in mapping:
+                            item["default"] = mapping[default]
+            content = json.dumps(data, ensure_ascii=False, indent="\t") + "\n"
         changed |= content != generated.content
         files.append(generated.model_copy(update={"content": content}))
     return manifest.model_copy(update={"files": files}) if changed else manifest
