@@ -149,3 +149,48 @@ def test_settings_context_keeps_only_bounded_preference_evidence() -> None:
     assert 'KEY = "platform"' in payload["settings_evidence"][0]["content"]
     assert "unrelated-body" not in str(payload)
     assert payload["context_stats"]["evidence_chars"] <= 50_000
+
+
+def test_settings_context_compacts_option_methods_and_generic_preference_usage() -> None:
+    option = _file(
+        "sources/example/PlatformOption.java",
+        """
+        public final class PlatformOption {
+            NONE("None", "platform.none"),
+            ONE("1", "platform.one");
+            private static final String DEFAULT = "platform.one";
+            public static final String KEY = "v2.pref.platform";
+            public String key2value(String key) {
+                String unrelatedBusinessMethod = "must-not-be-sent";
+                return unrelatedBusinessMethod;
+            }
+        }
+        """,
+    )
+    main = _file(
+        "sources/example/Example.java",
+        """
+        public final class Example {
+            private SharedPreferences preferences;
+            void unrelated() { preferences.getString("noise", "noise"); }
+            void setupPreferenceScreen(PreferenceScreen screen) {
+                screen.addAll(initPreferences());
+            }
+        }
+        """,
+    )
+    keys = _file(
+        "sources/example/PreferencesKeys.java",
+        'public final class PreferencesKeys { public static final String USER_AGENT = "ua"; }',
+    )
+
+    payload = build_settings_context(_ir(option, main, keys))
+    evidence = {item["path"]: item["content"] for item in payload["settings_evidence"]}
+
+    assert 'ONE("1", "platform.one")' in evidence[option.path]
+    assert 'KEY = "v2.pref.platform"' in evidence[option.path]
+    assert "must-not-be-sent" not in evidence[option.path]
+    assert "setupPreferenceScreen" in evidence[main.path]
+    assert evidence[main.path].count("setupPreferenceScreen") == 1
+    assert 'getString("noise"' not in evidence[main.path]
+    assert 'USER_AGENT = "ua"' in evidence[keys.path]

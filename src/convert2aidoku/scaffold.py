@@ -261,6 +261,37 @@ def _normalize_pinned_model_shapes(content: str) -> str:
     return content
 
 
+def _normalize_safe_std_paths(content: str, *, remove_extern_std: bool) -> str:
+    """Project allocation/core-only std paths into the no_std Aidoku runtime."""
+    if remove_extern_std:
+        content = re.sub(r"(?m)^\s*extern\s+crate\s+std\s*;\s*\n?", "", content)
+    collection_aliases = {"HashMap": "BTreeMap", "HashSet": "BTreeSet"}
+    for source, target in collection_aliases.items():
+        marker = f"std::collections::{source}"
+        if marker in content:
+            content = content.replace(marker, f"aidoku::alloc::collections::{target}")
+            content = re.sub(rf"\b{source}\b", target, content)
+    replacements = {
+        "std::collections::BTreeMap": "aidoku::alloc::collections::BTreeMap",
+        "std::collections::BTreeSet": "aidoku::alloc::collections::BTreeSet",
+        "std::borrow::Cow": "aidoku::alloc::borrow::Cow",
+        "std::boxed::Box": "aidoku::alloc::boxed::Box",
+        "std::string::String": "aidoku::alloc::string::String",
+        "std::vec::Vec": "aidoku::alloc::vec::Vec",
+        "std::cmp::": "core::cmp::",
+        "std::convert::": "core::convert::",
+        "std::fmt::": "core::fmt::",
+        "std::iter::": "core::iter::",
+        "std::mem::": "core::mem::",
+        "std::option::Option": "core::option::Option",
+        "std::result::Result": "core::result::Result",
+        "std::str::": "core::str::",
+    }
+    for source, target in replacements.items():
+        content = content.replace(source, target)
+    return content
+
+
 def _normalize_struct_expression_defaults(content: str) -> str:
     replacements: list[tuple[str, str]] = []
     for node in RustInspection.from_content(content).nodes("struct_expression"):
@@ -533,8 +564,10 @@ def normalize_pinned_aidoku_rust(
     setting_values: Mapping[str, tuple[str, ...]] | None = None,
     prequeried_url_helpers: set[str] | None = None,
     preserve_cover_urls: bool = False,
+    remove_extern_std: bool = False,
 ) -> str:
     """Apply small type-safe compatibility rewrites for the pinned Aidoku/Rust APIs."""
+    content = _normalize_safe_std_paths(content, remove_extern_std=remove_extern_std)
     if allow_dead_code and not re.search(
         r"#!\[allow\([^\]]*\bdead_code\b",
         content,

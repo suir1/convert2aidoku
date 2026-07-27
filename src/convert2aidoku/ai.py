@@ -43,7 +43,7 @@ from .models import (
     SourceIR,
     validate_generated_path,
 )
-from .scaffold import validate_generated_content
+from .scaffold import normalize_pinned_aidoku_rust, validate_generated_content
 
 _ResponseMode = Literal["json_schema", "json_object", "plain"]
 _REASONING_CONTROL_ERROR = re.compile(
@@ -243,6 +243,11 @@ def _validate_rust_manifest(manifest: _RustGenerationManifest) -> None:
             + ", ".join(evaluation.disallowed)
         )
     for generated in manifest.files:
+        generated.content = normalize_pinned_aidoku_rust(
+            generated.content,
+            allow_dead_code=generated.path != "src/lib.rs",
+            remove_extern_std=True,
+        )
         validate_generated_content(generated.path, generated.content)
 
 
@@ -393,6 +398,7 @@ class OpenAICompatibleClient:
         *,
         validate: Callable[[T], None] | None = None,
         reasoning_effort: ReasoningEffort | None = None,
+        max_validation_attempts: int = 3,
     ) -> AIResult[T]:
         errors: list[str] = []
         warnings: list[str] = []
@@ -412,7 +418,7 @@ class OpenAICompatibleClient:
         label = re.sub(r"(?<!^)(?=[A-Z])", " ", model.__name__.lstrip("_")).lower()
         schema_name = "aidoku_" + label.replace(" ", "_")
         attempts = 0
-        while attempts < 3:
+        while attempts < max_validation_attempts:
             request_messages = list(messages)
             if response_mode != "json_schema":
                 request_messages.append(
@@ -478,8 +484,7 @@ class OpenAICompatibleClient:
                     response_mode = "json_object" if response_mode == "json_schema" else "plain"
                     self._response_mode = response_mode
                     continue
-                errors.append(diagnostic)
-                attempts += 1
+                raise
             except (ValidationError, ValueError, SecurityError) as exc:
                 diagnostic = str(exc)
                 errors.append(diagnostic)
@@ -525,6 +530,7 @@ class OpenAICompatibleClient:
             _RustGenerationManifest,
             validate=_validate_rust_manifest,
             reasoning_effort=self.settings.generation_reasoning_effort,
+            max_validation_attempts=2,
         )
         manifest = rust_result.value.to_manifest()
         manifest = GeneratedResources(manifest).with_source_filters(ir.filter_specs)

@@ -17,8 +17,7 @@ _SETTING_DECLARATION = re.compile(
     re.IGNORECASE,
 )
 _SETTING_USAGE = re.compile(
-    r"Preference|SharedPreferences|setupPreferenceScreen|initPreferences|defaults_get|"
-    r"settings\.json",
+    r"setupPreferenceScreen|initPreferences|settings\.json",
     re.IGNORECASE,
 )
 
@@ -202,6 +201,62 @@ def _settings_excerpt(
     return "\n\n".join("\n".join(lines[start:end]) for start, end in merged)
 
 
+def _settings_declaration_slice(content: str) -> str:
+    """Keep option values and preference constants without decompiled method noise."""
+    lines = content.splitlines()
+    selected: list[str] = []
+    in_option_constants = False
+    saw_class = False
+    for line in lines:
+        stripped = line.strip()
+        if not saw_class and re.search(r"\b(?:class|enum)\s+[A-Za-z_][A-Za-z0-9_]*", line):
+            selected.append(stripped)
+            saw_class = True
+            continue
+        if saw_class and not in_option_constants and re.match(r"[A-Z][A-Z0-9_]*\s*\(", stripped):
+            in_option_constants = True
+        if in_option_constants:
+            selected.append(stripped)
+            if stripped.endswith(";"):
+                in_option_constants = False
+            continue
+        if re.search(
+            r"\bpublic\s+static\s+final\s+String\s+[A-Z][A-Z0-9_]*\b|"
+            r"\b(?:public|private|protected)\s+static\s+final\b[^;=\n]*\b"
+            r"(?:KEY|DEFAULT|SUMMARY|SUMMERY|ENTRIES|ENTRY_KEYS|[A-Z0-9_]+_KEY)\b",
+            line,
+        ):
+            selected.append(stripped)
+    return "\n".join(dict.fromkeys(line for line in selected if line))
+
+
+def _settings_usage_slice(content: str) -> str:
+    lines = content.splitlines()
+    ranges: list[tuple[int, int]] = []
+    for start, line in enumerate(lines):
+        if _SETTING_USAGE.search(line) is None:
+            continue
+        depth = 0
+        saw_opening = False
+        end = start + 1
+        for index in range(start, len(lines)):
+            depth += lines[index].count("{") - lines[index].count("}")
+            saw_opening |= "{" in lines[index]
+            end = index + 1
+            if saw_opening and depth <= 0:
+                break
+        if not saw_opening:
+            end = min(len(lines), start + 2)
+        ranges.append((start, end))
+    merged: list[list[int]] = []
+    for start, end in ranges:
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return "\n\n".join("\n".join(lines[start:end]) for start, end in merged)
+
+
 def build_settings_context(
     ir: SourceIR,
     *,
@@ -214,10 +269,10 @@ def build_settings_context(
         path_relevant = any(marker in stem for marker in ("Option", "Preference", "Setting"))
         if not path_relevant and _SETTING_USAGE.search(source.content) is None:
             continue
-        excerpt = _settings_excerpt(
-            source.content,
-            pattern=_SETTING_DECLARATION if path_relevant else _SETTING_USAGE,
-            context_lines=24 if path_relevant else 12,
+        excerpt = (
+            _settings_declaration_slice(source.content)
+            if path_relevant
+            else _settings_usage_slice(source.content)
         )
         if not excerpt:
             continue

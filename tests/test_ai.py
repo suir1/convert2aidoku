@@ -1,9 +1,11 @@
 import json
 
 import httpx
+import pytest
 
 from convert2aidoku.ai import OpenAICompatibleClient, _contract_text, _strict_model_schema
 from convert2aidoku.config import ReasoningEffort
+from convert2aidoku.errors import AIProviderError
 from convert2aidoku.models import (
     Capability,
     GenerationManifest,
@@ -212,6 +214,24 @@ def test_response_format_fallback_does_not_consume_validation_retries() -> None:
     assert result.value.source_struct == "Example"
 
 
+def test_terminal_provider_error_is_not_retried_as_invalid_model_output() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(402, text="Insufficient Balance")
+
+    settings = provider_settings()
+    with (
+        OpenAICompatibleClient(settings, transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(AIProviderError, match="HTTP 402"),
+    ):
+        client._request_manifest([{"role": "user", "content": "test"}])
+
+    assert calls == 1
+
+
 def test_reasoning_effort_rejection_is_remembered_without_consuming_retry() -> None:
     calls = 0
     reasoning_values: list[str | None] = []
@@ -377,6 +397,62 @@ def test_manifest_rust_content_security_violation_is_retried() -> None:
 
     assert calls == 2
     assert result.value.files[0].content == "#![no_std]"
+
+
+def test_initial_generation_normalizes_safe_std_allocations_without_retry() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        manifest = _manifest()
+        manifest["files"][0]["content"] = (
+            "#![no_std]\nextern crate std;\nuse std::collections::HashMap;\n"
+            "fn values() { let _ = HashMap::<String, String>::new(); }"
+        )
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(manifest)}}]},
+        )
+
+    settings = provider_settings()
+    ir = minimal_source_ir(
+        files=[SourceFile(path="src/Example.kt", content="class Example", sha256="0")]
+    )
+
+    with OpenAICompatibleClient(settings, transport=httpx.MockTransport(handler)) as client:
+        result = client.generate(ir)
+
+    assert calls == 1
+    assert "std::" not in result.value.files[0].content
+    assert "BTreeMap::<String, String>" in result.value.files[0].content
+
+
+def test_initial_generation_stops_after_two_unsafe_full_outputs() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        manifest = _manifest()
+        manifest["files"][0]["content"] = "use std::fs;"
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(manifest)}}]},
+        )
+
+    settings = provider_settings()
+    ir = minimal_source_ir(
+        files=[SourceFile(path="src/Example.kt", content="class Example", sha256="0")]
+    )
+
+    with (
+        OpenAICompatibleClient(settings, transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(AIProviderError, match="generated Rust uses std"),
+    ):
+        client.generate(ir)
+
+    assert calls == 2
 
 
 def test_invalid_filter_shape_is_retried_with_field_diagnostic() -> None:

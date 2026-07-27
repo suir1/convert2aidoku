@@ -247,6 +247,31 @@ fn keep_existing_vector(author: Vec<String>) -> Manga {
     assert normalize_pinned_aidoku_rust(normalized) == normalized
 
 
+def test_normalizer_projects_allocation_and_core_std_paths_but_not_io() -> None:
+    content = """#![no_std]
+extern crate std;
+use std::collections::HashMap;
+use std::borrow::Cow;
+fn values() -> std::vec::Vec<std::string::String> {
+    let _: std::cmp::Ordering = std::cmp::Ordering::Equal;
+    HashMap::<String, Cow<'static, str>>::new();
+    Vec::new()
+}
+use std::fs;
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content, remove_extern_std=True)
+
+    assert "std::collections" not in normalized
+    assert "extern crate std" not in normalized
+    assert "BTreeMap::<String" in normalized
+    assert "aidoku::alloc::borrow::Cow" in normalized
+    assert "aidoku::alloc::vec::Vec" in normalized
+    assert "aidoku::alloc::string::String" in normalized
+    assert "core::cmp::Ordering" in normalized
+    assert "use std::fs;" in normalized
+
+
 def test_normalizer_repairs_pinned_struct_import_request_and_resolution_shapes() -> None:
     content = """#![no_std]
 use aidoku::{
