@@ -5,6 +5,8 @@ import pytest
 from convert2aidoku.errors import SecurityError
 from convert2aidoku.generated_source_metadata import GeneratedSourceMetadata
 from convert2aidoku.models import (
+    ChapterPageRoute,
+    ChapterPageRouteVariant,
     DependencyRequest,
     GeneratedFile,
     GenerationManifest,
@@ -13,6 +15,7 @@ from convert2aidoku.models import (
 from convert2aidoku.scaffold import (
     apply_generation_manifest,
     normalize_pinned_aidoku_rust,
+    render_generated_lib_rs,
     validate_generated_content,
 )
 from tests.scenarios import scaffold_project
@@ -272,6 +275,104 @@ use std::fs;
     assert "use std::fs;" in normalized
 
 
+def test_generated_lib_is_derived_from_modules_source_struct_and_traits() -> None:
+    content = render_generated_lib_rs(
+        "CopyManga",
+        ["ListingProvider", "DynamicFilters"],
+        {
+            "src/lib.rs",
+            "src/source.rs",
+            "src/request.rs",
+            "src/api/mod.rs",
+            "src/api/dto.rs",
+        },
+    )
+
+    assert content.startswith("#![no_std]")
+    assert "mod api;" in content
+    assert "mod request;" in content
+    assert "mod source;" in content
+    assert "pub use source::CopyManga;" in content
+    assert "CopyManga,\n    ListingProvider,\n    DynamicFilters" in content
+
+
+def test_normalizer_repairs_pagination_moves_helpers_and_select_filter_shape() -> None:
+    content = r"""
+#[derive(Deserialize)]
+struct ChapterListResult {
+    list: Vec<Chapter>,
+    total: i32,
+    limit: i32,
+    offset: i32,
+}
+fn list(result: ChapterListResult) -> MangaPageResult {
+    let manga_list: Vec<Manga> = result
+        .list
+        .into_iter()
+        .map(to_manga)
+        .collect();
+    MangaPageResult {
+        entries: manga_list,
+        has_next_page: result.has_next(),
+    }
+}
+fn filters() -> Vec<Filter> {
+    vec![aidoku::Filter::Select {
+        id: "theme".into(),
+        title: Some("Theme".into()),
+        ..Default::default()
+    }]
+}
+fn chapters(list_result: ChapterListResult, chapter_key: String) -> Vec<Chapter> {
+    let mut chapters = Vec::new();
+    for chapter in list_result.list {
+        chapters.push(Chapter {
+            key: chapter_key,
+            url: Some(absolute_url(&chapter_key)),
+            ..Default::default()
+        });
+    }
+    if !list_result.has_next() {
+        return chapters;
+    }
+    chapters
+}
+fn pages(items: Vec<Item>) {
+    for (index, item) in items.into_iter().enumerate() { use_item(item); }
+}
+fn selected(filters: &[FilterValue], id: &str) {
+    let _ = filters.iter().find(|filter| match filter {
+        FilterValue::Select { id: found, value } if found == id => true,
+        _ => false,
+    });
+}
+pub fn resolve_image(url: &str, resolution: &str) -> String {
+    use regex::Regex;
+    Regex::new(r"\d+(?=x\.(?:jpg|webp)$)")
+        .unwrap()
+        .replace(url, resolution)
+        .into_owned()
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "impl ChapterListResult" in normalized
+    assert "pub fn has_next(&self) -> bool" in normalized
+    assert "let manga_list_has_next = result.has_next();" in normalized
+    assert "has_next_page: manga_list_has_next" in normalized
+    assert "aidoku::SelectFilter" in normalized
+    assert "}.into()" in normalized
+    assert "let list_result_has_next = list_result.has_next();" in normalized
+    assert "if !list_result_has_next" in normalized
+    assert "key: chapter_key.clone()" in normalized
+    assert ".enumerate()" not in normalized
+    assert "find(|filter| matches!(filter," in normalized
+    assert "regex::Regex" not in normalized
+    assert 'url.ends_with(".jpg")' in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
 def test_normalizer_repairs_pinned_struct_import_request_and_resolution_shapes() -> None:
     content = """#![no_std]
 use aidoku::{
@@ -382,6 +483,44 @@ fn platform_with_stale_fallback() -> String {
     assert 'String::from("stale")' not in lib
 
 
+def test_scaffold_reconciles_unique_setting_suffix_aliases(tmp_path: Path) -> None:
+    manifest = _manifest()
+    manifest.files[0].content += """
+use aidoku::imports::defaults::defaults_get;
+fn api_domain() -> String {
+    defaults_get::<String>("api_domain").unwrap_or_else(|| "stale.example".into())
+}
+fn resolution() -> String {
+    defaults_get("v2.pref.resolution").unwrap_or_else(|| "1500".into())
+}
+"""
+    manifest.files.append(
+        GeneratedFile(
+            path="res/settings.json",
+            content="""[
+                {"type":"group","title":"Request","items":[
+                    {"type":"select","key":"v2.pref.api_domain","title":"API Domain",
+                     "values":["mapi.copy20.com"],"default":"mapi.copy20.com"},
+                    {"type":"select","key":"v2.pref.resolution","title":"Resolution",
+                     "values":["resolution.r800","resolution.r1500"],
+                     "default":"resolution.r1500"}
+                ]}
+            ]""",
+        )
+    )
+    project, ir = scaffold_project(tmp_path)
+
+    apply_generation_manifest(project, ir, manifest, query=None)
+
+    lib = (project / "src" / "lib.rs").read_text(encoding="utf-8")
+    assert 'defaults_get::<String>("api_domain")' not in lib
+    assert 'defaults_get::<String>("v2.pref.api_domain")' in lib
+    assert 'String::from("mapi.copy20.com")' in lib
+    assert 'Some("resolution.r800") => String::from("800")' in lib
+    assert 'Some("resolution.r1500") => String::from("1500")' in lib
+    assert '_ => String::from("1500")' in lib
+
+
 def test_scaffold_maps_prefixed_platform_setting_to_protocol_header(tmp_path: Path) -> None:
     manifest = _manifest()
     manifest.files[0].content += """
@@ -423,6 +562,46 @@ fn get_platform_header() -> Option<(&'static str, String)> {
         assert f'"platform.{word}" => Some(("platform", String::from("{number}")))' in lib
     assert 'String::from("platform.one")' in lib
     assert "platform.map(" not in lib
+
+
+def test_scaffold_maps_prefixed_platform_binding_before_header_push(tmp_path: Path) -> None:
+    manifest = _manifest()
+    manifest.files[0].content += """
+use aidoku::alloc::{String, Vec};
+use aidoku::imports::defaults::defaults_get;
+fn build_headers() -> Vec<(String, String)> {
+    let mut headers = Vec::new();
+    let platform: String = defaults_get("v2.pref.platform")
+        .unwrap_or_else(|| "platform.one".into());
+    if !platform.is_empty() {
+        headers.push(("platform".into(), platform));
+    }
+    headers
+}
+"""
+    manifest.files.append(
+        GeneratedFile(
+            path="res/settings.json",
+            content="""[
+                {"type":"group","title":"Request","items":[
+                    {"type":"select","key":"v2.pref.platform","title":"Platform",
+                     "values":["platform.none","platform.blank","platform.one","platform.two"],
+                     "titles":["None","Blank","1","2"],"default":"platform.one"}
+                ]}
+            ]""",
+        )
+    )
+    project, ir = scaffold_project(tmp_path)
+
+    apply_generation_manifest(project, ir, manifest, query=None)
+
+    lib = (project / "src" / "lib.rs").read_text(encoding="utf-8")
+    assert 'Some("platform.none") => String::new()' in lib
+    assert 'Some("platform.blank") => String::from(" ")' in lib
+    assert 'Some("platform.one") => String::from("1")' in lib
+    assert 'Some("platform.two") => String::from("2")' in lib
+    assert '_ => String::from("1")' in lib
+    assert 'headers.push(("platform".into(), platform))' in lib
 
 
 def test_scaffold_maps_prefixed_resolution_setting_to_numeric_value(tmp_path: Path) -> None:
@@ -496,7 +675,57 @@ fn to_manga(&self, resolution: &str) -> Manga {
     assert "let cover = self.cover.clone().unwrap_or_default();" in lib
 
 
-def test_scaffold_optionalizes_unused_decompiled_dto_strings(tmp_path: Path) -> None:
+def test_scaffold_uses_public_source_base_for_generated_absolute_urls(tmp_path: Path) -> None:
+    manifest = _manifest()
+    manifest.files[0].content += """
+fn get_api_base() -> String { String::from("https://api.example/api/v3") }
+fn absolute_url(relative: &str) -> String {
+    format!("{}/{}", get_api_base(), relative.trim_start_matches('/'))
+}
+"""
+    project, ir = scaffold_project(tmp_path)
+
+    apply_generation_manifest(project, ir, manifest, query=None)
+
+    lib = (project / "src" / "lib.rs").read_text(encoding="utf-8")
+    assert 'String::from("https://api.example/api/v3")' in lib
+    assert 'format!("{}/{}", "https://example.com", relative.trim_start_matches(\'/\'))' in lib
+
+
+def test_scaffold_projects_recovered_chapter_key_template(tmp_path: Path) -> None:
+    manifest = _manifest()
+    manifest.files[0].content += """
+fn chapter_key(comic_path: &str, chapter_id: &str) -> String {
+    format!("{}/chapter/{}", comic_path, chapter_id)
+}
+"""
+    project, ir = scaffold_project(tmp_path)
+    ir = ir.model_copy(
+        update={
+            "chapter_page_routes": [
+                ChapterPageRoute(
+                    source_method="content(chapter.url)",
+                    chapter_key_template="/comic/{comic_path}/chapter/{chapter_id}",
+                    endpoint_template="/api/v3/comic/{normalized_chapter_key}",
+                    variants=[
+                        ChapterPageRouteVariant(
+                            name="default",
+                            condition="default API domain",
+                            is_default=True,
+                        )
+                    ],
+                )
+            ]
+        }
+    )
+
+    apply_generation_manifest(project, ir, manifest, query=None)
+
+    lib = (project / "src" / "lib.rs").read_text(encoding="utf-8")
+    assert 'format!("/comic/{}/chapter/{}", comic_path, chapter_id)' in lib
+
+
+def test_scaffold_skips_unused_decompiled_dto_fields(tmp_path: Path) -> None:
     manifest = _manifest()
     manifest.files.append(
         GeneratedFile(
@@ -507,7 +736,10 @@ use aidoku::{alloc::string::String, serde::Deserialize};
 struct ChapterDetail {
     group_id: String,
     name: String,
+    region: Region,
 }
+#[derive(Deserialize)]
+struct Region { value: String }
 fn chapter_name(chapter: &ChapterDetail) -> &str { &chapter.name }
 """,
         )
@@ -518,7 +750,9 @@ fn chapter_name(chapter: &ChapterDetail) -> &str { &chapter.name }
     apply_generation_manifest(project, ir, manifest, query=None)
 
     dto = (project / "src" / "dto.rs").read_text(encoding="utf-8")
+    assert dto.count("#[serde(skip_deserializing)]") == 3
     assert "group_id: Option<String>" in dto
+    assert "region: Option<Region>" in dto
     assert "name: String" in dto
 
 

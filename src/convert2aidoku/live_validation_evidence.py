@@ -28,12 +28,13 @@ _EVIDENCE = {
     ),
     "zh.copymanga": LiveValidationEvidence(
         repair_context=(
-            "Independent 2026-07-21 public API reachability evidence from the Tachi input only: "
+            "Independent 2026-07-27 public API reachability evidence from the Tachi input only: "
             "the required CopyManga headers are Accept: application/json, Origin: "
             "https://2025copy.com, Version: 2025.11.21, Region: 0, Webp: 0, platform: 1, and a "
-            "browser User-Agent. GET mapi.copy20.com/api/v3/comic2/<path> and "
-            "mapi.copy2000.site/api/v3/comic2/<path> returned API code 200, while the input's "
-            "api.copy3000.com default returned custom HTTP/API code 210 on this network. Keep "
+            "browser User-Agent. GET api.mangacopy.com/api/v3/comic2/<path> and the dynamic "
+            "theme endpoint returned API code 200, while mapi.copy20.com timed out on this "
+            "network. A stored platform.one header returned text/html 'error'; translating it "
+            "to protocol value 1 returned JSON. Keep "
             "the finite input allowlist, but prefer a currently reachable public domain as the "
             "default. Official AidokuRunner differential evidence for generated v83 loaded all "
             "seven filters across the Swift/Postcard boundary. Region, sort, and dynamic theme "
@@ -51,8 +52,8 @@ _EVIDENCE = {
             "filter that does not change its request is incomplete."
         ),
         setting_defaults=(
-            ("v2.pref.api_domain", "mapi.copy20.com"),
-            ("api_domain", "mapi.copy20.com"),
+            ("v2.pref.api_domain", "api.mangacopy.com"),
+            ("api_domain", "api.mangacopy.com"),
         ),
     ),
 }

@@ -10,6 +10,7 @@ from convert2aidoku.models import (
     GenerationManifest,
     SourceFilterOption,
     SourceFilterSpec,
+    normalize_generated_json_resource,
 )
 
 
@@ -148,6 +149,58 @@ def test_grouped_setting_options_are_normalized_recursively() -> None:
     parsed = json.loads(generated.content)
     assert parsed[0]["items"][0]["titles"] == ["Traditional"]
     assert parsed[0]["items"][0]["values"] == [""]
+
+
+def test_settings_fill_required_titles_text_defaults_and_protocol_resolution_values() -> None:
+    generated = GeneratedFile(
+        path="res/settings.json",
+        content="""[
+            {"type":"group","title":"设置","items":[
+                {"type":"select","key":"v2.pref.api_domain",
+                 "values":["api.example"],"default":"api.example"},
+                {"type":"text","key":"v2.pref.api_domain_custom"},
+                {"type":"select","key":"v2.pref.resolution",
+                 "values":["800","1200","1500"],
+                 "titles":["800","1200","1500"],"default":"1500"},
+                {"type":"text","key":"v2.key.user_agent"}
+            ]}
+        ]""",
+    )
+
+    items = json.loads(generated.content)[0]["items"]
+    assert [item["title"] for item in items] == [
+        "API Domain",
+        "API Domain Custom",
+        "Resolution",
+        "User Agent",
+    ]
+    assert items[1]["default"] == ""
+    assert items[2]["values"] == [
+        "resolution.r800",
+        "resolution.r1200",
+        "resolution.r1500",
+    ]
+    assert items[2]["default"] == "resolution.r1500"
+    assert items[3]["default"] == ""
+
+
+def test_settings_protocol_normalization_is_idempotent_and_does_not_rewrite_other_selects() -> None:
+    content = """[
+        {"type":"group","items":[
+            {"type":"select","key":"page_size","values":["20","40"],"default":"20"},
+            {"type":"select","key":"resolution","values":["resolution.r800"],
+             "default":"resolution.r800"}
+        ]}
+    ]"""
+
+    once = normalize_generated_json_resource("res/settings.json", content)
+    twice = normalize_generated_json_resource("res/settings.json", once)
+
+    assert twice == once
+    items = json.loads(once)[0]["items"]
+    assert items[0]["values"] == ["20", "40"]
+    assert items[0]["default"] == "20"
+    assert items[1]["values"] == ["resolution.r800"]
 
 
 def test_settings_reject_mixed_grouped_and_ungrouped_top_level_items() -> None:

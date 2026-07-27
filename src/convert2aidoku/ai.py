@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import re
+import signal
+import threading
 import time
 from collections.abc import Callable
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from copy import deepcopy
 from dataclasses import dataclass, field
 from importlib.resources import files as resource_files
@@ -43,7 +45,11 @@ from .models import (
     SourceIR,
     validate_generated_path,
 )
-from .scaffold import normalize_pinned_aidoku_rust, validate_generated_content
+from .scaffold import (
+    normalize_pinned_aidoku_rust,
+    render_generated_lib_rs,
+    validate_generated_content,
+)
 
 _ResponseMode = Literal["json_schema", "json_object", "plain"]
 _REASONING_CONTROL_ERROR = re.compile(
@@ -78,6 +84,36 @@ _PATCH_SCOPES = {
         "contract_diagnostics",
     ),
 }
+
+
+class _RequestDeadlineExceeded(Exception):
+    pass
+
+
+@contextmanager
+def _request_deadline(seconds: float):
+    if (
+        seconds <= 0
+        or not hasattr(signal, "SIGALRM")
+        or threading.current_thread() is not threading.main_thread()
+    ):
+        yield
+        return
+
+    def expire(_signum: int, _frame: object) -> None:
+        raise _RequestDeadlineExceeded
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
+    signal.signal(signal.SIGALRM, expire)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, *previous_timer)
 
 
 @dataclass
@@ -135,14 +171,14 @@ class _RustGenerationManifest(BaseModel):
 
     @field_validator("files")
     @classmethod
-    def requires_lib_rs_and_unique_paths(
+    def requires_entrypoint_or_source_and_unique_paths(
         cls, files: list[_RustGeneratedFile]
     ) -> list[_RustGeneratedFile]:
         paths = [item.path for item in files]
         if len(paths) != len(set(paths)):
             raise ValueError("generated file paths must be unique")
-        if "src/lib.rs" not in paths:
-            raise ValueError("generation manifest must include src/lib.rs")
+        if "src/lib.rs" not in paths and "src/source.rs" not in paths:
+            raise ValueError("generation manifest must include src/source.rs or src/lib.rs")
         return files
 
     @model_validator(mode="after")
@@ -242,6 +278,21 @@ def _validate_rust_manifest(manifest: _RustGenerationManifest) -> None:
             "generated source requested disallowed dependencies: "
             + ", ".join(evaluation.disallowed)
         )
+    generated_paths = {generated.path for generated in manifest.files}
+    if "src/source.rs" in generated_paths:
+        lib_content = render_generated_lib_rs(
+            manifest.source_struct,
+            list(manifest.implemented_traits),
+            generated_paths,
+        )
+        lib = next(
+            (generated for generated in manifest.files if generated.path == "src/lib.rs"),
+            None,
+        )
+        if lib is None:
+            manifest.files.append(_RustGeneratedFile(path="src/lib.rs", content=lib_content))
+        else:
+            lib.content = lib_content
     for generated in manifest.files:
         generated.content = normalize_pinned_aidoku_rust(
             generated.content,
@@ -363,7 +414,12 @@ class OpenAICompatibleClient:
         retry_delays = (5.0, 15.0, 30.0)
         for retry in range(len(retry_delays) + 1):
             try:
-                response = self._client.post(self.settings.chat_completions_url, json=body)
+                with _request_deadline(self.settings.timeout_seconds):
+                    response = self._client.post(self.settings.chat_completions_url, json=body)
+            except _RequestDeadlineExceeded as exc:
+                raise AIProviderError(
+                    f"AI request exceeded total timeout of {self.settings.timeout_seconds:g}s"
+                ) from exc
             except httpx.HTTPError as exc:
                 raise AIProviderError(f"AI request failed: {exc}") from exc
             if response.status_code not in {429, 502, 503, 504} or retry >= len(retry_delays):
@@ -519,6 +575,9 @@ class OpenAICompatibleClient:
                     "Generate a complete Aidoku implementation for this standalone source. "
                     "Allowed output paths are only src/**/*.rs. Do not return filters.json or "
                     "settings.json: the tool owns those resources and generates them separately. "
+                    "Define the public source_struct and Source implementation in src/source.rs; "
+                    "the tool reconstructs src/lib.rs deterministically from source_struct, "
+                    "implemented_traits, and the returned module paths. "
                     "Cargo.toml is forbidden because the tool owns all Cargo metadata. Use only "
                     "allowed dependencies and do not omit required core behavior.\n\n"
                     + json.dumps(source_payload, ensure_ascii=False)

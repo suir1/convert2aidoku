@@ -1,4 +1,5 @@
 import json
+import time
 
 import httpx
 import pytest
@@ -232,6 +233,28 @@ def test_terminal_provider_error_is_not_retried_as_invalid_model_output() -> Non
     assert calls == 1
 
 
+def test_request_timeout_is_total_not_reset_by_provider_activity() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        time.sleep(0.1)
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(_manifest())}}]},
+        )
+
+    settings = provider_settings().model_copy(update={"timeout_seconds": 0.01})
+    with (
+        OpenAICompatibleClient(settings, transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(AIProviderError, match="exceeded total timeout"),
+    ):
+        client._request_manifest([{"role": "user", "content": "test"}])
+
+    assert calls == 1
+
+
 def test_reasoning_effort_rejection_is_remembered_without_consuming_retry() -> None:
     calls = 0
     reasoning_values: list[str | None] = []
@@ -406,10 +429,16 @@ def test_initial_generation_normalizes_safe_std_allocations_without_retry() -> N
         nonlocal calls
         calls += 1
         manifest = _manifest()
-        manifest["files"][0]["content"] = (
-            "#![no_std]\nextern crate std;\nuse std::collections::HashMap;\n"
-            "fn values() { let _ = HashMap::<String, String>::new(); }"
-        )
+        manifest["files"] = [
+            {
+                "path": "src/source.rs",
+                "content": (
+                    "use std::collections::HashMap;\n"
+                    "pub struct Example;\n"
+                    "fn values() { let _ = HashMap::<String, String>::new(); }"
+                ),
+            }
+        ]
         return httpx.Response(
             200,
             json={"choices": [{"message": {"content": json.dumps(manifest)}}]},
@@ -424,8 +453,11 @@ def test_initial_generation_normalizes_safe_std_allocations_without_retry() -> N
         result = client.generate(ir)
 
     assert calls == 1
-    assert "std::" not in result.value.files[0].content
-    assert "BTreeMap::<String, String>" in result.value.files[0].content
+    files = {item.path: item.content for item in result.value.files}
+    assert "std::" not in files["src/lib.rs"]
+    assert "mod source;" in files["src/lib.rs"]
+    assert "pub use source::Example;" in files["src/lib.rs"]
+    assert "BTreeMap::<String, String>" in files["src/source.rs"]
 
 
 def test_initial_generation_stops_after_two_unsafe_full_outputs() -> None:

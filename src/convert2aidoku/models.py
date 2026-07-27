@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from copy import deepcopy
 from enum import StrEnum
 from pathlib import PurePosixPath
@@ -177,6 +178,51 @@ def _require_string_list(
     return value
 
 
+_SETTING_TITLE_ACRONYMS = {
+    "api": "API",
+    "http": "HTTP",
+    "https": "HTTPS",
+    "id": "ID",
+    "ip": "IP",
+    "ua": "UA",
+    "url": "URL",
+}
+
+
+def _humanize_setting_key(key: str) -> str:
+    suffix = key.rsplit(".", 1)[-1]
+    words = [word for word in re.split(r"[_\-\s]+", suffix) if word]
+    return " ".join(
+        _SETTING_TITLE_ACRONYMS.get(word.casefold(), word[:1].upper() + word[1:]) for word in words
+    )
+
+
+def _normalize_protocol_setting_values(item: dict[str, Any], setting_type: Any) -> None:
+    key = item.get("key")
+    if (
+        setting_type not in {"select", "multi-select", "picker"}
+        or not isinstance(key, str)
+        or key.rsplit(".", 1)[-1] != "resolution"
+    ):
+        return
+    values = item.get("values")
+    if (
+        not isinstance(values, list)
+        or not values
+        or not all(isinstance(value, str) and value.isdecimal() for value in values)
+    ):
+        return
+    item["values"] = [f"resolution.r{value}" for value in values]
+    default = item.get("default")
+    if isinstance(default, str) and default.isdecimal():
+        item["default"] = f"resolution.r{default}"
+    elif isinstance(default, list):
+        item["default"] = [
+            f"resolution.r{value}" if isinstance(value, str) and value.isdecimal() else value
+            for value in default
+        ]
+
+
 def _normalize_setting_item(raw_item: Any, *, location: str) -> dict[str, Any]:
     if not isinstance(raw_item, dict):
         raise ValueError(f"{location} must be a JSON object")
@@ -210,6 +256,15 @@ def _normalize_setting_item(raw_item: Any, *, location: str) -> dict[str, Any]:
             values.append(value)
         item.setdefault("titles", titles)
         item.setdefault("values", values)
+    _normalize_protocol_setting_values(item, setting_type)
+    if setting_type not in {"group", "page"} and "title" not in item:
+        key = item.get("key")
+        if isinstance(key, str):
+            title = _humanize_setting_key(key)
+            if title:
+                item["title"] = title
+    if setting_type == "text":
+        item.setdefault("default", "")
     if setting_type in {"select", "multi-select"}:
         values = _require_string_list(item, "values", location=location, required=True)
         titles = _require_string_list(item, "titles", location=location)
