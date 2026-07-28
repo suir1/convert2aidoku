@@ -276,6 +276,45 @@ def test_validation_applies_clippy_fixes_before_requesting_ai(
     assert result.stages[5].name == "clippy"
 
 
+def test_validation_retries_clippy_fix_when_first_fix_exposes_another_lint(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+    clippy_runs = 0
+
+    def fake_find_tool(name: str) -> str | None:
+        return "/cargo" if name == "cargo" else None
+
+    def fake_run_stage(name: str, kind: StageKind, *_args: object) -> ValidationStage:
+        nonlocal clippy_runs
+        calls.append(name)
+        ok = True
+        if name == "clippy":
+            clippy_runs += 1
+            ok = clippy_runs > 2
+        return ValidationStage(name=name, kind=kind, ok=ok)
+
+    monkeypatch.setattr("convert2aidoku.validator.find_tool", fake_find_tool)
+    monkeypatch.setattr("convert2aidoku.validator._run_stage", fake_run_stage)
+    (tmp_path / "Cargo.lock").write_text("locked", encoding="utf-8")
+
+    result = validate_project(tmp_path, live=False)
+
+    assert result.build_ok
+    assert calls == [
+        "format",
+        "cargo-check",
+        "clippy",
+        "clippy-fix",
+        "format-after-clippy-fix",
+        "clippy",
+        "clippy-fix-2",
+        "format-after-clippy-fix-2",
+        "clippy",
+    ]
+
+
 def test_generated_safety_ignores_tool_owned_smoke_module(tmp_path: Path) -> None:
     source = tmp_path / "src"
     source.mkdir()

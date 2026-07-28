@@ -297,32 +297,41 @@ class _ValidationPlan:
         initial = self.command("clippy", StageKind.CLIPPY, command, 600, record=False)
         if initial.ok:
             return self.record(initial).ok
-        fix = self.command(
-            "clippy-fix",
-            StageKind.CLIPPY,
-            [
-                cargo,
-                "clippy",
-                "--fix",
-                "--allow-dirty",
-                "--allow-no-vcs",
-                *command[2:],
-            ],
-            600,
-            record=False,
-        )
-        if not fix.ok:
-            self.record(initial)
+        previous = initial
+        for attempt in range(1, 3):
+            suffix = "" if attempt == 1 else "-2"
+            fix = self.command(
+                f"clippy-fix{suffix}",
+                StageKind.CLIPPY,
+                [
+                    cargo,
+                    "clippy",
+                    "--fix",
+                    "--allow-dirty",
+                    "--allow-no-vcs",
+                    *command[2:],
+                ],
+                600,
+                record=False,
+            )
+            if not fix.ok:
+                self.record(previous)
+                self.record(fix)
+                return False
             self.record(fix)
-            return False
-        self.record(fix)
-        if not self.command(
-            "format-after-clippy-fix", StageKind.FORMAT, [cargo, "fmt", "--all"], 120
-        ).ok:
-            return False
-        if not self.record(_generated_safety_stage(self.project)).ok:
-            return False
-        return self.record(self.command("clippy", StageKind.CLIPPY, command, 600, record=False)).ok
+            if not self.command(
+                f"format-after-clippy-fix{suffix}",
+                StageKind.FORMAT,
+                [cargo, "fmt", "--all"],
+                120,
+            ).ok:
+                return False
+            if not self.record(_generated_safety_stage(self.project)).ok:
+                return False
+            previous = self.command("clippy", StageKind.CLIPPY, command, 600, record=False)
+            if previous.ok:
+                return self.record(previous).ok
+        return self.record(previous).ok
 
     def missing(self, name: str) -> ValidationResult:
         self.record(

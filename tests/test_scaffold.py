@@ -706,6 +706,7 @@ register_source!(Source, ListingProvider, DynamicFilters, DeepLinkHandler);
     assert "filter::SelectFilter" not in normalized
     assert "SelectFilter" in normalized
     assert "use aidoku::alloc::vec;" in normalized
+    assert "use aidoku::alloc::vec::Vec;" not in normalized
     assert '.header("User-Agent", &get_user_agent())' in normalized
     assert ".header(key, &val)" in normalized
     assert "let domain: String = defaults_get::<String>(" in normalized
@@ -755,6 +756,148 @@ fn parse() -> Result<MangaPageResult, RequestError> {
     assert normalize_pinned_aidoku_rust(normalized) == normalized
 
 
+def test_normalizer_repairs_no_std_network_result_defaults_and_string_errors() -> None:
+    content = """
+use aidoku::{Request, Response};
+use aidoku::Result;
+
+fn parse(response: Response) -> Result<Vec<String>, String> {
+    let _boxed: Option<Box<String>> = None;
+    let domain: String = defaults_get("domain");
+    if domain.is_empty() {
+        return Err("missing domain".into());
+    }
+    let value = response.get_json_owned().map_err(|e| format!("json: {}", e))?;
+    if value.is_null() {
+        return Err(format!("invalid: {}", value));
+    }
+    Ok(Vec::new())
+}
+
+fn tuple_result() -> Result<(String, bool), aidoku::NetworkError> {
+    Ok((String::new(), false))
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "use aidoku::{Request, Response};" not in normalized
+    assert "use aidoku::imports::net::Response;" in normalized
+    assert "use aidoku::imports::net::Request;" not in normalized
+    assert "use aidoku::alloc::vec::Vec;" in normalized
+    assert "use aidoku::alloc::boxed::Box;" in normalized
+    assert "Result<Vec<String>, String>" not in normalized
+    assert "Result<Vec<String>>" in normalized
+    assert "Result<(String, bool)>" in normalized
+    assert 'defaults_get::<String>("domain").unwrap_or_default()' in normalized
+    assert 'Err(aidoku::AidokuError::message("missing domain"))' in normalized
+    assert "map_err(|e| format!" not in normalized
+    assert 'Err(aidoku::AidokuError::message(format!("invalid: {}", value)))' in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
+def test_normalizer_repairs_legacy_models_filters_pages_and_context() -> None:
+    content = """
+fn chapter(value: &str, group: &str) -> Result<Chapter> {
+    let date = parse_date(
+        value,
+        "yyyy-MM-dd",
+        None,
+    )?;
+    Ok(Chapter {
+        scanlator: Some(group.to_string()),
+        date_uploaded: Some(date),
+        ..Default::default()
+    })
+}
+fn manga() -> Manga {
+    let mut manga = Manga::new();
+    manga.initialized = true;
+    manga
+}
+fn pages(image_url: String) -> Vec<Page> {
+    let context = serde_json::json!({"referer": "https://example.com".to_string()}).to_string();
+    let mut pages = Vec::new();
+    pages.push(Page {
+        index,
+        url: image_url.clone(),
+        content: PageContent::url_context(image_url, context),
+        ..Default::default()
+    });
+    pages
+}
+fn image(context: Option<PageContext>) -> Result<Request> {
+    let mut request = Request::get("https://example.com")?;
+    if let Some(ctx) = context {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&ctx.0) {
+            if let Some(referer) = json.get("referer").and_then(|v| v.as_str()) {
+                request = request.header("referer", referer);
+            }
+        }
+    }
+    Ok(request)
+}
+fn filters(categories: Vec<Category>) -> Vec<Filter> {
+    let mut filters = vec![Filter::Header { title: "Header".into() }];
+    for category in categories {
+        filters.push(Filter::Checkbox(aidoku::CheckboxFilter {
+            id: category.id,
+            title: Some(category.name),
+            default: false,
+        }));
+    }
+    filters.push(Filter::from(aidoku::SortFilter {
+        id: "sort".into(),
+        default_index: 0,
+        values: vec!["Latest".into()],
+        ascending: Some(false),
+        ..Default::default()
+    }));
+    filters.push(Filter::from(aidoku::SelectFilter {
+        id: "status".into(),
+        default_id: Some("".into()),
+        ..Default::default()
+    }));
+    filters
+}
+fn selected(filters: &[FilterValue]) -> bool {
+    for filter in filters {
+        if let FilterValue::Checkbox { id, checked } = filter {
+            if id == "category" && *checked { return true; }
+        }
+    }
+    false
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "Manga::new()" not in normalized
+    assert ".initialized" not in normalized
+    assert "scanlators: Some(vec![group.to_string()])" in normalized
+    assert "let date = parse_date(" in normalized
+    assert "None" not in normalized.split("Ok(Chapter", 1)[0]
+    assert "date_uploaded: date" in normalized
+    assert "Filter::Header" not in normalized
+    assert 'Filter::note("Header")' in normalized
+    assert "Filter::from(aidoku::CheckFilter" in normalized
+    assert "default: Some(false)" in normalized
+    assert "id: category.id.into()" in normalized
+    assert "title: Some(category.name.into())" in normalized
+    assert "options: vec!" in normalized
+    assert "aidoku::SortFilterDefault { index: 0, ascending: false }" in normalized
+    assert 'default: Some("".into())' in normalized
+    assert "FilterValue::Check { id, value }" in normalized
+    assert "*value > 0" in normalized
+    assert "index," not in normalized
+    assert "url: image_url.clone()" not in normalized
+    assert "let mut context = PageContext::new();" in normalized
+    assert 'context.insert("referer".into()' in normalized
+    assert 'ctx.get("referer")' in normalized
+    assert "ctx.0" not in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
 def test_manifest_normalizer_repairs_cross_file_module_topology(tmp_path: Path) -> None:
     _project, ir = scaffold_project(tmp_path)
     manifest = GenerationManifest(
@@ -764,8 +907,11 @@ def test_manifest_normalizer_repairs_cross_file_module_topology(tmp_path: Path) 
             GeneratedFile(
                 path="src/source.rs",
                 content=(
+                    "#![allow(dead_code)]\n"
                     "mod parser;\nmod paths;\nuse parser::*;\nuse paths::*;\n"
                     "fn resolution() -> i32 { 1 }\nfn api_domain() -> i32 { 2 }\n"
+                    "fn endpoint() -> &'static str { API_URL }\n"
+                    "register_source!(Simple);\n"
                 ),
             ),
             GeneratedFile(
@@ -775,6 +921,10 @@ def test_manifest_normalizer_repairs_cross_file_module_topology(tmp_path: Path) 
             GeneratedFile(
                 path="src/paths.rs",
                 content="use crate::api_domain;\nfn value() -> i32 { api_domain() }\n",
+            ),
+            GeneratedFile(
+                path="src/query.rs",
+                content='const API_URL: &str = "https://example.com";\n',
             ),
         ],
     )
@@ -790,6 +940,11 @@ def test_manifest_normalizer_repairs_cross_file_module_topology(tmp_path: Path) 
     assert "use crate::source::api_domain;" in files["src/paths.rs"]
     assert "pub(crate) fn resolution" in files["src/source.rs"]
     assert "pub(crate) fn api_domain" in files["src/source.rs"]
+    assert "register_source!" not in files["src/source.rs"]
+    assert "\n;\n" not in files["src/source.rs"]
+    assert "use crate::query::API_URL;" in files["src/source.rs"]
+    assert files["src/source.rs"].startswith("#![allow(dead_code)]")
+    assert "pub(crate) const API_URL" in files["src/query.rs"]
 
 
 def test_normalizer_repairs_raw_json_listing_and_consuming_builder_patterns() -> None:
