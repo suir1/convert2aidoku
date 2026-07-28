@@ -734,6 +734,91 @@ def test_generate_structures_settings_and_owns_static_filters() -> None:
     assert json.loads(resources["res/settings.json"])[0]["items"][0]["default"] == "1"
 
 
+def test_generate_retries_settings_that_fail_aidoku_resource_validation() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        payload = json.loads(request.content)
+        if calls == 1:
+            response = _manifest()
+            usage = {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}
+        elif calls == 2:
+            response = {"groups": [{"type": "group", "title": "Settings"}]}
+            usage = {"prompt_tokens": 30, "completion_tokens": 10, "total_tokens": 40}
+        else:
+            assert "items must be an array" in payload["messages"][-1]["content"]
+            response = {
+                "groups": [
+                    {
+                        "type": "group",
+                        "title": "Settings",
+                        "items": [
+                            {
+                                "type": "text",
+                                "key": "example",
+                                "title": "Example",
+                                "default": "",
+                            }
+                        ],
+                    }
+                ]
+            }
+            usage = {"prompt_tokens": 20, "completion_tokens": 5, "total_tokens": 25}
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": json.dumps(response)}}],
+                "usage": usage,
+            },
+        )
+
+    ir = minimal_source_ir(capabilities=[Capability.SETTINGS])
+    settings = provider_settings()
+
+    with OpenAICompatibleClient(settings, transport=httpx.MockTransport(handler)) as client:
+        result = client.generate(ir)
+
+    assert calls == 3
+    assert result.usage and result.usage.total_tokens == 185
+    resources = {item.path: item.content for item in result.value.files}
+    assert json.loads(resources["res/settings.json"])[0]["items"][0]["key"] == "example"
+
+
+def test_generate_preserves_rust_usage_when_settings_generation_fails() -> None:
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            response = _manifest()
+            usage = {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}
+        else:
+            response = {"groups": [{"type": "group", "title": "Settings"}]}
+            usage = {"prompt_tokens": 30, "completion_tokens": 10, "total_tokens": 40}
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": json.dumps(response)}}],
+                "usage": usage,
+            },
+        )
+
+    ir = minimal_source_ir(capabilities=[Capability.SETTINGS])
+    settings = provider_settings()
+
+    with (
+        OpenAICompatibleClient(settings, transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(AIProviderError) as raised,
+    ):
+        client.generate(ir)
+
+    assert calls == 4
+    assert raised.value.usage and raised.value.usage.total_tokens == 240
+
+
 def test_repair_uses_compact_context_without_original_source_bodies() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)

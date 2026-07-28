@@ -136,7 +136,7 @@ class RequestHeaderProfile(BaseModel):
 
 
 class SourceIR(BaseModel):
-    schema_version: Literal[1, 2, 3] = 3
+    schema_version: Literal[1, 2, 3, 4] = 4
     input_ref: str
     commit: str | None = None
     source_format: Literal["kotlin_module", "decompiled_apk"] = "kotlin_module"
@@ -506,7 +506,26 @@ class GeneratedResources:
         return path in self._data
 
     def is_empty(self, path: str) -> bool:
+        if path == self.SETTINGS:
+            return not self.has_nonempty_setting_items()
         return not self._data.get(path)
+
+    def has_nonempty_setting_items(self) -> bool:
+        return any(
+            isinstance(group, dict)
+            and isinstance(group.get("items"), list)
+            and bool(group["items"])
+            for group in self._data.get(self.SETTINGS, [])
+        )
+
+    def setting_keys(self) -> tuple[str, ...]:
+        return tuple(
+            item["key"]
+            for group in self._data.get(self.SETTINGS, [])
+            if isinstance(group, dict) and isinstance(group.get("items"), list)
+            for item in group["items"]
+            if isinstance(item, dict) and isinstance(item.get("key"), str)
+        )
 
     def contains_text(self, path: str, needle: str) -> bool:
         lowered = needle.lower()

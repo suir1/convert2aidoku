@@ -12,6 +12,7 @@ from .conversion_completion import ConversionOutcome, complete_conversion
 from .conversion_intake import ConversionIntake
 from .errors import AIProviderError, InputError
 from .generated_source_metadata import GeneratedSourceMetadata
+from .kotlin_settings import with_kotlin_settings
 from .live_validation_evidence import live_validation_evidence
 from .manifest_contract import (
     ContractEvaluation,
@@ -89,6 +90,7 @@ class _ConversionRoundRunner:
             effective = manifest.model_copy(update={"files": manifest.files + inherited})
         effective = normalize_decompiled_dto_manifest(self.ir, effective)
         effective = normalize_decompiled_setting_manifest(self.ir, effective)
+        effective = with_kotlin_settings(self.ir, effective)
         setting_overrides = live_validation_evidence(self.ir).setting_overrides
         effective = GeneratedResources(effective).with_defaults(
             filter_specs=self.ir.filter_specs,

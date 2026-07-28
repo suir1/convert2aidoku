@@ -78,8 +78,8 @@ def test_resume_refreshes_legacy_source_ir(tmp_path: Path) -> None:
         resume=True,
     )
 
-    assert resumed.source_ir.schema_version == 3
-    assert resumed.store.read_source_ir().schema_version == 3
+    assert resumed.source_ir.schema_version == 4
+    assert resumed.store.read_source_ir().schema_version == 4
 
 
 def test_completed_resume_bumps_generated_source_and_source_ir_versions(tmp_path: Path) -> None:

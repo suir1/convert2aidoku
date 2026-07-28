@@ -85,7 +85,12 @@ def evaluate_manifest_contract(
         "ListingProvider" not in traits
     ):
         add("source declares popular/latest listings but generated no ListingProvider")
-    if Capability.FILTERS in ir.capabilities:
+    dynamic_filters_cover_all = (
+        Capability.DYNAMIC_FILTERS in ir.capabilities
+        and "DynamicFilters" in traits
+        and not ir.filter_specs
+    )
+    if Capability.FILTERS in ir.capabilities and not dynamic_filters_cover_all:
         if not resources.has(GeneratedResources.FILTERS):
             add("source declares filters but generated no res/filters.json")
         elif resources.is_empty(GeneratedResources.FILTERS):
@@ -166,7 +171,11 @@ def evaluate_manifest_contract(
         marker in input_content
         for marker in ("cookieJar.loadForRequest", "cookieJar.saveFromResponse")
     )
-    if source_uses_cookie_jar:
+    optional_cookie_refresh = re.search(
+        r"cookieJar\.loadForRequest[^\n]{0,300}\?:\s*return\b",
+        input_content,
+    )
+    if source_uses_cookie_jar and optional_cookie_refresh is None:
         has_cookie_setting = resources.contains_text(GeneratedResources.SETTINGS, "cookie")
         has_api_cookie_header = rust.function_has_header("post_query", "cookie")
         has_image_cookie_header = rust.function_has_header("get_image_request", "cookie")

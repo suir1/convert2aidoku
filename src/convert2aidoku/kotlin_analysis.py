@@ -75,7 +75,10 @@ def _parse_content_rating(build: str) -> ContentRating:
 
 
 def _uses_relative_url_keys(kotlin: str) -> bool:
-    return "setUrlWithoutDomain" in kotlin or bool(re.search(r"\burl\s*=\s*\"/", kotlin))
+    return "setUrlWithoutDomain" in kotlin or bool(
+        re.search(r"\burl\s*=\s*\"/", kotlin)
+        or re.search(r"\bval\s+url\s+get\(\)\s*=\s*\"/", kotlin)
+    )
 
 
 def _unsupported_features(

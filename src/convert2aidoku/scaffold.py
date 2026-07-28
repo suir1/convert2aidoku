@@ -572,6 +572,7 @@ def _aidoku_request_imported(content: str) -> bool:
         (compact := RustInspection.compact_node(node)).startswith("useaidoku::")
         and (
             "imports::net::Request" in compact
+            or re.search(r"imports::net::\{[^}]*\bRequest\b", compact) is not None
             or re.search(r"imports::\{[^}]*net::\{?[^}]*Request", compact) is not None
         )
         for node in RustInspection.from_content(content).nodes("use_declaration")
@@ -603,6 +604,7 @@ def _inject_required_aidoku_imports(content: str) -> str:
     missing_root = sorted(
         name
         for name in identifiers & _AIDOKU_ROOT_NAMES - declared
+        if re.search(rf"(?<!aidoku::)\b{re.escape(name)}\b", content)
         if not _aidoku_root_imported(content, name)
         and not (
             "register_source!" in content
@@ -621,11 +623,10 @@ def _inject_required_aidoku_imports(content: str) -> str:
         content = _inject_import(content, f"use aidoku::{{{', '.join(missing_root)}}};")
     if re.search(r"(?<![:\w])String\b", content) and not _aidoku_alloc_string_imported(content):
         content = _inject_import(content, "use aidoku::alloc::string::String;")
-    if re.search(r"\bResult\s*<", content) and not _aidoku_root_imported(content, "Result"):
+    if re.search(r"(?<![:\w])Result\s*<", content) and not _aidoku_root_imported(content, "Result"):
         content = _inject_import(content, "use aidoku::Result;")
-    has_request_identifier = any(
-        _rust_identifier(node) == "Request" for node in RustInspection.from_content(content).nodes()
-    )
+    request_usage = re.sub(r"(?m)^\s*use\s+[^;]+;", "", content)
+    has_request_identifier = re.search(r"(?<![:\w])Request\b", request_usage) is not None
     if has_request_identifier and not _aidoku_request_imported(content):
         content = _inject_import(content, "use aidoku::imports::net::Request;")
     if ".to_string()" in content and not _aidoku_to_string_imported(content):
@@ -755,6 +756,66 @@ def _normalize_mutated_aidoku_models(content: str) -> str:
     return content
 
 
+def _normalize_default_model_assignments(content: str) -> str:
+    encoded = content.encode("utf-8")
+    edits: list[tuple[int, int, bytes]] = []
+    for function in RustInspection.from_content(content).functions:
+        body = function.node.child_by_field_name("body")
+        if body is None:
+            continue
+        children = body.named_children
+        for index, child in enumerate(children):
+            declaration = child.text.decode("utf-8", errors="replace")
+            match = re.fullmatch(
+                r"let\s+mut\s+(?P<variable>[A-Za-z_]\w*)\s*=\s*"
+                r"(?P<model>Manga|Chapter|Page)::default\(\)\s*;",
+                declaration.strip(),
+            )
+            if match is None:
+                continue
+            variable = match.group("variable")
+            fields: list[tuple[str, str]] = []
+            cursor = index + 1
+            while cursor < len(children):
+                assignment = children[cursor].text.decode("utf-8", errors="replace").strip()
+                field_match = re.fullmatch(
+                    rf"{re.escape(variable)}\.(?P<field>[A-Za-z_]\w*)\s*=\s*"
+                    r"(?P<expression>[\s\S]+);",
+                    assignment,
+                )
+                if field_match is None:
+                    break
+                fields.append((field_match.group("field"), field_match.group("expression").strip()))
+                cursor += 1
+            if (
+                not fields
+                or cursor >= len(children)
+                or children[cursor].text.decode("utf-8", errors="replace").strip() != variable
+                or len({field for field, _expression in fields}) != len(fields)
+            ):
+                continue
+            line_start = encoded.rfind(b"\n", 0, child.start_byte) + 1
+            indent = encoded[line_start : child.start_byte].decode("utf-8", errors="replace")
+            lines = [
+                f"{indent}let {variable} = {match.group('model')} {{",
+                *[f"{indent}    {field}: {expression}," for field, expression in fields],
+                f"{indent}    ..Default::default()",
+                f"{indent}}};",
+                f"{indent}{variable}",
+            ]
+            edits.append(
+                (
+                    child.start_byte,
+                    children[cursor].end_byte,
+                    "\n".join(lines).encode("utf-8"),
+                )
+            )
+            break
+    for start, end, replacement in reversed(edits):
+        encoded = encoded[:start] + replacement + encoded[end:]
+    return encoded.decode("utf-8")
+
+
 def _normalize_page_index_fields(content: str) -> str:
     replacements: list[tuple[str, str]] = []
     for node in RustInspection.from_content(content).nodes("struct_expression"):
@@ -772,7 +833,13 @@ def _normalize_page_index_fields(content: str) -> str:
 
 
 def _normalize_select_filter_constructors(content: str) -> str:
-    return re.sub(
+    content = re.sub(
+        r"((?:aidoku::)?Filter::note\(\s*)"
+        r'(?P<text>"(?:\\.|[^"\\])*")\.into\(\)(\s*,?\s*\))',
+        r"\1\g<text>\3",
+        content,
+    )
+    content = re.sub(
         r"aidoku::Filter::select\(\s*(?P<id>\"(?:\\.|[^\"\\])*\")\s*,\s*"
         r"(?P<title>\"(?:\\.|[^\"\\])*\")\s*,\s*"
         r"(?P<options>[A-Za-z_]\w*)\s*,\s*Some\((?P<ids>[A-Za-z_]\w*)\)\s*\)",
@@ -780,6 +847,48 @@ def _normalize_select_filter_constructors(content: str) -> str:
         r"options: \g<options>, ids: Some(\g<ids>), ..Default::default() }.into()",
         content,
     )
+    replacements: list[tuple[str, str]] = []
+    for node in RustInspection.from_content(content).nodes("call_expression"):
+        function = node.child_by_field_name("function")
+        arguments = node.child_by_field_name("arguments")
+        if function is None or arguments is None or len(arguments.named_children) != 1:
+            continue
+        function_text = function.text.decode("utf-8", errors="replace")
+        argument = arguments.named_children[0].text.decode("utf-8", errors="replace")
+        if function_text == "SortFilterDefault::DefaultIndex":
+            original = node.text.decode("utf-8", errors="replace")
+            replacements.append(
+                (original, f"SortFilterDefault {{ index: {argument}, ascending: false }}")
+            )
+    for original, replacement in replacements:
+        content = content.replace(original, replacement, 1)
+
+    replacements = []
+    legacy_types = {
+        "Check": "CheckFilter",
+        "Checkbox": "CheckFilter",
+        "MultiSelect": "MultiSelectFilter",
+        "Select": "SelectFilter",
+        "Sort": "SortFilter",
+    }
+    for node in RustInspection.from_content(content).nodes("call_expression"):
+        function = node.child_by_field_name("function")
+        arguments = node.child_by_field_name("arguments")
+        if function is None or arguments is None or len(arguments.named_children) != 1:
+            continue
+        function_text = function.text.decode("utf-8", errors="replace")
+        match = re.fullmatch(r"(?:aidoku::)?Filter::([A-Za-z]+)", function_text)
+        if match is None or match.group(1) not in legacy_types:
+            continue
+        argument = arguments.named_children[0].text.decode("utf-8", errors="replace")
+        expected = legacy_types[match.group(1)]
+        if re.match(rf"(?:aidoku::)?{expected}\s*\{{", argument) is None:
+            continue
+        original = node.text.decode("utf-8", errors="replace")
+        replacements.append((original, f"Filter::from({argument})"))
+    for original, replacement in replacements:
+        content = content.replace(original, replacement, 1)
+    return content
 
 
 def _normalize_request_builder_helpers(
@@ -833,6 +942,43 @@ def _normalize_parse_date_option_patterns(content: str) -> str:
         r"if let Some(\g<value>) = \g<call>",
         content,
     )
+
+
+def _normalize_optional_chapter_dates(content: str) -> str:
+    replacements: list[tuple[str, str]] = []
+    binding_pattern = re.compile(
+        r"let\s+(?P<name>[A-Za-z_]\w*)\s*=\s*"
+        r"(?P<call>(?:aidoku::imports::std::)?parse_date\([\s\S]{0,500}?\))\s*"
+        r"\.ok_or_else\([\s\S]{0,500}?\)\?;"
+    )
+    for function in RustInspection.from_content(content).functions:
+        normalized = function.text
+        for match in binding_pattern.finditer(function.text):
+            name = match.group("name")
+            if (
+                re.search(
+                    rf"\bdate_uploaded\s*:\s*Some\(\s*{re.escape(name)}\s*\)",
+                    function.text,
+                )
+                is None
+            ):
+                continue
+            normalized = normalized.replace(
+                match.group(0),
+                f"let {name} = {match.group('call')};",
+                1,
+            )
+            normalized = re.sub(
+                rf"\bdate_uploaded\s*:\s*Some\(\s*{re.escape(name)}\s*\)",
+                f"date_uploaded: {name}",
+                normalized,
+                count=1,
+            )
+        if normalized != function.text:
+            replacements.append((function.text, normalized))
+    for original, normalized in replacements:
+        content = content.replace(original, normalized, 1)
+    return content
 
 
 def _normalize_chapter_group_scope(content: str) -> str:
@@ -918,17 +1064,83 @@ def _normalize_safe_std_paths(content: str, *, remove_extern_std: bool) -> str:
     return content
 
 
+def _normalize_graphql_body_fragment(content: str) -> str:
+    if "#{body}" not in content or "COMIC_BODY" not in content:
+        return content
+
+    def wrap(match: re.Match[str]) -> str:
+        body = match.group("body")
+        stripped = body.strip()
+        if stripped.startswith("{") and stripped.endswith("}"):
+            return match.group(0)
+        return match.group("prefix") + "\n{\n" + body.strip("\n") + "\n}\n" + match.group("suffix")
+
+    return re.sub(
+        r'(?P<prefix>(?:pub\s+)?const\s+COMIC_BODY\s*:\s*&str\s*=\s*r#")'
+        r'(?P<body>[\s\S]*?)(?P<suffix>"#\s*;)',
+        wrap,
+        content,
+    )
+
+
 def _normalize_struct_expression_defaults(content: str) -> str:
+    filter_fields = {
+        "CheckFilter": {"id", "title", "hide_from_header", "name", "can_exclude", "default"},
+        "MultiSelectFilter": {
+            "id",
+            "title",
+            "hide_from_header",
+            "is_genre",
+            "can_exclude",
+            "uses_tag_style",
+            "options",
+            "ids",
+            "default_included",
+            "default_excluded",
+        },
+        "SelectFilter": {
+            "id",
+            "title",
+            "hide_from_header",
+            "is_genre",
+            "uses_tag_style",
+            "options",
+            "ids",
+            "default",
+        },
+        "SortFilter": {"id", "title", "hide_from_header", "can_ascend", "options", "default"},
+    }
     replacements: list[tuple[str, str]] = []
     for node in RustInspection.from_content(content).nodes("struct_expression"):
         name = node.child_by_field_name("name")
         body = node.child_by_field_name("body")
         if name is None or body is None:
             continue
-        type_name = name.text.decode("utf-8", errors="replace")
+        type_name = name.text.decode("utf-8", errors="replace").rsplit("::", 1)[-1]
         text = node.text.decode("utf-8", errors="replace")
-        if type_name not in {"Manga", "Chapter", "Page"} or "..Default::default()" in text:
+        if (
+            type_name
+            not in {
+                "Manga",
+                "Chapter",
+                "Page",
+                "CheckFilter",
+                "MultiSelectFilter",
+                "SelectFilter",
+                "SortFilter",
+            }
+            or "..Default::default()" in text
+        ):
             continue
+        required = filter_fields.get(type_name)
+        if required is not None:
+            present = {
+                field.text.decode("utf-8", errors="replace")
+                for child in body.named_children
+                if (field := child.child_by_field_name("field")) is not None
+            }
+            if required.issubset(present):
+                continue
         closing = re.search(r"\n(?P<indent>[ \t]*)\}$", text)
         if closing is None:
             continue
@@ -1218,14 +1430,35 @@ def _normalize_public_absolute_url(content: str, public_base_url: str | None) ->
     for original, replacement in replacements:
         content = content.replace(original, replacement, 1)
     base = public_base_url.rstrip("/")
-    if "impl Source for" in content and not re.search(r"\babsolute_url\s*\(", content):
+    has_relative_model = False
+    for node in RustInspection.from_content(content).nodes("struct_expression"):
+        name = node.child_by_field_name("name")
+        body = node.child_by_field_name("body")
+        if name is None or body is None:
+            continue
+        type_name = name.text.decode("utf-8", errors="replace")
+        fields = set()
+        for child in body.named_children:
+            field = child.child_by_field_name("field")
+            if field is not None:
+                fields.add(field.text.decode("utf-8", errors="replace"))
+            elif child.type == "shorthand_field_initializer":
+                fields.add(child.text.decode("utf-8", errors="replace"))
+        if type_name in {"Manga", "Chapter", "aidoku::Manga", "aidoku::Chapter"} and (
+            "key" in fields and "url" not in fields
+        ):
+            has_relative_model = True
+            break
+    has_absolute_helper = re.search(r"\bfn\s+absolute_url\s*\(", content) is not None
+    if ("impl Source for" in content or has_relative_model) and not has_absolute_helper:
         content = (
             content.rstrip()
             + "\n\nfn absolute_url(relative: &str) -> String {\n"
             + f'    format!("{{}}/{{}}", {json.dumps(base)}, '
             + "relative.trim_start_matches('/'))\n}\n"
         )
-    if re.search(r"\babsolute_url\s*\(", content):
+        has_absolute_helper = True
+    if has_absolute_helper:
         content = re.sub(
             r"(?m)^(?P<indent>[ \t]*)(?P<target>manga|chapter)\.key\s*=\s*"
             r"(?P<value>[^;\n]+);(?!\s*\n[ \t]*(?P=target)\.url\s*=)",
@@ -1236,6 +1469,40 @@ def _normalize_public_absolute_url(content: str, public_base_url: str | None) ->
             ),
             content,
         )
+        struct_edits: list[tuple[int, int, bytes]] = []
+        for node in RustInspection.from_content(content).nodes("struct_expression"):
+            name = node.child_by_field_name("name")
+            body = node.child_by_field_name("body")
+            if name is None or body is None:
+                continue
+            type_name = name.text.decode("utf-8", errors="replace")
+            if type_name not in {"Manga", "Chapter", "aidoku::Manga", "aidoku::Chapter"}:
+                continue
+            fields = {}
+            for child in body.named_children:
+                field_name = child.child_by_field_name("field")
+                if field_name is not None:
+                    fields[field_name.text.decode("utf-8", errors="replace")] = child
+                elif child.type == "shorthand_field_initializer":
+                    fields[child.text.decode("utf-8", errors="replace")] = child
+            if "url" in fields or "key" not in fields:
+                continue
+            key = fields["key"]
+            value = key.child_by_field_name("value")
+            expression = (
+                value.text.decode("utf-8", errors="replace")
+                if value is not None
+                else key.text.decode("utf-8", errors="replace")
+            )
+            key_value = (
+                f"{expression}.clone()" if re.fullmatch(r"[A-Za-z_]\w*", expression) else expression
+            )
+            replacement = f"key: {key_value}, url: Some(absolute_url(&({expression})))"
+            struct_edits.append((key.start_byte, key.end_byte, replacement.encode("utf-8")))
+        encoded = content.encode("utf-8")
+        for start, end, replacement in reversed(struct_edits):
+            encoded = encoded[:start] + replacement + encoded[end:]
+        content = encoded.decode("utf-8")
     return content
 
 
@@ -1343,25 +1610,63 @@ def _remove_unused_known_imports(content: str) -> str:
     usage = content
     for declaration in declarations:
         usage = usage.replace(declaration, "", 1)
-    candidates = (_AIDOKU_ROOT_NAMES - {"Source"}) | {"parse_date"}
+    candidates = (_AIDOKU_ROOT_NAMES - {"Source"}) | {"Result", "parse_date"}
     replacements: list[tuple[str, str]] = []
     for declaration in declarations:
         normalized = declaration
         for name in candidates:
-            if re.search(rf"\b{re.escape(name)}\b", usage):
+            unqualified_usage = re.sub(rf"\baidoku::{re.escape(name)}\b", "", usage)
+            if re.search(rf"\b{re.escape(name)}\b", unqualified_usage):
                 continue
+            if re.fullmatch(
+                rf"use\s+aidoku(?:::[A-Za-z_]\w*)*::(?:std::)?{re.escape(name)};",
+                normalized.strip(),
+            ):
+                normalized = ""
+                break
             token = rf"(?:std::)?{re.escape(name)}"
             normalized = re.sub(rf"\b{token}\s*,\s*", "", normalized)
             normalized = re.sub(rf",\s*\b{token}\b", "", normalized)
             normalized = re.sub(rf"\{{\s*{token}\s*\}}", "{}", normalized)
         normalized = re.sub(r"(?P<path>[A-Za-z_]\w*)::\{\s*\}", "", normalized)
         normalized = re.sub(r",(?P<space>\s*),", r",\g<space>", normalized)
-        if re.fullmatch(r"use\s+aidoku::\{?\s*\}?\s*;", normalized.strip()):
+        if re.fullmatch(r"use\s+(?:aidoku(?:::\{?\s*\}?)?)?\s*;", normalized.strip()):
             normalized = ""
         if normalized != declaration:
             replacements.append((declaration, normalized))
     for original, normalized in replacements:
         content = content.replace(original, normalized, 1)
+    return content
+
+
+def _remove_duplicate_imports(content: str) -> str:
+    content = re.sub(
+        r"use\s+(?P<prefix>[A-Za-z_][\w:]*)::\{\s*(?P<name>[A-Za-z_]\w*)\s*\};",
+        r"use \g<prefix>::\g<name>;",
+        content,
+    )
+    declarations = [
+        node.text.decode("utf-8", errors="replace")
+        for node in RustInspection.from_content(content).nodes("use_declaration")
+    ]
+    grouped: set[tuple[str, str]] = set()
+    for declaration in declarations:
+        match = re.fullmatch(
+            r"use\s+(?P<prefix>[A-Za-z_][\w:]*)::\{(?P<body>[\s\S]*)\};", declaration
+        )
+        if match is None:
+            continue
+        for item in match.group("body").split(","):
+            name = item.strip()
+            if re.fullmatch(r"[A-Za-z_]\w*", name):
+                grouped.add((match.group("prefix"), name))
+    for declaration in declarations:
+        match = re.fullmatch(
+            r"use\s+(?P<prefix>[A-Za-z_][\w:]*)::(?P<name>[A-Za-z_]\w*);",
+            declaration,
+        )
+        if match is not None and (match.group("prefix"), match.group("name")) in grouped:
+            content = content.replace(declaration, "", 1)
     return content
 
 
@@ -1399,11 +1704,12 @@ def _normalize_generated_setting_defaults(
 def _normalize_generated_setting_key_aliases(
     content: str,
     setting_defaults: Mapping[str, str] | None,
+    setting_keys: tuple[str, ...] | None = None,
 ) -> str:
-    keys = tuple((setting_defaults or {}).keys())
+    keys = tuple(dict.fromkeys([*(setting_keys or ()), *(setting_defaults or {}).keys()]))
     suffixes: dict[str, list[str]] = {}
     for key in keys:
-        suffixes.setdefault(key.rsplit(".", 1)[-1], []).append(key)
+        suffixes.setdefault(key.rsplit(".", 1)[-1].casefold(), []).append(key)
     aliases = {
         suffix: matches[0]
         for suffix, matches in suffixes.items()
@@ -1585,6 +1891,7 @@ def normalize_pinned_aidoku_rust(
     *,
     allow_dead_code: bool = False,
     setting_defaults: Mapping[str, str] | None = None,
+    setting_keys: tuple[str, ...] | None = None,
     setting_values: Mapping[str, tuple[str, ...]] | None = None,
     prequeried_url_helpers: set[str] | None = None,
     preserve_cover_urls: bool = False,
@@ -1596,14 +1903,17 @@ def normalize_pinned_aidoku_rust(
     """Apply small type-safe compatibility rewrites for the pinned Aidoku/Rust APIs."""
     content = _normalize_safe_std_paths(content, remove_extern_std=remove_extern_std)
     content = _normalize_aidoku_api_paths(content)
+    content = _normalize_graphql_body_fragment(content)
     content = _normalize_legacy_request_errors(content)
     content = _normalize_raw_json_response_bindings(content)
     content = _normalize_request_builder_helpers(content, request_builder_helpers)
     content = _inject_source_new(content)
     content = _normalize_mutated_aidoku_models(content)
+    content = _normalize_default_model_assignments(content)
     content = _normalize_page_index_fields(content)
     content = _normalize_select_filter_constructors(content)
     content = _normalize_parse_date_option_patterns(content)
+    content = _normalize_optional_chapter_dates(content)
     content = _normalize_chapter_group_scope(content)
     if allow_dead_code and not re.search(
         r"#!\[allow\([^\]]*\bdead_code\b",
@@ -1660,13 +1970,14 @@ def normalize_pinned_aidoku_rust(
         '.header("User-Agent", &get_user_agent())',
     )
     content = content.replace(".header(key, val)", ".header(key, &val)")
-    content = _normalize_generated_setting_key_aliases(content, setting_defaults)
+    content = _normalize_generated_setting_key_aliases(content, setting_defaults, setting_keys)
     content = _normalize_generated_setting_defaults(content, setting_defaults)
     content = _normalize_resolution_setting(content, setting_defaults, setting_values)
     content = _normalize_platform_header_setting(content, setting_defaults, setting_values)
     content = _inject_no_std_macro_imports(content)
     content = _inject_required_aidoku_imports(content)
     content = _remove_macro_only_trait_imports(content)
+    content = _remove_duplicate_imports(content)
     content = _remove_unused_known_imports(content)
     content = re.sub(
         r"(\bparse_(?:local_)?date\s*\([^;]{0,800}?\))\s*\.ok\(\)",
@@ -2051,6 +2362,7 @@ def normalize_generation_manifest(
     """Project deterministic Rust compatibility and recovered behavior into a manifest."""
     resources = GeneratedResources(manifest)
     setting_defaults = resources.setting_defaults()
+    setting_keys = resources.setting_keys()
     setting_values = resources.setting_values()
     prequeried_url_helpers = _prequeried_url_helpers(manifest)
     request_builder_helpers = _request_builder_helpers(manifest)
@@ -2064,6 +2376,7 @@ def normalize_generation_manifest(
                 content,
                 allow_dead_code=generated.path != "src/lib.rs",
                 setting_defaults=setting_defaults,
+                setting_keys=setting_keys,
                 setting_values=setting_values,
                 prequeried_url_helpers=prequeried_url_helpers,
                 preserve_cover_urls=preserve_cover_urls,

@@ -313,7 +313,10 @@ def test_repair_preserves_source_ir_required_resources(tmp_path: Path, monkeypat
                 "res/filters.json": (
                     '[{"type":"select","id":"filter","options":["All"],"ids":["all"]}]'
                 ),
-                "res/settings.json": '[{"type":"group","title":"Settings","items":[]}]',
+                "res/settings.json": (
+                    '[{"type":"group","title":"Settings","items":'
+                    '[{"type":"text","key":"example","title":"Example"}]}]'
+                ),
             },
         ),
         repair=generation_manifest(RUST_SOURCE),
@@ -768,6 +771,21 @@ def test_declared_dynamic_filters_and_deep_links_require_providers() -> None:
     assert "source declares deep links but generated no DeepLinkHandler" in gaps
 
 
+def test_complete_dynamic_filters_do_not_require_a_duplicate_static_resource() -> None:
+    with resolve_source(str(FIXTURE)) as resolved:
+        ir = analyze_source(resolved).model_copy(
+            update={"capabilities": [Capability.FILTERS, Capability.DYNAMIC_FILTERS]}
+        )
+    manifest = generation_manifest(
+        "fn get_dynamic_filters(&self) -> Result<Vec<Filter>> { Ok(Vec::new()) }",
+        traits=("DynamicFilters",),
+    )
+
+    gaps = _contract_messages(ir, manifest)
+
+    assert not [gap for gap in gaps if "res/filters.json" in gap]
+
+
 def test_dynamic_filters_cannot_deserialize_aidoku_filter_from_json() -> None:
     with resolve_source(str(FIXTURE)) as resolved:
         ir = analyze_source(resolved).model_copy(
@@ -847,6 +865,29 @@ def test_cookie_jar_input_requires_a_representable_cookie_session() -> None:
     gaps = _contract_messages(ir, manifest)
 
     assert any("Cookie session" in gap for gap in gaps)
+
+
+def test_optional_cookie_refresh_does_not_block_anonymous_public_requests() -> None:
+    with resolve_source(str(FIXTURE)) as resolved:
+        ir = analyze_source(resolved).model_copy(
+            update={
+                "files": [
+                    SourceFile(
+                        path="src/Source.kt",
+                        sha256="0",
+                        content=(
+                            "val cookie = client.cookieJar.loadForRequest(url)"
+                            '.find { it.name == "access-token" } ?: return'
+                        ),
+                    )
+                ],
+            }
+        )
+    manifest = generation_manifest("fn request() {}")
+
+    gaps = _contract_messages(ir, manifest)
+
+    assert not [gap for gap in gaps if "Cookie session" in gap]
 
 
 @pytest.mark.parametrize("missing_request", ["api", "image"])

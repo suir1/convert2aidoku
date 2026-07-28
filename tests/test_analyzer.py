@@ -136,6 +136,7 @@ def test_analyzes_legacy_groovy_module_metadata(tmp_path: Path) -> None:
 def test_detects_relative_manga_and_chapter_keys() -> None:
     assert _uses_relative_url_keys('manga.setUrlWithoutDomain(a.absUrl("href"))')
     assert _uses_relative_url_keys('chapter.url = "/chapters/${item.id}"')
+    assert _uses_relative_url_keys('val url get() = "/comic/$id"')
     assert not _uses_relative_url_keys('manga.url = "https://example.com/comics/1"')
 
 

@@ -414,6 +414,119 @@ pub fn resolve_image(url: &str, resolution: &str) -> String {
     assert normalize_pinned_aidoku_rust(normalized) == normalized
 
 
+def test_normalizer_repairs_legacy_dynamic_filter_constructors_and_imports() -> None:
+    content = r"""
+use aidoku::MangaStatus;
+use aidoku::Result;
+use aidoku::imports::net::Request;
+use aidoku::imports::net::{Request as NetRequest, Request, Response};
+use aidoku::{Filter, SelectFilter, SortFilter, SortFilterDefault};
+
+fn status() -> aidoku::MangaStatus { aidoku::MangaStatus::Unknown }
+fn request() -> aidoku::Result<Request> { Request::get("https://example.com") }
+fn net_request() -> aidoku::Result<Response> { NetRequest::get("https://example.com")?.send() }
+fn filters() -> Vec<Filter> {
+    let mut filters = Vec::new();
+    filters.push(Filter::note(
+        "Filters".into(),
+    ));
+    filters.push(Filter::from(SortFilter {
+        id: "sort".into(),
+        title: Some("Sort".into()),
+        options: vec!["Latest".into()],
+        default: Some(SortFilterDefault::DefaultIndex(0)),
+        hide_from_header: Some(false),
+        can_ascend: true,
+    }));
+    filters.push(Filter::Select(SelectFilter {
+        id: "status".into(),
+        title: Some("Status".into()),
+        options: vec!["All".into()],
+        ids: Some(vec!["".into()]),
+        default: Some("".into()),
+    }));
+    filters
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "use aidoku::MangaStatus;" not in normalized
+    assert "use aidoku::Result;" not in normalized
+    assert "use aidoku::imports::net::Request;" not in normalized
+    assert "Request as NetRequest, Request, Response" in normalized
+    assert "SortFilterDefault::DefaultIndex" not in normalized
+    assert "SortFilterDefault { index: 0, ascending: false }" in normalized
+    assert "Filter::Select" not in normalized
+    assert "Filter::from(SelectFilter {" in normalized
+    assert '"Filters".into()' not in normalized
+    assert "..Default::default()" in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
+def test_normalizer_folds_default_model_field_assignments() -> None:
+    content = """
+fn manga(dto: Dto) -> Manga {
+    let mut manga = Manga::default();
+    manga.key = dto.key;
+    manga.title = dto.title;
+    manga.status = match dto.status.as_str() {
+        "ongoing" => MangaStatus::Ongoing,
+        _ => MangaStatus::Unknown,
+    };
+    manga
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "let mut manga = Manga::default();" not in normalized
+    assert "let manga = Manga {" in normalized
+    assert "key: dto.key," in normalized
+    assert "title: dto.title," in normalized
+    assert "status: match dto.status.as_str()" in normalized
+    assert "..Default::default()" in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
+def test_normalizer_restores_graphql_fragment_selection_braces() -> None:
+    content = r"""const COMIC_BODY: &str = r#"
+    id
+    title
+"#;
+fn build_query(query: &str) -> String {
+    query.replace("#{body}", COMIC_BODY)
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert 'const COMIC_BODY: &str = r#"\n{' in normalized
+    assert "    id\n    title\n}" in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
+def test_normalizer_keeps_chapters_when_optional_dates_do_not_parse() -> None:
+    content = """
+fn chapter(value: &str) -> Result<Chapter> {
+    let date_seconds = parse_date(value, "yyyy-MM-dd'T'HH:mm:ss'Z'")
+        .ok_or_else(|| AidokuError::message("Invalid date".to_string()))?;
+    Ok(Chapter {
+        key: "chapter".into(),
+        date_uploaded: Some(date_seconds),
+        ..Default::default()
+    })
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert ".ok_or_else" not in normalized
+    assert "let date_seconds = parse_date(" in normalized
+    assert "date_uploaded: date_seconds" in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
 def test_normalizer_repairs_common_aidoku_api_compile_shapes() -> None:
     content = r"""
 use aidoku::{
@@ -497,11 +610,11 @@ fn grouped_chapters(groups: Vec<Group>) -> Vec<Chapter> {
     assert "use aidoku::Result;" in normalized
     assert "use aidoku::alloc::string::ToString;" in normalized
     assert "fn new() -> Self { Self }" in normalized
-    assert "manga.authors = Some(" in normalized
+    assert "authors: Some(" in normalized
     assert ".join(" not in normalized
-    assert "manga.cover = Some(c.cover);" in normalized
-    assert "manga.description = Some(c.brief);" in normalized
-    assert "chapter.title = Some(format!" in normalized
+    assert "cover: Some(c.cover)," in normalized
+    assert "description: Some(c.brief)," in normalized
+    assert "title: Some(format!" in normalized
     assert "index: 0" not in normalized
     assert "items.iter().map(|ci|" in normalized
     assert "aidoku::SelectFilter" in normalized
@@ -519,8 +632,8 @@ fn grouped_chapters(groups: Vec<Group>) -> Vec<Chapter> {
     assert "Reverse(item.0.index)" in normalized
     assert "if group.total <= group.offset + group.limit" in normalized
     assert "fn absolute_url(relative: &str) -> String" in normalized
-    assert "manga.url = Some(absolute_url(&manga.key));" in normalized
-    assert "chapter.url = Some(absolute_url(&chapter.key));" in normalized
+    assert 'url: Some(absolute_url(&(format!("/comic/{}", c.path_word))))' in normalized
+    assert 'url: Some(absolute_url(&(format!("/comic/x/chapter/{}", ci.uuid))))' in normalized
     cross_file_call = normalize_pinned_aidoku_rust(
         "fn send(url: String) -> Result<()> { "
         "let request = create_request(url); request.send()?; Ok(()) }",
@@ -1104,6 +1217,33 @@ fn absolute_url(relative: &str) -> String {
     lib = (project / "src" / "lib.rs").read_text(encoding="utf-8")
     assert 'String::from("https://api.example/api/v3")' in lib
     assert 'format!("{}/{}", "https://example.com", relative.trim_start_matches(\'/\'))' in lib
+
+
+def test_normalizer_adds_local_absolute_urls_without_touching_deep_link_variants() -> None:
+    content = """
+fn manga(key: String) -> Manga {
+    Manga { key, title: "Title".into(), ..Default::default() }
+}
+fn deep_link(key: String) -> DeepLinkResult {
+    DeepLinkResult::Manga { key, url: None }
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(
+        content,
+        public_base_url="https://example.com",
+    )
+
+    assert "fn absolute_url(relative: &str) -> String" in normalized
+    assert "key: key.clone(), url: Some(absolute_url(&(key)))" in normalized
+    assert "DeepLinkResult::Manga { key, url: None }" in normalized
+    assert (
+        normalize_pinned_aidoku_rust(
+            normalized,
+            public_base_url="https://example.com",
+        )
+        == normalized
+    )
 
 
 def test_scaffold_projects_recovered_chapter_key_template(tmp_path: Path) -> None:
