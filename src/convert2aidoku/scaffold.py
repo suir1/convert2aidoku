@@ -25,6 +25,7 @@ from .models import (
     GeneratedFile,
     GeneratedResources,
     GenerationManifest,
+    SourceFilterSpec,
     SourceIR,
     validate_generated_path,
 )
@@ -380,14 +381,23 @@ def _normalize_pinned_model_fields(content: str) -> str:
             field_name = field_node.text.decode("utf-8", errors="replace")
             value = value_node.text.decode("utf-8", errors="replace")
             replacement_value = value
-            if field_name == "url" and not value.startswith(("Some(", "None")):
+            if (
+                field_name == "url"
+                or (type_name == "Manga" and field_name in {"cover", "description"})
+                or (type_name == "Chapter" and field_name == "title")
+            ) and not value.startswith(("Some(", "None")):
                 replacement_value = f"Some({value})"
             elif type_name == "Manga" and field_name == "status" and value.startswith("Some("):
                 replacement_value = value[5:-1]
             elif type_name == "Chapter" and field_name in {"chapter_number", "volume_number"}:
-                if value.startswith(("Some(", "None")):
+                invalid_option_cast = re.fullmatch(
+                    r"Some\(\((?P<value>[\s\S]+\.ok\(\))\)\s+as\s+f32\)", value
+                )
+                if invalid_option_cast is not None:
+                    replacement_value = invalid_option_cast.group("value")
+                elif value.startswith(("Some(", "None")) or value.endswith(".ok()"):
                     continue
-                if ".map(" in value and ".unwrap_or" not in value:
+                elif ".map(" in value and ".unwrap_or" not in value:
                     replacement_value = value.replace(" as f64", " as f32")
                 else:
                     replacement_value = f"Some(({value}) as f32)"
@@ -800,6 +810,8 @@ def _normalize_legacy_request_errors(content: str) -> str:
                 normalized,
             )
             normalized = re.sub(r",(?P<space>\s*),", r",\g<space>", normalized)
+            if re.fullmatch(r"use\s+aidoku(?:::[A-Za-z_]\w*)*::\s*;", normalized.strip()):
+                normalized = ""
             if normalized != original:
                 updated.append((original, normalized))
         for original, normalized in updated:
@@ -1171,7 +1183,10 @@ def _normalize_legacy_filter_fields(content: str) -> str:
         body = node.child_by_field_name("body")
         if name is None or body is None:
             continue
-        type_name = name.text.decode("utf-8", errors="replace").rsplit("::", 1)[-1]
+        full_type_name = name.text.decode("utf-8", errors="replace")
+        if full_type_name.startswith("DeepLinkResult::"):
+            continue
+        type_name = full_type_name.rsplit("::", 1)[-1]
         if type_name not in {"CheckFilter", "SortFilter", "SelectFilter"}:
             continue
         original = node.text.decode("utf-8", errors="replace")
@@ -1260,6 +1275,104 @@ def _normalize_legacy_page_context(content: str) -> str:
         ),
         content,
     )
+
+
+def _normalize_page_url_context(content: str) -> str:
+    replacements: list[tuple[int, int, str]] = []
+    for node in RustInspection.from_content(content).nodes("call_expression"):
+        function = node.child_by_field_name("function")
+        arguments = node.child_by_field_name("arguments")
+        if function is None or arguments is None or len(arguments.named_children) != 2:
+            continue
+        if function.text.decode("utf-8", errors="replace") != "PageContent::url_context":
+            continue
+        context = arguments.named_children[1]
+        context_text = context.text.decode("utf-8", errors="replace")
+        if re.fullmatch(r"[A-Za-z_]\w*url(?:\.clone\(\))?", context_text) is None:
+            continue
+        replacements.append(
+            (
+                context.start_byte,
+                context.end_byte,
+                f'PageContext::from([("referer".into(), {context_text})])',
+            )
+        )
+    encoded = content.encode("utf-8")
+    for begin, end, replacement in reversed(replacements):
+        encoded = encoded[:begin] + replacement.encode("utf-8") + encoded[end:]
+    return encoded.decode("utf-8")
+
+
+def _normalize_image_request_result(content: str) -> str:
+    content = re.sub(
+        r"let\s+(?P<referer>[A-Za-z_]\w*)\s*=\s*"
+        r"(?P<context>[A-Za-z_]\w*)\.unwrap_or_else\(\|\|\s*"
+        r"(?P<fallback>[A-Za-z_]\w*)\.into\(\)\);",
+        lambda match: (
+            f"let {match.group('referer')} = {match.group('context')}.as_ref()"
+            '.and_then(|value| value.get("referer")).map(String::as_str)'
+            f".unwrap_or({match.group('fallback')});"
+        ),
+        content,
+    )
+    edits: list[tuple[int, int, bytes]] = []
+    for function in RustInspection.from_content(content).functions:
+        if function.name != "get_image_request":
+            continue
+        for node in RustInspection.from_content(function.text).nodes("call_expression"):
+            callee = node.child_by_field_name("function")
+            if callee is None:
+                continue
+            field_expression = (
+                callee.child_by_field_name("function")
+                if callee.type == "generic_function"
+                else callee
+            )
+            if field_expression is None or field_expression.type != "field_expression":
+                continue
+            field = field_expression.child_by_field_name("field")
+            receiver = field_expression.child_by_field_name("value")
+            if field is None or receiver is None:
+                continue
+            field_name = field.text.decode("utf-8", errors="replace")
+            begin = function.node.start_byte + node.start_byte
+            end = function.node.start_byte + node.end_byte
+            if field_name == "send_error_type":
+                statement = node.parent
+                while statement is not None and statement.type != "expression_statement":
+                    statement = statement.parent
+                if statement is not None:
+                    begin = function.node.start_byte + statement.start_byte
+                    end = function.node.start_byte + statement.end_byte
+                    edits.append((begin, end, b""))
+            elif (
+                field_name == "into"
+                and node.parent is not None
+                and node.parent.type == "block"
+                and "Request::get" in receiver.text.decode("utf-8", errors="replace")
+            ):
+                edits.append((begin, end, b"Ok(" + receiver.text + b")"))
+    encoded = content.encode("utf-8")
+    for begin, end, replacement in sorted(edits, reverse=True):
+        encoded = encoded[:begin] + replacement + encoded[end:]
+    return encoded.decode("utf-8")
+
+
+def _normalize_deep_link_defaults(content: str) -> str:
+    replacements: list[tuple[str, str]] = []
+    for node in RustInspection.from_content(content).nodes("struct_expression"):
+        name = node.child_by_field_name("name")
+        if name is None or not name.text.decode("utf-8", errors="replace").startswith(
+            "DeepLinkResult::"
+        ):
+            continue
+        original = node.text.decode("utf-8", errors="replace")
+        normalized = re.sub(r"(?m)^\s*\.\.Default::default\(\)\s*,?\s*\n?", "", original)
+        if normalized != original:
+            replacements.append((original, normalized))
+    for original, normalized in replacements:
+        content = content.replace(original, normalized, 1)
+    return content
 
 
 def _normalize_request_builder_helpers(
@@ -1482,6 +1595,33 @@ def _normalize_graphql_body_fragment(content: str) -> str:
     )
 
 
+def _normalize_graphql_request_body(content: str) -> str:
+    content = re.sub(
+        r"(?m)^(?P<indent>[ \t]*)let\s+mut\s+(?P<body>[A-Za-z_]\w*)\s*=\s*"
+        r"PageContext::new\(\);\s*\n"
+        r"(?P=indent)(?P=body)\.insert\("
+        r"(?P<query_key>\"(?:\\.|[^\"\\])*\")\.into\(\),\s*"
+        r"(?P<query>[A-Za-z_]\w*)\s*,\s*"
+        r"(?P<variables_key>\"(?:\\.|[^\"\\])*\")\s*:\s*"
+        r"(?P<variables>[A-Za-z_]\w*)\s*\);",
+        lambda match: (
+            f"{match.group('indent')}let {match.group('body')} = serde_json::json!({{ "
+            f"{match.group('query_key')}: {match.group('query')}, "
+            f"{match.group('variables_key')}: {match.group('variables')} }});"
+        ),
+        content,
+    )
+    return re.sub(
+        r"Request::(?P<method>post|put|patch)\(\s*(?P<url>[^,\n()]+)\s*,\s*"
+        r"(?P<body>body|payload)\s*\)\?",
+        lambda match: (
+            f"Request::{match.group('method')}({match.group('url').strip()})?"
+            f".body({match.group('body')}.to_string().as_bytes())"
+        ),
+        content,
+    )
+
+
 def _normalize_struct_expression_defaults(content: str) -> str:
     filter_fields = {
         "CheckFilter": {"id", "title", "hide_from_header", "name", "can_exclude", "default"},
@@ -1515,7 +1655,10 @@ def _normalize_struct_expression_defaults(content: str) -> str:
         body = node.child_by_field_name("body")
         if name is None or body is None:
             continue
-        type_name = name.text.decode("utf-8", errors="replace").rsplit("::", 1)[-1]
+        full_type_name = name.text.decode("utf-8", errors="replace")
+        if full_type_name.startswith("DeepLinkResult::"):
+            continue
+        type_name = full_type_name.rsplit("::", 1)[-1]
         text = node.text.decode("utf-8", errors="replace")
         if (
             type_name
@@ -2326,8 +2469,10 @@ def normalize_pinned_aidoku_rust(
 ) -> str:
     """Apply small type-safe compatibility rewrites for the pinned Aidoku/Rust APIs."""
     content = _normalize_safe_std_paths(content, remove_extern_std=remove_extern_std)
+    content = _normalize_graphql_request_body(content)
     content = _normalize_aidoku_api_paths(content)
     content = _normalize_graphql_body_fragment(content)
+    content = _normalize_image_request_result(content)
     content = _normalize_legacy_request_errors(content)
     content = _normalize_defaults_get_bindings(content)
     content = _normalize_aidoku_result_errors(content)
@@ -2340,6 +2485,8 @@ def normalize_pinned_aidoku_rust(
     content = _normalize_legacy_filter_fields(content)
     content = _normalize_select_filter_constructors(content)
     content = _normalize_legacy_page_context(content)
+    content = _normalize_page_url_context(content)
+    content = _normalize_deep_link_defaults(content)
     content = _normalize_parse_date_option_patterns(content)
     content = _normalize_optional_chapter_dates(content)
     content = _normalize_chapter_group_scope(content)
@@ -2349,6 +2496,7 @@ def normalize_pinned_aidoku_rust(
     ):
         content = "#![allow(dead_code)]\n" + content.lstrip()
     content = content.replace("aidoku::std::filters::SelectFilter", "aidoku::SelectFilter")
+    content = content.replace("aidoku::filters::SelectFilter", "aidoku::SelectFilter")
     content = content.replace("aidoku::filter::SelectFilter", "aidoku::SelectFilter")
     content = _normalize_select_filter_import(content)
     content = _remove_macro_only_trait_imports(content)
@@ -2826,6 +2974,98 @@ def _project_recovered_request_headers(
     return updated
 
 
+def _rust_filter_expression(spec: SourceFilterSpec) -> str:
+    options = ", ".join(
+        f"{json.dumps(item.title, ensure_ascii=False)}.into()" for item in spec.options
+    )
+    ids = ", ".join(f"{json.dumps(item.value, ensure_ascii=False)}.into()" for item in spec.options)
+    common = (
+        f"id: {json.dumps(spec.id)}.into(), "
+        f"title: Some({json.dumps(spec.title, ensure_ascii=False)}.into()), "
+        f"options: aidoku::alloc::vec![{options}], "
+    )
+    if spec.kind == "sort":
+        return (
+            "aidoku::SortFilter { "
+            + common
+            + "default: Some(aidoku::SortFilterDefault { "
+            + f"index: {spec.default_index}, ascending: "
+            + str(bool(spec.default_ascending)).lower()
+            + " }), ..Default::default() }.into()"
+        )
+    return (
+        "aidoku::SelectFilter { "
+        + common
+        + f"ids: Some(aidoku::alloc::vec![{ids}]), "
+        + f"default: Some({json.dumps(spec.options[spec.default_index].value)}.into()), "
+        + "..Default::default() }.into()"
+    )
+
+
+def _project_recovered_dynamic_filters(
+    ir: SourceIR,
+    files: list[GeneratedFile],
+    *,
+    implemented_traits: list[str],
+) -> list[GeneratedFile]:
+    if not ir.filter_specs or "DynamicFilters" not in implemented_traits:
+        return files
+    updated: list[GeneratedFile] = []
+    projected = False
+    for generated in files:
+        content = generated.content
+        if projected or not generated.path.endswith(".rs"):
+            updated.append(generated)
+            continue
+        for function in RustInspection.from_content(content).functions:
+            if function.name != "get_dynamic_filters":
+                continue
+            missing = [
+                spec
+                for spec in ir.filter_specs
+                if re.search(rf"\bid\s*:\s*{re.escape(json.dumps(spec.id))}", function.text) is None
+            ]
+            if not missing:
+                projected = True
+                break
+            for call in RustInspection.from_content(function.text).nodes("call_expression"):
+                callee = call.child_by_field_name("function")
+                arguments = call.child_by_field_name("arguments")
+                if (
+                    callee is None
+                    or callee.text.decode("utf-8", errors="replace") != "Ok"
+                    or arguments is None
+                    or len(arguments.named_children) != 1
+                    or call.parent is None
+                    or call.parent.type != "block"
+                ):
+                    continue
+                original = call.text.decode("utf-8", errors="replace")
+                current = arguments.named_children[0].text.decode("utf-8", errors="replace")
+                indent = " " * call.start_point.column
+                inner = indent + "    "
+                pushes = "\n".join(
+                    f"{inner}c2a_filters.push({_rust_filter_expression(spec)});" for spec in missing
+                )
+                replacement = (
+                    "{\n"
+                    f"{inner}let mut c2a_filters = {current};\n"
+                    f"{pushes}\n"
+                    f"{inner}Ok(c2a_filters)\n"
+                    f"{indent}}}"
+                )
+                content = content.replace(original, replacement, 1)
+                projected = True
+                break
+            break
+        updated.append(
+            generated.model_copy(update={"content": content})
+            if content != generated.content
+            else generated
+        )
+    return updated
+
+
 def normalize_generation_manifest(
     ir: SourceIR,
     manifest: GenerationManifest,
@@ -2877,6 +3117,16 @@ def normalize_generation_manifest(
         for before, after in zip(files, header_projected, strict=True)
     )
     files = header_projected
+    filters_projected = _project_recovered_dynamic_filters(
+        ir,
+        files,
+        implemented_traits=list(manifest.implemented_traits),
+    )
+    changed |= any(
+        before.content != after.content
+        for before, after in zip(files, filters_projected, strict=True)
+    )
+    files = filters_projected
     topologized = _normalize_generated_module_topology(files)
     changed |= any(
         before.content != after.content for before, after in zip(files, topologized, strict=True)

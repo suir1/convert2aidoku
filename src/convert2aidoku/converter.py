@@ -91,6 +91,7 @@ class _ConversionRoundRunner:
         effective = normalize_decompiled_dto_manifest(self.ir, effective)
         effective = normalize_decompiled_setting_manifest(self.ir, effective)
         effective = with_kotlin_settings(self.ir, effective)
+        effective = GeneratedResources(effective).with_source_filters(self.ir.filter_specs)
         setting_overrides = live_validation_evidence(self.ir).setting_overrides
         effective = GeneratedResources(effective).with_defaults(
             filter_specs=self.ir.filter_specs,

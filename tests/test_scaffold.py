@@ -13,6 +13,8 @@ from convert2aidoku.models import (
     GenerationManifest,
     ImageUrlPolicy,
     RequestHeaderProfile,
+    SourceFilterOption,
+    SourceFilterSpec,
 )
 from convert2aidoku.scaffold import (
     apply_generation_manifest,
@@ -898,6 +900,61 @@ fn selected(filters: &[FilterValue]) -> bool {
     assert normalize_pinned_aidoku_rust(normalized) == normalized
 
 
+def test_normalizer_repairs_local_model_optional_fields_image_request_and_deep_links() -> None:
+    content = """
+use aidoku::filters::SelectFilter;
+use aidoku::imports::net::RequestError;
+fn manga(dto: Dto) -> Manga {
+    Manga {
+        cover: absolute_url(&dto.cover),
+        description: dto.description,
+        ..Default::default()
+    }
+}
+fn chapter(value: String) -> Chapter {
+    Chapter {
+        title: format!("{}", value),
+        chapter_number: Some((value.parse::<f32>().ok()) as f32),
+        ..Default::default()
+    }
+}
+fn page(image_url: String, chapter_url: String) -> Page {
+    Page {
+        content: PageContent::url_context(image_url, chapter_url.clone()),
+        ..Default::default()
+    }
+}
+fn get_image_request(url: String, context: Option<PageContext>) -> Result<Request> {
+    let referer = context.unwrap_or_else(|| BASE_URL.into());
+    Request::get(&url)?.header("referer", referer).send_error_type::<RequestError>();
+    Request::get(&url)?.header("referer", referer).into()
+}
+fn deep_link() -> DeepLinkResult {
+    DeepLinkResult::Manga {
+        key: "manga".into(),
+        ..Default::default()
+    }
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "aidoku::filters::SelectFilter" not in normalized
+    assert "SelectFilter" not in normalized
+    assert "cover: Some(absolute_url(&dto.cover))" in normalized
+    assert "description: Some(dto.description)" in normalized
+    assert 'title: Some(format!("{}", value))' in normalized
+    assert "chapter_number: value.parse::<f32>().ok()" in normalized
+    assert 'PageContext::from([("referer".into(), chapter_url.clone())])' in normalized
+    assert 'value.get("referer")' in normalized
+    assert "send_error_type" not in normalized
+    assert 'Ok(Request::get(&url)?.header("referer", referer))' in normalized
+    assert "RequestError" not in normalized
+    assert "use aidoku::imports::net::;" not in normalized
+    assert "..Default::default()" not in normalized.split("DeepLinkResult::Manga", 1)[1]
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
 def test_manifest_normalizer_repairs_cross_file_module_topology(tmp_path: Path) -> None:
     _project, ir = scaffold_project(tmp_path)
     manifest = GenerationManifest(
@@ -947,8 +1004,65 @@ def test_manifest_normalizer_repairs_cross_file_module_topology(tmp_path: Path) 
     assert "pub(crate) const API_URL" in files["src/query.rs"]
 
 
+def test_manifest_projects_recovered_static_filters_into_dynamic_provider(tmp_path: Path) -> None:
+    _project, ir = scaffold_project(tmp_path)
+    ir = ir.model_copy(
+        update={
+            "filter_specs": [
+                SourceFilterSpec(
+                    source_class="StatusFilter",
+                    id="status",
+                    title="Status",
+                    kind="select",
+                    options=[
+                        SourceFilterOption(title="All", value=""),
+                        SourceFilterOption(title="Completed", value="END"),
+                    ],
+                )
+            ]
+        }
+    )
+    manifest = GenerationManifest(
+        source_struct="Simple",
+        implemented_traits=["DynamicFilters"],
+        files=[
+            GeneratedFile(path="src/lib.rs", content="#![no_std]\n"),
+            GeneratedFile(
+                path="src/source.rs",
+                content="""
+fn get_dynamic_filters(&self) -> Result<Vec<Filter>> {
+    Ok(vec![aidoku::SelectFilter {
+        id: "category".into(),
+        options: vec!["Action".into()],
+        ids: Some(vec!["action".into()]),
+        ..Default::default()
+    }.into()])
+}
+""",
+            ),
+        ],
+    )
+
+    normalized = normalize_generation_manifest(ir, manifest)
+    source = next(item.content for item in normalized.files if item.path == "src/source.rs")
+
+    assert 'id: "category".into()' in source
+    assert 'id: "status".into()' in source
+    assert 'ids: Some(aidoku::alloc::vec!["".into(), "END".into()])' in source
+    assert "let mut c2a_filters" in source
+    assert normalize_generation_manifest(ir, normalized) == normalized
+
+
 def test_normalizer_repairs_raw_json_listing_and_consuming_builder_patterns() -> None:
     content = """
+fn post(query: &str, variables: serde_json::Value) -> Result<Response> {
+    let mut body = PageContext::new();
+    body.insert("query".into(), query, "variables": variables);
+    let response = Request::post(API_URL, body)?
+        .header("Content-Type", "application/json")
+        .send()?;
+    Ok(response)
+}
 fn raw(response: Response) -> Result<String> {
     let json = response.get_json_owned()?;
     parse_search(&json)?;
@@ -1029,6 +1143,8 @@ fn url2comic_path(url: &str) -> String {
 
     normalized = normalize_pinned_aidoku_rust(content)
 
+    assert 'let body = serde_json::json!({ "query": query, "variables": variables });' in normalized
+    assert "Request::post(API_URL)?.body(body.to_string().as_bytes())" in normalized
     assert "let json = response.get_string()?;" in normalized
     assert "match listing.id.as_str()" in normalized
     assert '"popular" => popular_url(page)' in normalized

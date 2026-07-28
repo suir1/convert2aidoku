@@ -734,6 +734,48 @@ def test_generate_structures_settings_and_owns_static_filters() -> None:
     assert json.loads(resources["res/settings.json"])[0]["items"][0]["default"] == "1"
 
 
+def test_generate_uses_deterministic_kotlin_settings_without_second_ai_call() -> None:
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": json.dumps(_manifest())}}],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120},
+            },
+        )
+
+    preferences = """
+const val CHAPTER_FILTER_PREF = "CHAPTER_FILTER"
+ListPreference(context).apply {
+    key = CHAPTER_FILTER_PREF
+    title = "Chapter filter"
+    entries = arrayOf("All", "Chapters")
+    entryValues = arrayOf("all", "chapter")
+    setDefaultValue("all")
+}
+"""
+    ir = minimal_source_ir(
+        capabilities=[Capability.SETTINGS],
+        files=[SourceFile(path="src/Preferences.kt", content=preferences, sha256="0")],
+    )
+
+    with OpenAICompatibleClient(
+        provider_settings(), transport=httpx.MockTransport(handler)
+    ) as client:
+        result = client.generate(ir)
+
+    assert calls == 1
+    assert result.usage and result.usage.total_tokens == 120
+    settings = json.loads(
+        next(item.content for item in result.value.files if item.path == "res/settings.json")
+    )
+    assert settings[0]["items"][0]["key"] == "CHAPTER_FILTER"
+
+
 def test_generate_retries_settings_that_fail_aidoku_resource_validation() -> None:
     calls = 0
 

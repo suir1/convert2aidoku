@@ -32,6 +32,7 @@ from .constants import (
 from .dependency_policy import evaluate_dependency_policy, render_dependency_policy
 from .errors import AIProviderError, SecurityError
 from .generation_context import build_generation_context, build_settings_context
+from .kotlin_settings import with_kotlin_settings
 from .models import (
     AIRound,
     AIUsage,
@@ -638,13 +639,14 @@ class OpenAICompatibleClient:
         )
         manifest = rust_result.value.to_manifest()
         manifest = GeneratedResources(manifest).with_source_filters(ir.filter_specs)
+        manifest = with_kotlin_settings(ir, manifest)
         usages = [rust_result.usage] if rust_result.usage is not None else []
         warnings = list(rust_result.warnings)
         structured_output = rust_result.structured_output
         if (
             Capability.SETTINGS in ir.capabilities
             or Capability.DYNAMIC_BASE_URLS in ir.capabilities
-        ):
+        ) and not GeneratedResources(manifest).has_nonempty_setting_items():
             try:
                 settings_result = self._generate_settings(ir)
             except AIProviderError as exc:

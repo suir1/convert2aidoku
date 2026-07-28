@@ -1,12 +1,98 @@
 from __future__ import annotations
 
+import json
 import re
 
 from .analysis_common import input_license, match
 from .errors import InputError, UnsupportedSourceError
 from .ingest import ResolvedSource, collect_source_files
 from .input_capabilities import InputCapabilityRecognition, recognize_input_capabilities
-from .models import ContentRating, SourceIR, SourceMetadata
+from .models import (
+    ContentRating,
+    SourceFilterOption,
+    SourceFilterSpec,
+    SourceIR,
+    SourceMetadata,
+)
+
+_KOTLIN_STRING = r'"(?:\\.|[^"\\])*"'
+
+
+def _decode_kotlin_string(literal: str) -> str | None:
+    try:
+        value = json.loads(literal)
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, str) else None
+
+
+def _filter_value(expression: str) -> str | None:
+    value = expression.strip()
+    if not value:
+        return None
+    if value.startswith('"'):
+        return _decode_kotlin_string(value)
+    if value == "null":
+        return ""
+    if re.fullmatch(r"-?\d+(?:\.\d+)?", value):
+        return value
+    if re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+", value):
+        return value.rsplit(".", 1)[-1]
+    return None
+
+
+def _snake_case(value: str) -> str:
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", value).lower()
+
+
+def _kotlin_filter_specs(kotlin: str) -> list[SourceFilterSpec]:
+    specs: list[SourceFilterSpec] = []
+    pattern = re.compile(
+        rf"\bclass\s+(?P<class>[A-Za-z_]\w*Filter)\s*:\s*"
+        rf"Filter\.(?P<kind>Select(?:<[^>]+>)?|Sort)\s*\(\s*"
+        rf"(?P<title>{_KOTLIN_STRING})\s*,\s*arrayOf\((?P<options>[\s\S]*?)\)",
+    )
+    state_values = re.compile(r"=\s*arrayOf\((?P<values>[\s\S]*?)\)\s*\[\s*state\s*\]")
+    for declaration in _kotlin_class_declarations(kotlin):
+        found = pattern.search(declaration)
+        if found is None:
+            continue
+        title = _decode_kotlin_string(found.group("title"))
+        titles = [
+            value
+            for literal in re.findall(_KOTLIN_STRING, found.group("options"))
+            if (value := _decode_kotlin_string(literal)) is not None
+        ]
+        if title is None or not titles:
+            continue
+        assignments = list(state_values.finditer(declaration))
+        values = (
+            [
+                value
+                for expression in assignments[-1].group("values").split(",")
+                if (value := _filter_value(expression)) is not None
+            ]
+            if assignments
+            else list(titles)
+        )
+        if len(values) != len(titles) or len(set(values)) != len(values):
+            continue
+        class_name = found.group("class")
+        kind = "sort" if found.group("kind") == "Sort" else "select"
+        specs.append(
+            SourceFilterSpec(
+                source_class=class_name,
+                id=_snake_case(class_name.removesuffix("Filter")),
+                title=title,
+                kind=kind,
+                options=[
+                    SourceFilterOption(title=option_title, value=value)
+                    for option_title, value in zip(titles, values, strict=True)
+                ],
+                default_ascending=False if kind == "sort" else None,
+            )
+        )
+    return specs
 
 
 def _kotlin_class_declarations(text: str) -> list[str]:
@@ -179,6 +265,7 @@ def analyze_kotlin_source(resolved: ResolvedSource) -> SourceIR:
         capabilities=list(recognition.capabilities),
         method_names=method_names,
         header_names=header_names,
+        filter_specs=_kotlin_filter_specs(kotlin),
         relative_url_keys=_uses_relative_url_keys(kotlin),
         files=files,
         license_name=license_name,

@@ -140,6 +140,47 @@ def test_detects_relative_manga_and_chapter_keys() -> None:
     assert not _uses_relative_url_keys('manga.url = "https://example.com/comics/1"')
 
 
+def test_recovers_kotlin_select_filter_site_values(tmp_path: Path) -> None:
+    (tmp_path / "build.gradle.kts").write_text(
+        'keiyoushi { name = "Filters"; source { lang = "zh"; '
+        'baseUrl { custom("https://filters.example") } } }'
+    )
+    source = tmp_path / "src" / "Filters.kt"
+    source.parent.mkdir()
+    source.write_text(
+        """
+        class Filters : HttpSource() {
+            override fun getFilterList() = FilterList(SortFilter(), StatusFilter())
+        }
+        interface SiteFilter { fun apply(variables: Variables) }
+        class SortFilter :
+            Filter.Select<String>("排序", arrayOf("更新", "觀看數")), SiteFilter {
+            override fun apply(variables: Variables) {
+                variables.order = arrayOf(OrderBy.DATE_UPDATED, OrderBy.VIEWS)[state]
+            }
+        }
+        class StatusFilter :
+            Filter.Select<String>("狀態", arrayOf("全部", "完結")), SiteFilter {
+            override fun apply(variables: Variables) {
+                variables.status = arrayOf("", "END")[state]
+            }
+        }
+        """
+    )
+
+    ir = analyze_path(str(tmp_path))
+
+    assert [(spec.id, spec.kind) for spec in ir.filter_specs] == [
+        ("sort", "select"),
+        ("status", "select"),
+    ]
+    assert [option.value for option in ir.filter_specs[0].options] == [
+        "DATE_UPDATED",
+        "VIEWS",
+    ]
+    assert [option.value for option in ir.filter_specs[1].options] == ["", "END"]
+
+
 def test_analyzes_decompiled_apk_as_public_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

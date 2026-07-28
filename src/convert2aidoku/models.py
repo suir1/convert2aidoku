@@ -136,7 +136,7 @@ class RequestHeaderProfile(BaseModel):
 
 
 class SourceIR(BaseModel):
-    schema_version: Literal[1, 2, 3, 4] = 4
+    schema_version: Literal[1, 2, 3, 4, 5] = 5
     input_ref: str
     commit: str | None = None
     source_format: Literal["kotlin_module", "decompiled_apk"] = "kotlin_module"
