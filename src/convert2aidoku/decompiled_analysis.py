@@ -13,12 +13,64 @@ from .models import (
     ChapterPageRouteVariant,
     ContentRating,
     ImageUrlPolicy,
+    RequestHeaderProfile,
     RouteReplacement,
     SourceFilterOption,
     SourceFilterSpec,
     SourceIR,
     SourceMetadata,
 )
+
+
+def _java_string_array(content: str) -> list[str]:
+    values = []
+    for raw in re.findall(r'"((?:\\.|[^"\\])*)"', content):
+        try:
+            values.append(json.loads(f'"{raw}"'))
+        except json.JSONDecodeError:
+            continue
+    return values
+
+
+def _java_request_header_policy(
+    java: str,
+) -> tuple[list[RequestHeaderProfile], dict[str, str]]:
+    profiles: dict[str, dict[str, str]] = {}
+    for header_match in re.finditer(
+        r"(?:private\s+)?static\s+final\s+Headers\s+(?P<name>[A-Z][A-Z0-9_]*)\s*=\s*"
+        r"Headers\.Companion\.of\(new String\[\]\s*\{(?P<values>[^}]+)\}\)",
+        java,
+    ):
+        values = _java_string_array(header_match.group("values"))
+        if values and len(values) % 2 == 0:
+            profiles[header_match.group("name")] = dict(zip(values[::2], values[1::2], strict=True))
+
+    domains: dict[str, list[str]] = {name: [] for name in profiles}
+    for domain_match in re.finditer(
+        r'(?m)^\s*[A-Z][A-Z0-9_]*\("(?P<domain>(?:\\.|[^"\\])*)"[^\n;]*?'
+        r"\.get(?P<profile>[A-Z][A-Z0-9_]*)\(\)",
+        java,
+    ):
+        if domain_match.group("profile") in domains:
+            domains[domain_match.group("profile")].append(domain_match.group("domain"))
+
+    shared: dict[str, str] = {}
+    for shared_match in re.finditer(
+        r"this\.[A-Za-z_]\w*\s*=\s*Headers\.Companion\.of\(new String\[\]\s*"
+        r"\{(?P<values>[^}]+)\}\)",
+        java,
+    ):
+        values = _java_string_array(shared_match.group("values"))
+        if values and len(values) % 2 == 0:
+            shared.update(dict(zip(values[::2], values[1::2], strict=True)))
+
+    return (
+        [
+            RequestHeaderProfile(name=name, domains=domains[name], headers=headers)
+            for name, headers in sorted(profiles.items())
+        ],
+        shared,
+    )
 
 
 def _java_chapter_page_routes(java: str) -> list[ChapterPageRoute]:
@@ -199,6 +251,7 @@ def analyze_decompiled_source(resolved: ResolvedSource) -> SourceIR:
             "MVP supports only APK HttpSource classes without custom source interfaces"
         )
     java = inspection.java
+    request_header_profiles, shared_request_headers = _java_request_header_policy(java)
     recognition = recognize_input_capabilities(java, dialect="decompiled_java")
 
     hard_unsupported: list[str] = []
@@ -277,6 +330,8 @@ def analyze_decompiled_source(resolved: ResolvedSource) -> SourceIR:
         capabilities=list(recognition.capabilities),
         method_names=list(inspection.method_names),
         header_names=list(inspection.header_names),
+        request_header_profiles=request_header_profiles,
+        shared_request_headers=shared_request_headers,
         relative_url_keys=("url2comicPath" in java or "setUrlWithoutDomain" in java),
         chapter_page_routes=_java_chapter_page_routes(java),
         image_url_policy=_java_image_url_policy(java),

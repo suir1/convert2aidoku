@@ -97,9 +97,23 @@ def evaluate_manifest_contract(
             add(message)
     if Capability.DYNAMIC_FILTERS in ir.capabilities and "DynamicFilters" not in traits:
         add("source fetches dynamic filters but generated no DynamicFilters provider")
-    if Capability.DYNAMIC_FILTERS in ir.capabilities and rust.function_contains(
-        "get_dynamic_filters", "serde_json::from_str"
-    ):
+    dynamic_filter_deserialization = any(
+        "serde_json::from_str" in function.text
+        and (
+            re.search(
+                r"(?:let\s+[A-Za-z_]\w*\s*:\s*|from_str\s*::\s*<)"
+                r"(?:Vec\s*<\s*)?(?:aidoku::)?Filter\b",
+                function.text,
+            )
+            or re.search(
+                r"->\s*Result\s*<\s*Vec\s*<\s*(?:aidoku::)?Filter\s*>\s*>\s*"
+                r"\{\s*serde_json::from_str",
+                function.text,
+            )
+        )
+        for function in rust.named("get_dynamic_filters")
+    )
+    if Capability.DYNAMIC_FILTERS in ir.capabilities and dynamic_filter_deserialization:
         add(
             "get_dynamic_filters attempts to deserialize aidoku::Filter with serde_json; "
             "construct typed SelectFilter/Filter values directly because Filter is not "
@@ -414,7 +428,7 @@ def _normalize_decompiled_dto_content(
     for shape in shapes:
         for field in shape.fields:
             rust_field = _matching_rust_field(rust, shape.name, field)
-            if rust_field is None or rust_field.serialized_name == field.serialized_name:
+            if rust_field is None:
                 continue
             rename_attribute = next(
                 (
@@ -427,6 +441,21 @@ def _normalize_decompiled_dto_content(
                 ),
                 None,
             )
+            struct_node = rust_field.node.parent
+            while struct_node is not None and struct_node.type != "struct_item":
+                struct_node = struct_node.parent
+            struct_rename_all = False
+            if struct_node is not None:
+                sibling = struct_node.prev_named_sibling
+                while sibling is not None and sibling.type == "attribute_item":
+                    if "rename_all" in sibling.text.decode("utf-8", errors="replace"):
+                        struct_rename_all = True
+                        break
+                    sibling = sibling.prev_named_sibling
+            if rust_field.serialized_name == field.serialized_name and not (
+                rename_attribute is None and struct_rename_all and "_" in field.serialized_name
+            ):
+                continue
             if rename_attribute is not None:
                 original = rename_attribute.text.decode("utf-8", errors="replace")
                 replacement = re.sub(

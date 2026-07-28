@@ -17,6 +17,17 @@ class UnsupportedSourceError(C2AError):
 class AIProviderError(C2AError):
     """Raised when the compatible model endpoint cannot produce valid output."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        usage: object | None = None,
+        warnings: list[str] | tuple[str, ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self.usage = usage
+        self.warnings = list(warnings)
+
 
 class SecurityError(C2AError):
     """Raised when generated output violates a security boundary."""

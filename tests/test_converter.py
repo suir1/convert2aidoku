@@ -16,6 +16,8 @@ from convert2aidoku.manifest_contract import (
     evaluate_manifest_contract,
 )
 from convert2aidoku.models import (
+    AIFailedExchange,
+    AIUsage,
     Capability,
     ChapterPageRoute,
     ChapterPageRouteVariant,
@@ -245,6 +247,52 @@ def test_interrupted_conversion_resumes_saved_manifest_without_regeneration(
     assert ai_calls.generate == 1
     assert (output / ".c2a" / "manifests" / "round-01.json").is_file()
     assert not workspace.exists()
+
+
+def test_failed_initial_exchange_usage_and_diagnostic_are_checkpointed(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    usage = AIUsage(prompt_tokens=20, completion_tokens=10, total_tokens=30)
+
+    class FailingAIClient:
+        def __init__(self, _settings) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def generate(self, _source_ir):
+            raise AIProviderError(
+                "synthetic invalid manifest",
+                usage=usage,
+                warnings=["first invalid output", "second invalid output"],
+            )
+
+    monkeypatch.setattr("convert2aidoku.converter.OpenAICompatibleClient", FailingAIClient)
+    output = tmp_path / "generated" / "en.simple"
+
+    with pytest.raises(AIProviderError, match="synthetic invalid manifest"):
+        convert_source(
+            str(FIXTURE),
+            output=output,
+            settings=conversion_settings(),
+            live=False,
+        )
+
+    checkpoint = ConversionCheckpoint.model_validate_json(
+        (output.parent / f".{output.name}.c2a-work" / "checkpoint.json").read_text()
+    )
+    assert checkpoint.failed_ai_exchanges == [
+        AIFailedExchange(
+            purpose="generate",
+            usage=usage,
+            diagnostics=["first invalid output", "second invalid output"],
+        )
+    ]
 
 
 def test_repair_preserves_source_ir_required_resources(tmp_path: Path, monkeypatch) -> None:

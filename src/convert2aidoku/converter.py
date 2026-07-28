@@ -10,7 +10,7 @@ from .checkpoint_store import CheckpointStore, ManifestWrite
 from .config import AISettings
 from .conversion_completion import ConversionOutcome, complete_conversion
 from .conversion_intake import ConversionIntake
-from .errors import InputError
+from .errors import AIProviderError, InputError
 from .generated_source_metadata import GeneratedSourceMetadata
 from .live_validation_evidence import live_validation_evidence
 from .manifest_contract import (
@@ -20,6 +20,8 @@ from .manifest_contract import (
     normalize_decompiled_setting_manifest,
 )
 from .models import (
+    AIFailedExchange,
+    AIUsage,
     Capability,
     ConversionCheckpoint,
     ConversionReport,
@@ -137,6 +139,19 @@ class _ConversionRoundRunner:
         self.progress(f"AI round {number} returned{usage}; validating")
         self.evaluate(result.value)
 
+    def record_failed_exchange(self, exc: AIProviderError, *, purpose: str) -> None:
+        diagnostics = list(dict.fromkeys(exc.warnings or [str(exc)]))
+        diagnostics = [item[-2_000:] for item in diagnostics[-2:]]
+        usage = exc.usage if isinstance(exc.usage, AIUsage) else None
+        self.checkpoint.failed_ai_exchanges.append(
+            AIFailedExchange(
+                purpose=purpose,
+                usage=usage,
+                diagnostics=diagnostics,
+            )
+        )
+        self.store.commit(checkpoint=self.checkpoint)
+
     def repair(self, settings: AISettings) -> None:
         repair_number = max(0, len(self.checkpoint.ai_rounds) - 1)
         if not repair_required(self.validation, self.capability_gaps, live=self.live):
@@ -166,7 +181,12 @@ class _ConversionRoundRunner:
                     validation=self.validation,
                     contract=self.contract,
                 )
-                self.accept(repair.request(client), purpose="repair")
+                try:
+                    result = repair.request(client)
+                except AIProviderError as exc:
+                    self.record_failed_exchange(exc, purpose="repair")
+                    raise
+                self.accept(result, purpose="repair")
 
 
 def convert_source(
@@ -212,10 +232,12 @@ def convert_source(
     else:
         notify("Requesting initial AI generation")
         with OpenAICompatibleClient(settings) as client:
-            rounds.accept(
-                client.generate(ir),
-                purpose="generate",
-            )
+            try:
+                result = client.generate(ir)
+            except AIProviderError as exc:
+                rounds.record_failed_exchange(exc, purpose="generate")
+                raise
+            rounds.accept(result, purpose="generate")
 
     rounds.repair(settings)
     return complete_conversion(store, ir, checkpoint, rounds.validation)

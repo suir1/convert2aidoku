@@ -239,6 +239,41 @@ def test_terminal_rfind_image_resolution_scope_satisfies_contract() -> None:
     assert evaluate_manifest_contract(ir, manifest).messages == []
 
 
+def test_dynamic_filter_contract_allows_deserializing_option_dto() -> None:
+    ir = minimal_source_ir(capabilities=[Capability.DYNAMIC_FILTERS])
+    manifest = _manifest(
+        """
+        impl DynamicFilters for SourceImpl {
+            fn get_dynamic_filters(&self) -> Result<Vec<Filter>> {
+                let result: ApiResponse<ThemeResult> = serde_json::from_str(&json)?;
+                Ok(result.results.into_filters())
+            }
+        }
+        """
+    ).model_copy(update={"implemented_traits": ["DynamicFilters"]})
+
+    assert evaluate_manifest_contract(ir, manifest).messages == []
+
+
+def test_dynamic_filter_contract_rejects_deserializing_filter_itself() -> None:
+    ir = minimal_source_ir(capabilities=[Capability.DYNAMIC_FILTERS])
+    manifest = _manifest(
+        """
+        impl DynamicFilters for SourceImpl {
+            fn get_dynamic_filters(&self) -> Result<Vec<Filter>> {
+                let filters: Vec<Filter> = serde_json::from_str(&json)?;
+                Ok(filters)
+            }
+        }
+        """
+    ).model_copy(update={"implemented_traits": ["DynamicFilters"]})
+
+    assert any(
+        "attempts to deserialize aidoku::Filter" in message
+        for message in evaluate_manifest_contract(ir, manifest).messages
+    )
+
+
 def test_manual_terminal_image_resolution_scope_satisfies_contract() -> None:
     ir = minimal_source_ir(
         image_url_policy=ImageUrlPolicy(
@@ -353,6 +388,34 @@ def test_decompiled_dto_rust_keyword_field_gets_serde_rename() -> None:
 
     assert '#[serde(rename = "type")]' in normalized.files[0].content
     assert evaluate_manifest_contract(ir, normalized).messages == []
+
+
+def test_decompiled_dto_field_overrides_incompatible_struct_rename_all() -> None:
+    ir = minimal_source_ir(
+        source_format="decompiled_apk",
+        files=[
+            SourceFile(
+                path="sources/example/api/dto/ThemeDetail.java",
+                sha256="0",
+                content="""
+                public final class ThemeDetail {
+                    // pathWord -> "path_word"
+                    private final String pathWord;
+                }
+                """,
+            )
+        ],
+    )
+    manifest = _manifest(
+        """
+        #[serde(rename_all = "camelCase")]
+        struct ThemeDetail { path_word: String }
+        """
+    )
+
+    normalized = normalize_decompiled_dto_manifest(ir, manifest)
+
+    assert '#[serde(rename = "path_word")]' in normalized.files[0].content
 
 
 def test_decompiled_enum_setting_names_are_projected_to_storage_values() -> None:

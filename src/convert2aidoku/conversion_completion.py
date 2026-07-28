@@ -56,6 +56,7 @@ def _report(
         provider_base_url=checkpoint.provider_base_url,
         model=checkpoint.model,
         ai_rounds=checkpoint.ai_rounds,
+        failed_ai_exchanges=checkpoint.failed_ai_exchanges,
         generated_files=_generated_files(store, checkpoint),
         template_matches=match_templates(ir),
         warnings=list(

@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import pytest
@@ -11,9 +12,11 @@ from convert2aidoku.models import (
     GeneratedFile,
     GenerationManifest,
     ImageUrlPolicy,
+    RequestHeaderProfile,
 )
 from convert2aidoku.scaffold import (
     apply_generation_manifest,
+    normalize_generation_manifest,
     normalize_pinned_aidoku_rust,
     render_generated_lib_rs,
     validate_generated_content,
@@ -72,6 +75,14 @@ def test_generated_content_allows_grouped_aidoku_std_import_only() -> None:
     validate_generated_content(
         "src/parser.rs",
         "use aidoku::{imports::std::parse_date, alloc::String};",
+    )
+    validate_generated_content(
+        "src/parser.rs",
+        "use aidoku::imports::{html::Element, net::Request, std::parse_date};",
+    )
+    validate_generated_content(
+        "src/parser.rs",
+        "use aidoku::{imports::{html::Element, std::parse_date}, alloc::String};",
     )
 
     with pytest.raises(SecurityError, match="uses std"):
@@ -255,12 +266,27 @@ def test_normalizer_projects_allocation_and_core_std_paths_but_not_io() -> None:
 extern crate std;
 use std::collections::HashMap;
 use std::borrow::Cow;
+use std::error::Error;
+use std::time::Duration;
+use std::ops::Deref;
+use std::marker::PhantomData;
+use std::hash::Hasher;
+use std::cell::RefCell;
+use std::any::Any;
+use std::num::NonZeroUsize;
+use std::slice::Iter;
+use std::rc::Rc;
+use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::Mutex;
 fn values() -> std::vec::Vec<std::string::String> {
     let _: std::cmp::Ordering = std::cmp::Ordering::Equal;
     HashMap::<String, Cow<'static, str>>::new();
     Vec::new()
 }
 use std::fs;
+use std::net::TcpStream;
+use std::process::Command;
 """
 
     normalized = normalize_pinned_aidoku_rust(content, remove_extern_std=True)
@@ -272,7 +298,22 @@ use std::fs;
     assert "aidoku::alloc::vec::Vec" in normalized
     assert "aidoku::alloc::string::String" in normalized
     assert "core::cmp::Ordering" in normalized
+    assert "core::error::Error" in normalized
+    assert "core::time::Duration" in normalized
+    assert "core::ops::Deref" in normalized
+    assert "core::marker::PhantomData" in normalized
+    assert "core::hash::Hasher" in normalized
+    assert "core::cell::RefCell" in normalized
+    assert "core::any::Any" in normalized
+    assert "core::num::NonZeroUsize" in normalized
+    assert "core::slice::Iter" in normalized
+    assert "aidoku::alloc::rc::Rc" in normalized
+    assert "aidoku::alloc::sync::Arc" in normalized
+    assert "aidoku::alloc::collections::VecDeque" in normalized
+    assert "use std::sync::Mutex;" in normalized
     assert "use std::fs;" in normalized
+    assert "use std::net::TcpStream;" in normalized
+    assert "use std::process::Command;" in normalized
 
 
 def test_generated_lib_is_derived_from_modules_source_struct_and_traits() -> None:
@@ -573,6 +614,240 @@ register_source!(Source, ListingProvider, DynamicFilters, DeepLinkHandler);
     )
 
 
+def test_normalizer_repairs_crate_root_imports_strings_and_legacy_request_errors() -> None:
+    content = """#![allow(dead_code)]
+use aidoku::{
+    alloc::{Vec, string::ToString},
+    imports::net::{Request, RequestError},
+    source::{Manga, MangaPageResult, MangaStatus, PageContent, Viewer},
+};
+fn parse() -> Result<MangaPageResult, RequestError> {
+    let _: String = String::new();
+    let _: Option<Manga> = None;
+    let _ = MangaStatus::Unknown;
+    let _ = Viewer::Unknown;
+    let _ = PageContent::url("image");
+    Err(RequestError::Parse)
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "source::{" not in normalized
+    assert not re.search(r",\s*,", normalized)
+    assert "RequestError" not in normalized
+    assert "Result<MangaPageResult>" in normalized
+    assert "AidokuError::message" in normalized
+    assert "use aidoku::alloc::string::String;" in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
+def test_manifest_normalizer_repairs_cross_file_module_topology(tmp_path: Path) -> None:
+    _project, ir = scaffold_project(tmp_path)
+    manifest = GenerationManifest(
+        source_struct="Simple",
+        files=[
+            GeneratedFile(path="src/lib.rs", content="#![no_std]\n"),
+            GeneratedFile(
+                path="src/source.rs",
+                content=(
+                    "mod parser;\nmod paths;\nuse parser::*;\nuse paths::*;\n"
+                    "fn resolution() -> i32 { 1 }\nfn api_domain() -> i32 { 2 }\n"
+                ),
+            ),
+            GeneratedFile(
+                path="src/parser.rs",
+                content="use crate::resolution;\nfn value() -> i32 { resolution() }\n",
+            ),
+            GeneratedFile(
+                path="src/paths.rs",
+                content="use crate::api_domain;\nfn value() -> i32 { api_domain() }\n",
+            ),
+        ],
+    )
+
+    normalized = normalize_generation_manifest(ir, manifest)
+    files = {item.path: item.content for item in normalized.files}
+
+    assert "mod parser;" not in files["src/source.rs"]
+    assert "mod paths;" not in files["src/source.rs"]
+    assert "use crate::parser::*;" in files["src/source.rs"]
+    assert "use crate::paths::*;" in files["src/source.rs"]
+    assert "use crate::source::resolution;" in files["src/parser.rs"]
+    assert "use crate::source::api_domain;" in files["src/paths.rs"]
+    assert "pub(crate) fn resolution" in files["src/source.rs"]
+    assert "pub(crate) fn api_domain" in files["src/source.rs"]
+
+
+def test_normalizer_repairs_raw_json_listing_and_consuming_builder_patterns() -> None:
+    content = """
+fn raw(response: Response) -> Result<String> {
+    let json = response.get_json_owned()?;
+    parse_search(&json)?;
+    Ok(json)
+}
+fn listing(listing: Listing, page: i32) -> String {
+    match listing.kind {
+        ListingKind::Popular => popular_url(page),
+        ListingKind::Latest => latest_url(page),
+    }
+}
+fn image(url: String) -> Result<Request> {
+    let mut req = Request::get(url)?;
+    req.header("Referer", "https://example.com");
+    Ok(req)
+}
+fn page(url: String) -> PageContent { PageContent::Url(url) }
+fn retry(url: &str) -> Result<Response> {
+    match Request::get(url)?.send() {
+        Ok(response) => Ok(response),
+        Err(_) => Request::get(url)?.send(),
+    }
+}
+fn get_base_url(&self) -> String {
+    api_domain()
+}
+fn manga(url: String, status: MangaStatus) -> Manga {
+    Manga { url: url, status: Some(status), ..Default::default() }
+}
+fn chapter(url: String, number: f64) -> Chapter {
+    Chapter { url: url, chapter_number: number, ..Default::default() }
+}
+fn result(has_next: bool) -> MangaPageResult {
+    MangaPageResult {
+        entries: Vec::new(),
+        has_next,
+    }
+}
+fn update(mut manga: Manga, comic: Comic) {
+    let m = comic.to_manga();
+    manga.description = Some(m.description);
+    manga.cover = Some(m.cover);
+}
+fn moved(resp: ApiResponse<ListResult>) -> MangaPageResult {
+    let list: Vec<_> = resp
+        .results
+        .list
+        .into_iter()
+        .map(to_manga)
+        .collect();
+    MangaPageResult { entries: list, has_next_page: resp.results.has_next() }
+}
+fn consume(chapters: Vec<Chapter>) -> usize {
+    for chapter in chapters { use_chapter(chapter); }
+    chapters.len()
+}
+fn orphan_move(resp: ApiResponse<ListResult>) -> Vec<Manga> {
+    let orphan: Vec<_> = resp.results.list.into_iter().map(to_manga).collect();
+    orphan
+}
+fn orphan_page(resp: ApiResponse<ListResult>) -> MangaPageResult {
+    MangaPageResult {
+        entries: Vec::new(),
+        has_next_page: resp.results.has_next(),
+    }
+}
+fn url2comic_path(url: &str) -> String {
+    let after = url
+        .split("/comic/")
+        .nth(1)
+        .unwrap_or(url)
+        .split("/comic2/")
+        .nth(1)
+        .unwrap_or(url);
+    after.to_string()
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "let json = response.get_string()?;" in normalized
+    assert "match listing.id.as_str()" in normalized
+    assert '"popular" => popular_url(page)' in normalized
+    assert '"latest" => latest_url(page)' in normalized
+    assert 'req = req.header("Referer", "https://example.com");' in normalized
+    assert "PageContent::url(url)" in normalized
+    assert "Err(_) => Ok(Request::get(url)?.send()?)," in normalized
+    assert "fn get_base_url(&self) -> Result<String>" in normalized
+    assert "Ok(api_domain())" in normalized
+    assert "url: Some(url)" in normalized
+    assert "status: status" in normalized
+    assert "chapter_number: Some((number) as f32)" in normalized
+    assert "has_next_page: has_next" in normalized
+    assert "manga.description = m.description;" in normalized
+    assert "manga.cover = m.cover;" in normalized
+    assert "let list_has_next = resp.results.has_next();" in normalized
+    assert "has_next_page: list_has_next" in normalized
+    assert "let chapters_len = chapters.len();" in normalized
+    assert "chapters_len\n}" in normalized
+    assert "let orphan_has_next" not in normalized
+    assert 'url.split_once("/comic/")' in normalized
+    assert 'url.split_once("/comic2/")' in normalized
+    assert '.split("/comic2/")' not in normalized
+
+
+def test_manifest_projects_recovered_request_header_profiles(tmp_path: Path) -> None:
+    _project, ir = scaffold_project(tmp_path)
+    ir = ir.model_copy(
+        update={
+            "source_format": "decompiled_apk",
+            "header_names": ["Accept", "Origin", "User-Agent", "platform"],
+            "request_header_profiles": [
+                RequestHeaderProfile(
+                    name="COPY_HEADER",
+                    domains=["api.copy.example"],
+                    headers={"Accept": "application/json", "Origin": "https://copy.example"},
+                ),
+                RequestHeaderProfile(
+                    name="HOT_HEADER",
+                    domains=["api.hot.example"],
+                    headers={"Accept": "application/json", "Webp": "1"},
+                ),
+            ],
+            "shared_request_headers": {"sec-fetch-mode": "navigate"},
+        }
+    )
+    manifest = GenerationManifest(
+        source_struct="Simple",
+        files=[
+            GeneratedFile(path="src/lib.rs", content="#![no_std]\n"),
+            GeneratedFile(
+                path="src/source.rs",
+                content=(
+                    "fn send_get_retry(url: &str) -> Result<Response> {\n"
+                    "    let request = Request::get(url)?;\n"
+                    "    Ok(request.send()?)\n"
+                    "}\n"
+                ),
+            ),
+            GeneratedFile(
+                path="res/settings.json",
+                content="""[{"type":"group","title":"Request","items":[
+                    {"type":"select","key":"v2.pref.api_domain","title":"Domain",
+                     "values":["api.copy.example","api.hot.example"],
+                     "default":"api.copy.example"},
+                    {"type":"select","key":"v2.pref.platform","title":"Platform",
+                     "values":["platform.none","platform.one"],"default":"platform.one"},
+                    {"type":"text","key":"v2.key.user_agent","title":"UA","default":""}
+                ]}]""",
+            ),
+        ],
+    )
+
+    normalized = normalize_generation_manifest(ir, manifest)
+    source = next(item.content for item in normalized.files if item.path == "src/source.rs")
+
+    assert 'url.contains("api.hot.example")' in source
+    assert 'request.header("Origin", "https://copy.example")' in source
+    assert 'request.header("Webp", "1")' in source
+    assert 'request.header("sec-fetch-mode", "navigate")' in source
+    assert 'defaults_get::<aidoku::alloc::String>("v2.pref.platform")' in source
+    assert 'request.header("platform", platform)' in source
+    assert 'defaults_get::<aidoku::alloc::String>("v2.key.user_agent")' in source
+    assert source.count("c2a_request(url)?.send()") == 2
+    assert normalize_generation_manifest(ir, normalized) == normalized
+
+
 def test_scaffold_applies_declared_setting_default_to_rust_fallback(tmp_path: Path) -> None:
     manifest = _manifest()
     manifest.files[0].content += """
@@ -615,6 +890,14 @@ fn api_domain() -> String {
 fn resolution() -> String {
     defaults_get("v2.pref.resolution").unwrap_or_else(|| "1500".into())
 }
+fn resolution_already_mapped() -> String {
+    defaults_get::<String>("v2.pref.resolution")
+        .map(|value| match value.as_str() {
+            "resolution.r800" => "800".to_string(),
+            _ => "1500".to_string(),
+        })
+        .unwrap_or_else(|| "1500".to_string())
+}
 """
     manifest.files.append(
         GeneratedFile(
@@ -641,6 +924,9 @@ fn resolution() -> String {
     assert 'Some("resolution.r800") => String::from("800")' in lib
     assert 'Some("resolution.r1500") => String::from("1500")' in lib
     assert '_ => String::from("1500")' in lib
+    mapped = lib.split("fn resolution_already_mapped", 1)[1]
+    assert 'String::from("mapi.copy20.com")' not in mapped
+    assert '.unwrap_or_else(|| "1500".to_string())' in mapped
 
 
 def test_scaffold_maps_prefixed_platform_setting_to_protocol_header(tmp_path: Path) -> None:
@@ -772,6 +1058,10 @@ fn to_manga(&self, resolution: &str) -> Manga {
         .unwrap_or_default();
     Manga { cover: Some(cover), ..Default::default() }
 }
+fn to_manga_direct(&self, resolution: &str) -> Manga {
+    let cover = translate_resolution(&self.cover, resolution);
+    Manga { cover: Some(cover), ..Default::default() }
+}
 """
     manifest.files.append(
         GeneratedFile(
@@ -795,6 +1085,7 @@ fn to_manga(&self, resolution: &str) -> Manga {
     assert 'format!("{}&date_type=day", urls::rank_url(page))' in lib
     assert ".map(|value| translate_resolution(value, resolution))" not in lib
     assert "let cover = self.cover.clone().unwrap_or_default();" in lib
+    assert "let cover = self.cover.clone();" in lib
 
 
 def test_scaffold_uses_public_source_base_for_generated_absolute_urls(tmp_path: Path) -> None:
@@ -861,6 +1152,7 @@ struct ChapterDetail {
     name: String,
     region: Region,
     next: String,
+    missing: MissingType,
 }
 #[derive(Deserialize)]
 struct Region { value: String }
@@ -875,10 +1167,11 @@ fn iterator_next(values: &mut impl Iterator<Item = String>) { let _ = values.nex
     apply_generation_manifest(project, ir, manifest, query=None)
 
     dto = (project / "src" / "dto.rs").read_text(encoding="utf-8")
-    assert dto.count("#[serde(skip_deserializing)]") == 4
+    assert dto.count("#[serde(skip_deserializing)]") == 5
     assert "group_id: Option<String>" in dto
     assert "region: Option<Region>" in dto
     assert "next: Option<String>" in dto
+    assert "missing: Option<serde_json::Value>" in dto
     assert "name: String" in dto
 
 

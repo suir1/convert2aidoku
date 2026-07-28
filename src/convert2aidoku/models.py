@@ -127,8 +127,16 @@ class SourceFilterSpec(BaseModel):
         return self
 
 
+class RequestHeaderProfile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    domains: list[str] = Field(default_factory=list)
+    headers: dict[str, str] = Field(default_factory=dict)
+
+
 class SourceIR(BaseModel):
-    schema_version: Literal[1, 2] = 2
+    schema_version: Literal[1, 2, 3] = 3
     input_ref: str
     commit: str | None = None
     source_format: Literal["kotlin_module", "decompiled_apk"] = "kotlin_module"
@@ -139,6 +147,8 @@ class SourceIR(BaseModel):
     capabilities: list[Capability] = Field(default_factory=list)
     method_names: list[str] = Field(default_factory=list)
     header_names: list[str] = Field(default_factory=list)
+    request_header_profiles: list[RequestHeaderProfile] = Field(default_factory=list)
+    shared_request_headers: dict[str, str] = Field(default_factory=dict)
     relative_url_keys: bool = False
     chapter_page_routes: list[ChapterPageRoute] = Field(default_factory=list)
     image_url_policy: ImageUrlPolicy | None = None
@@ -828,6 +838,12 @@ class AIRound(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class AIFailedExchange(BaseModel):
+    purpose: Literal["generate", "repair"]
+    usage: AIUsage | None = None
+    diagnostics: list[str] = Field(default_factory=list)
+
+
 class ConversionCheckpoint(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -842,6 +858,7 @@ class ConversionCheckpoint(BaseModel):
     phase: Literal["analyzed", "manifest_saved", "validated", "complete"] = "analyzed"
     current_manifest: str | None = None
     ai_rounds: list[AIRound] = Field(default_factory=list)
+    failed_ai_exchanges: list[AIFailedExchange] = Field(default_factory=list)
     repair_attempt_signatures: list[str] = Field(default_factory=list)
     generated_files: list[str] = Field(default_factory=list)
     capability_gaps: list[str] = Field(default_factory=list)
@@ -859,6 +876,7 @@ class ConversionReport(BaseModel):
     provider_base_url: str | None = None
     model: str | None = None
     ai_rounds: list[AIRound] = Field(default_factory=list)
+    failed_ai_exchanges: list[AIFailedExchange] = Field(default_factory=list)
     generated_files: list[str] = Field(default_factory=list)
     template_matches: list[TemplateMatch] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)

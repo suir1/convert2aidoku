@@ -241,6 +241,28 @@ def _strip_fences(content: str) -> str:
     return match.group(1) if match else stripped
 
 
+def _fallback_json_document(content: str) -> str:
+    """Discard one inert prose suffix without hiding another payload."""
+    stripped = _strip_fences(content)
+    if not stripped.startswith("{"):
+        return stripped
+    try:
+        value, end = json.JSONDecoder().raw_decode(stripped)
+    except json.JSONDecodeError:
+        return stripped
+    trailing = stripped[end:].strip()
+    if not trailing:
+        return stripped
+    if (
+        isinstance(value, dict)
+        and len(trailing) <= 1_000
+        and trailing[0].isalpha()
+        and not re.search(r"[\[\]{}`\x00-\x08\x0b\x0c\x0e-\x1f]", trailing)
+    ):
+        return stripped[:end]
+    return stripped
+
+
 def _strict_model_schema(model: type[BaseModel]) -> dict[str, Any]:
     schema = deepcopy(model.model_json_schema())
 
@@ -506,7 +528,12 @@ class OpenAICompatibleClient:
                 )
                 if usage := self._usage(payload):
                     usages.append(usage)
-                value = model.model_validate_json(_strip_fences(self._content(payload)))
+                content = self._content(payload)
+                if response_mode != "json_schema":
+                    content = _fallback_json_document(content)
+                else:
+                    content = _strip_fences(content)
+                value = model.model_validate_json(content)
                 if validate is not None:
                     validate(value)
                 self._response_mode = response_mode
@@ -540,14 +567,22 @@ class OpenAICompatibleClient:
                     response_mode = "json_object" if response_mode == "json_schema" else "plain"
                     self._response_mode = response_mode
                     continue
-                raise
+                raise AIProviderError(
+                    diagnostic,
+                    usage=self._combined_usage(usages),
+                    warnings=warnings,
+                ) from exc
             except (ValidationError, ValueError, SecurityError) as exc:
                 diagnostic = str(exc)
                 errors.append(diagnostic)
                 warnings.append(diagnostic)
                 attempts += 1
         diagnostics = errors or warnings
-        raise AIProviderError(f"AI failed to return a valid {label}: " + " | ".join(diagnostics))
+        raise AIProviderError(
+            f"AI failed to return a valid {label}: " + " | ".join(diagnostics),
+            usage=self._combined_usage(usages),
+            warnings=warnings,
+        )
 
     def _request_manifest(self, messages: list[dict[str, str]]) -> AIResult[GenerationManifest]:
         return self._request_model(

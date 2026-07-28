@@ -36,6 +36,7 @@ def write_report(project: Path, report: ConversionReport) -> None:
         f"- Input: `{report.input_ref}`",
         f"- Model: `{report.model or 'not used'}`",
         f"- AI rounds: {len(report.ai_rounds)}",
+        f"- Failed AI exchanges: {len(report.failed_ai_exchanges)}",
         "",
     ]
     if report.template_matches:

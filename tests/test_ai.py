@@ -8,6 +8,7 @@ from convert2aidoku.ai import OpenAICompatibleClient, _contract_text, _strict_mo
 from convert2aidoku.config import ReasoningEffort
 from convert2aidoku.errors import AIProviderError
 from convert2aidoku.models import (
+    AIUsage,
     Capability,
     GenerationManifest,
     RepairPatch,
@@ -153,6 +154,62 @@ def test_json_object_rejection_falls_back_to_plain_json() -> None:
 
     assert response_formats == ["json_schema", "json_object", None]
     assert not result.structured_output
+
+
+def test_json_fallback_accepts_one_object_with_trailing_explanation() -> None:
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(_manifest()) + "\nGeneration manifest complete."
+                        }
+                    }
+                ]
+            },
+        )
+
+    settings = provider_settings()
+    with OpenAICompatibleClient(settings, transport=httpx.MockTransport(handler)) as client:
+        client._response_mode = "plain"
+        result = client._request_manifest([{"role": "user", "content": "test"}])
+
+    assert calls == 1
+    assert result.value.source_struct == "Example"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "Explanation before JSON.\n" + json.dumps(_manifest()),
+        json.dumps(_manifest()) + "\n" + json.dumps({"second": True}),
+        json.dumps(_manifest()) + "\n```sh\nrm -rf generated\n```",
+    ],
+)
+def test_json_fallback_rejects_non_unique_or_active_trailing_content(content: str) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": content}}]},
+        )
+
+    settings = provider_settings()
+    with (
+        OpenAICompatibleClient(settings, transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(AIProviderError),
+    ):
+        client._response_mode = "plain"
+        client._request_model(
+            [{"role": "user", "content": "test"}],
+            GenerationManifest,
+            max_validation_attempts=1,
+        )
 
 
 def test_typed_exchange_falls_back_for_repair_patch() -> None:
@@ -409,6 +466,7 @@ def test_manifest_rust_content_security_violation_is_retried() -> None:
             manifest["files"][0]["content"] = "use std::fs;"
         else:
             assert "generated Rust uses std" in payload["messages"][-1]["content"]
+            assert "use std::fs;" in payload["messages"][-1]["content"]
         return httpx.Response(
             200,
             json={"choices": [{"message": {"content": json.dumps(manifest)}}]},
@@ -470,7 +528,10 @@ def test_initial_generation_stops_after_two_unsafe_full_outputs() -> None:
         manifest["files"][0]["content"] = "use std::fs;"
         return httpx.Response(
             200,
-            json={"choices": [{"message": {"content": json.dumps(manifest)}}]},
+            json={
+                "choices": [{"message": {"content": json.dumps(manifest)}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            },
         )
 
     settings = provider_settings()
@@ -480,11 +541,16 @@ def test_initial_generation_stops_after_two_unsafe_full_outputs() -> None:
 
     with (
         OpenAICompatibleClient(settings, transport=httpx.MockTransport(handler)) as client,
-        pytest.raises(AIProviderError, match="generated Rust uses std"),
+        pytest.raises(AIProviderError, match="generated Rust uses std") as raised,
     ):
         client.generate(ir)
 
     assert calls == 2
+    assert raised.value.usage == AIUsage(
+        prompt_tokens=20,
+        completion_tokens=10,
+        total_tokens=30,
+    )
 
 
 def test_invalid_filter_shape_is_retried_with_field_diagnostic() -> None:

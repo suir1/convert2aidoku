@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from convert2aidoku.decompiled_analysis import _java_request_header_policy
 from convert2aidoku.decompiled_input import (
     DecompiledInputInspection,
     DecompiledManifest,
@@ -66,6 +67,30 @@ def test_inspection_recovers_one_consistent_main_class_and_java_view() -> None:
     assert "searchMangaRequest" in inspection.method_names
     assert {"Accept", "Origin", "Version"} <= set(inspection.header_names)
     assert "compiler noise" not in inspection.java
+
+
+def test_java_request_header_policy_recovers_profiles_domains_and_shared_headers() -> None:
+    profiles, shared = _java_request_header_policy(
+        """
+        private static final Headers COPY_HEADER = Headers.Companion.of(new String[]{
+            "Accept", "application/json", "Origin", "https://copy.example"
+        });
+        private static final Headers HOT_HEADER = Headers.Companion.of(new String[]{
+            "Accept", "application/json", "Webp", "1"
+        });
+        COPY("api.copy.example", "api.copy.example", "Copy", ApiRepo.INSTANCE.getCOPY_HEADER()),
+        HOT("api.hot.example", "api.hot.example", "Hot", ApiRepo.INSTANCE.getHOT_HEADER());
+        this.insertHeader = Headers.Companion.of(new String[]{
+            "sec-fetch-mode", "navigate"
+        });
+        """
+    )
+
+    assert [profile.name for profile in profiles] == ["COPY_HEADER", "HOT_HEADER"]
+    assert profiles[0].domains == ["api.copy.example"]
+    assert profiles[0].headers["Origin"] == "https://copy.example"
+    assert profiles[1].domains == ["api.hot.example"]
+    assert shared == {"sec-fetch-mode": "navigate"}
 
 
 def test_dto_normalization_is_idempotent_and_preserves_mapping_behavior() -> None:
