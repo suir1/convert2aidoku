@@ -13,6 +13,8 @@ from convert2aidoku.models import (
     GenerationManifest,
     ImageUrlPolicy,
     RequestHeaderProfile,
+    RouteReplacement,
+    SourceFile,
     SourceFilterOption,
     SourceFilterSpec,
 )
@@ -23,7 +25,7 @@ from convert2aidoku.scaffold import (
     render_generated_lib_rs,
     validate_generated_content,
 )
-from tests.scenarios import scaffold_project
+from tests.scenarios import minimal_source_ir, scaffold_project
 
 
 def _manifest(dependency: str | None = None) -> GenerationManifest:
@@ -953,6 +955,164 @@ fn deep_link() -> DeepLinkResult {
     assert "use aidoku::imports::net::;" not in normalized
     assert "..Default::default()" not in normalized.split("DeepLinkResult::Manga", 1)[1]
     assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
+def test_normalizer_repairs_request_tails_partial_detail_move_and_dynamic_api_base() -> None:
+    content = """
+const API_BASE: &str = "https://api.example.com";
+fn api_url(path: &str) -> String {
+    let mut url = String::from(API_BASE);
+    url.push_str(path);
+    url
+}
+fn request(url: String) -> Result<Request> {
+    Request::get(url)?.header("Accept", "application/json")
+}
+fn get_image_request(url: String, _context: Option<PageContext>) -> Result<Request> {
+    Request::get(url)?.header("Referer", "https://example.com")
+}
+fn get_manga_update(
+    &self,
+    mut manga: Manga,
+    needs_details: bool,
+    needs_chapters: bool,
+) -> Result<Manga> {
+    let detail = self.detail(&manga.key)?;
+    if needs_details {
+        let mut updated = self.comic_to_manga(detail.comic, true);
+        updated.chapters = manga.chapters;
+        manga = updated;
+    }
+    if needs_chapters {
+        manga.chapters = Some(self.chapters_from_detail(&detail)?);
+    }
+    Ok(manga)
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(
+        content,
+        setting_defaults={"v2.pref.api_domain": "mapi.copy20.com"},
+    )
+
+    assert 'Ok(Request::get(url)?.header("Accept", "application/json"))' in normalized
+    assert 'Ok(Request::get(url)?.header("Referer", "https://example.com"))' in normalized
+    assert normalized.index("if needs_chapters") < normalized.index("if needs_details")
+    assert 'format!("https://{}", api_domain())' in normalized
+    assert 'defaults_get::<String>("v2.pref.api_domain")' in normalized
+    assert 'String::from("mapi.copy20.com")' in normalized
+    assert (
+        normalize_pinned_aidoku_rust(
+            normalized,
+            setting_defaults={"v2.pref.api_domain": "mapi.copy20.com"},
+        )
+        == normalized
+    )
+
+
+def test_manifest_projects_recovered_detail_api_envelope() -> None:
+    ir = minimal_source_ir(
+        source_format="decompiled_apk",
+        files=[
+            SourceFile(
+                path="CopyManga.java",
+                sha256="0",
+                content=(
+                    "Reflection.typeOf(ApiResponse.class, "
+                    "KTypeProjection.Companion.invariant("
+                    "Reflection.typeOf(ComicDetailResult.class)))"
+                ),
+            )
+        ],
+    )
+    manifest = GenerationManifest(
+        source_struct="CopyManga",
+        files=[
+            GeneratedFile(
+                path="src/lib.rs",
+                content="""
+struct ApiResponse<T> { results: T }
+struct DetailResult;
+struct CopyManga;
+impl CopyManga {
+    fn get_json<T>(&self, url: String) -> Result<T> {
+        self.request(url)?.send()?.get_json_owned()
+    }
+    fn detail(&self, path: &str) -> Result<DetailResult> {
+        self.get_json(self.api_url(&format!("/api/v3/comic2/{path}")))
+    }
+}
+""",
+            )
+        ],
+    )
+
+    normalized = normalize_generation_manifest(ir, manifest)
+    source = normalized.files[0].content
+
+    assert "let response: ApiResponse<DetailResult>" in source
+    assert "Ok(response.results)" in source
+    assert normalize_generation_manifest(ir, normalized) == normalized
+
+
+def test_manifest_projects_domain_dependent_chapter_page_variant() -> None:
+    ir = minimal_source_ir(
+        chapter_page_routes=[
+            ChapterPageRoute(
+                source_method="chapterContentDetailUrl(fixChapterId(chapter.url))",
+                chapter_key_template="/comic/{comic_path}/chapter/{chapter_id}",
+                endpoint_template="/api/v3/comic/{normalized_chapter_key}",
+                variants=[
+                    ChapterPageRouteVariant(
+                        name="default",
+                        condition="selected API domain is not HotManga",
+                        is_default=True,
+                        strip_prefix="/comic/",
+                        replacements=[RouteReplacement(old="/chapter/", new="/chapter2/")],
+                    ),
+                    ChapterPageRouteVariant(
+                        name="hot_manga",
+                        condition="selected API domain is HotManga",
+                        strip_prefix="/comic/",
+                    ),
+                ],
+            )
+        ],
+        request_header_profiles=[
+            RequestHeaderProfile(
+                name="HOT_MANGA_HEADER",
+                domains=["api.manga2025.com", "mapi.hotmangasf.com"],
+                headers={"Webp": "1"},
+            )
+        ],
+    )
+    manifest = GenerationManifest(
+        source_struct="CopyManga",
+        files=[
+            GeneratedFile(
+                path="src/lib.rs",
+                content="""
+fn api_domain() -> String { String::from("api.manga2025.com") }
+fn page_url(&self, key: &str) -> String {
+    let normalized = key
+        .strip_prefix("/comic/")
+        .unwrap_or(key)
+        .replace("/chapter/", "/chapter2/");
+    format!("/api/v3/comic/{normalized}")
+}
+""",
+            )
+        ],
+    )
+
+    normalized = normalize_generation_manifest(ir, manifest)
+    source = normalized.files[0].content
+
+    assert "c2a_is_hot_manga_domain(&api_domain())" in source
+    assert '"api.manga2025.com" | "mapi.hotmangasf.com"' in source
+    assert "aidoku::alloc::String::from(c2a_chapter_key)" in source
+    assert 'c2a_chapter_key.replace("/chapter/", "/chapter2/")' in source
+    assert normalize_generation_manifest(ir, normalized) == normalized
 
 
 def test_manifest_normalizer_repairs_cross_file_module_topology(tmp_path: Path) -> None:

@@ -679,8 +679,9 @@ def test_detail_api_response_envelope_is_a_contract_gap() -> None:
             }
         )
     manifest = generation_manifest(
-        "fn detail(&self, key: &str) -> Result<DetailResult> { "
-        "self.request(key)?.send()?.get_json_owned() }"
+        "fn get_json<T>(&self, key: &str) -> Result<T> { "
+        "self.request(key)?.send()?.get_json_owned() }\n"
+        "fn detail(&self, key: &str) -> Result<DetailResult> { self.get_json(key) }"
     )
 
     gaps = _contract_messages(ir, manifest)

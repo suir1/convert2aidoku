@@ -90,6 +90,10 @@ _HTTP_SOURCE_DECLARATION = re.compile(
     r"\bclass\s+([A-Za-z_][A-Za-z0-9_]*)\s+extends\s+([A-Za-z0-9_.$]+)"
     r"(?:\s+implements\s+([^\{]+))?\s*\{"
 )
+_DETAIL_API_ENVELOPE = re.compile(
+    r"ApiResponse\.class[\s\S]{0,300}?"
+    r"Reflection\.typeOf\((?:Comic)?DetailResult\.class\)"
+)
 _DTO_SERIALIZED_NAME = re.compile(
     r'^\s*//\s*([A-Za-z_][A-Za-z0-9_]*)\s*->\s*"([^"\\]+)"\s*$',
     re.MULTILINE,
@@ -183,6 +187,11 @@ def decompiled_dto_shapes(files: Iterable[SourceFile]) -> tuple[DecompiledDtoSha
                 )
             )
     return tuple(shapes)
+
+
+def decompiled_detail_uses_api_envelope(files: Iterable[SourceFile]) -> bool:
+    """Return whether JADX proves that manga details decode through ApiResponse.results."""
+    return any(_DETAIL_API_ENVELOPE.search(source.content) is not None for source in files)
 
 
 @dataclass(frozen=True)

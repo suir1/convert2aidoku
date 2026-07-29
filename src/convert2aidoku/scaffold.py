@@ -10,6 +10,7 @@ from typing import Any
 from jinja2 import Environment, StrictUndefined
 
 from .constants import MAX_GENERATED_FILE_CHARS
+from .decompiled_input import decompiled_detail_uses_api_envelope
 from .dependency_policy import (
     AIDOKU_RS_REPOSITORY,
     AIDOKU_RS_REV,
@@ -1358,6 +1359,67 @@ def _normalize_image_request_result(content: str) -> str:
     return encoded.decode("utf-8")
 
 
+def _normalize_result_request_tails(content: str) -> str:
+    edits: list[tuple[int, int, bytes]] = []
+    for function in RustInspection.from_content(content).functions:
+        signature = function.text[: function.text.find("{")]
+        if re.search(r"->\s*(?:aidoku::)?Result\s*<\s*Request\s*>", signature) is None:
+            continue
+        for call in RustInspection.from_content(function.text).nodes("call_expression"):
+            if (
+                call.parent is None
+                or call.parent.type != "block"
+                or not call.text.decode("utf-8", errors="replace").lstrip().startswith("Request::")
+            ):
+                continue
+            edits.append(
+                (
+                    function.node.start_byte + call.start_byte,
+                    function.node.start_byte + call.end_byte,
+                    b"Ok(" + call.text + b")",
+                )
+            )
+    encoded = content.encode("utf-8")
+    for begin, end, replacement in sorted(edits, reverse=True):
+        encoded = encoded[:begin] + replacement + encoded[end:]
+    return encoded.decode("utf-8")
+
+
+def _normalize_detail_partial_move(content: str) -> str:
+    replacements: list[tuple[str, str]] = []
+    for function in RustInspection.from_content(content).functions:
+        if function.name != "get_manga_update":
+            continue
+        local = RustInspection.from_content(function.text)
+        details = None
+        chapters = None
+        for branch in local.nodes("if_expression"):
+            text = branch.text.decode("utf-8", errors="replace")
+            if (
+                details is None
+                and re.search(r"\bdetail\.[A-Za-z_]\w*", text)
+                and re.search(r"chapters\s*=\s*manga\.chapters", text)
+            ):
+                details = branch
+            elif chapters is None and "&detail" in text:
+                chapters = branch
+        if details is None or chapters is None or details.end_byte >= chapters.start_byte:
+            continue
+        encoded = function.text.encode("utf-8")
+        between = encoded[details.end_byte : chapters.start_byte]
+        normalized = (
+            encoded[: details.start_byte]
+            + encoded[chapters.start_byte : chapters.end_byte]
+            + between
+            + encoded[details.start_byte : details.end_byte]
+            + encoded[chapters.end_byte :]
+        ).decode("utf-8")
+        replacements.append((function.text, normalized))
+    for original, normalized in replacements:
+        content = content.replace(original, normalized, 1)
+    return content
+
+
 def _normalize_deep_link_defaults(content: str) -> str:
     replacements: list[tuple[str, str]] = []
     for node in RustInspection.from_content(content).nodes("struct_expression"):
@@ -2268,6 +2330,29 @@ def _normalize_generated_setting_defaults(
     return content
 
 
+def _normalize_dynamic_api_base(
+    content: str,
+    setting_defaults: Mapping[str, str] | None,
+) -> str:
+    api_key = next(
+        (key for key in (setting_defaults or {}) if key.rsplit(".", 1)[-1] == "api_domain"),
+        None,
+    )
+    if api_key is None or "String::from(API_BASE)" not in content:
+        return content
+    content = content.replace("String::from(API_BASE)", 'format!("https://{}", api_domain())')
+    if re.search(r"\bfn\s+api_domain\s*\(", content):
+        return content
+    default = (setting_defaults or {}).get(api_key, "")
+    helper = (
+        "fn api_domain() -> String {\n"
+        f"    defaults_get::<String>({json.dumps(api_key)})\n"
+        f"        .unwrap_or_else(|| String::from({json.dumps(default)}))\n"
+        "}"
+    )
+    return content.rstrip() + "\n\n" + helper + "\n"
+
+
 def _normalize_generated_setting_key_aliases(
     content: str,
     setting_defaults: Mapping[str, str] | None,
@@ -2473,6 +2558,8 @@ def normalize_pinned_aidoku_rust(
     content = _normalize_aidoku_api_paths(content)
     content = _normalize_graphql_body_fragment(content)
     content = _normalize_image_request_result(content)
+    content = _normalize_result_request_tails(content)
+    content = _normalize_detail_partial_move(content)
     content = _normalize_legacy_request_errors(content)
     content = _normalize_defaults_get_bindings(content)
     content = _normalize_aidoku_result_errors(content)
@@ -2546,6 +2633,7 @@ def normalize_pinned_aidoku_rust(
         '.header("User-Agent", &get_user_agent())',
     )
     content = content.replace(".header(key, val)", ".header(key, &val)")
+    content = _normalize_dynamic_api_base(content, setting_defaults)
     content = _normalize_generated_setting_key_aliases(content, setting_defaults, setting_keys)
     content = _normalize_generated_setting_defaults(content, setting_defaults)
     content = _normalize_resolution_setting(content, setting_defaults, setting_values)
@@ -2974,6 +3062,160 @@ def _project_recovered_request_headers(
     return updated
 
 
+def _project_recovered_detail_api_envelope(
+    ir: SourceIR,
+    files: list[GeneratedFile],
+) -> list[GeneratedFile]:
+    if not decompiled_detail_uses_api_envelope(ir.files):
+        return files
+    inspection = RustInspection(
+        generated.content for generated in files if generated.path.endswith(".rs")
+    )
+    envelope = inspection.struct_named("ApiResponse")
+    if envelope is None or inspection.struct_field_type("ApiResponse", "results") != "T":
+        return files
+
+    updated: list[GeneratedFile] = []
+    for generated in files:
+        content = generated.content
+        if not generated.path.endswith(".rs"):
+            updated.append(generated)
+            continue
+        replacements: list[tuple[str, str]] = []
+        for function in RustInspection.from_content(content).functions:
+            signature = function.text.split("{", 1)[0]
+            result = re.search(
+                r"->\s*(?:aidoku::)?Result\s*<\s*"
+                r"(?P<detail>(?:[A-Za-z_]\w*::)*(?:Comic)?DetailResult)\s*>",
+                signature,
+            )
+            if (
+                result is None
+                or "detail" not in function.name.lower()
+                or "comic2" not in function.text
+                or "ApiResponse<" in function.text
+            ):
+                continue
+            for call in RustInspection.from_content(function.text).nodes("call_expression"):
+                callee = call.child_by_field_name("function")
+                if (
+                    callee is None
+                    or not callee.text.decode("utf-8", errors="replace").endswith("get_json")
+                    or call.parent is None
+                    or call.parent.type != "block"
+                    or call.parent.parent is None
+                    or call.parent.parent.type != "function_item"
+                ):
+                    continue
+                original = call.text.decode("utf-8", errors="replace")
+                indent = " " * call.start_point.column
+                inner = indent + "    "
+                replacement = (
+                    "{\n"
+                    f"{inner}let response: ApiResponse<{result.group('detail')}> = {original}?;\n"
+                    f"{inner}Ok(response.results)\n"
+                    f"{indent}}}"
+                )
+                replacements.append(
+                    (function.text, function.text.replace(original, replacement, 1))
+                )
+                break
+        for original, replacement in replacements:
+            content = content.replace(original, replacement, 1)
+        updated.append(
+            generated.model_copy(update={"content": content})
+            if content != generated.content
+            else generated
+        )
+    return updated
+
+
+def _variant_profile_domains(ir: SourceIR, variant_name: str) -> tuple[str, ...]:
+    variant_token = re.sub(r"[^a-z0-9]", "", variant_name.lower())
+    domains: list[str] = []
+    for profile in ir.request_header_profiles:
+        profile_token = re.sub(r"[^a-z0-9]", "", profile.name.lower())
+        if variant_token and variant_token in profile_token:
+            domains.extend(profile.domains)
+    return tuple(dict.fromkeys(domains))
+
+
+def _project_recovered_chapter_page_variants(
+    ir: SourceIR,
+    files: list[GeneratedFile],
+) -> list[GeneratedFile]:
+    rules: list[tuple[str, str, str, tuple[str, ...]]] = []
+    for route in ir.chapter_page_routes:
+        default = next((variant for variant in route.variants if variant.is_default), None)
+        if default is None or len(default.replacements) != 1:
+            continue
+        replacement = default.replacements[0]
+        for variant in route.variants:
+            domains = _variant_profile_domains(ir, variant.name)
+            if (
+                variant.is_default
+                or not domains
+                or variant.strip_prefix != default.strip_prefix
+                or variant.replacements
+            ):
+                continue
+            helper = "c2a_is_" + re.sub(r"[^a-z0-9]+", "_", variant.name.lower()).strip("_")
+            rules.append((replacement.old, replacement.new, helper + "_domain", domains))
+    if not rules:
+        return files
+
+    updated: list[GeneratedFile] = []
+    for generated in files:
+        content = generated.content
+        if not generated.path.endswith(".rs"):
+            updated.append(generated)
+            continue
+        for old, new, helper, domains in rules:
+            if f"fn {helper}(" in content:
+                continue
+            old_literal = json.dumps(old)
+            new_literal = json.dumps(new)
+            pattern = re.compile(
+                rf"(?m)^(?P<indent>[ \t]*)let\s+(?P<variable>[A-Za-z_]\w*)\s*=\s*"
+                rf"(?P<base>[A-Za-z_]\w*[\s\S]{{0,700}}?)"
+                rf"\.replace\(\s*{re.escape(old_literal)}\s*,\s*"
+                rf"{re.escape(new_literal)}\s*\)\s*;"
+            )
+            match = pattern.search(content)
+            if match is None:
+                continue
+            indent = match.group("indent")
+            inner = indent + "    "
+            variable = match.group("variable")
+            base = match.group("base").rstrip()
+            replacement = (
+                f"{indent}let c2a_chapter_key = {base};\n"
+                f"{indent}let {variable} = if {helper}(&api_domain()) {{\n"
+                f"{inner}aidoku::alloc::String::from(c2a_chapter_key)\n"
+                f"{indent}}} else {{\n"
+                f"{inner}c2a_chapter_key.replace({old_literal}, {new_literal})\n"
+                f"{indent}}};"
+            )
+            domain_patterns = " | ".join(json.dumps(domain) for domain in domains)
+            helper_content = (
+                f"fn {helper}(domain: &str) -> bool {{\n    matches!(domain, {domain_patterns})\n}}"
+            )
+            content = (
+                content[: match.start()]
+                + replacement
+                + content[match.end() :].rstrip()
+                + "\n\n"
+                + helper_content
+                + "\n"
+            )
+        updated.append(
+            generated.model_copy(update={"content": content})
+            if content != generated.content
+            else generated
+        )
+    return updated
+
+
 def _rust_filter_expression(spec: SourceFilterSpec) -> str:
     options = ", ".join(
         f"{json.dumps(item.title, ensure_ascii=False)}.into()" for item in spec.options
@@ -3117,6 +3359,18 @@ def normalize_generation_manifest(
         for before, after in zip(files, header_projected, strict=True)
     )
     files = header_projected
+    envelope_projected = _project_recovered_detail_api_envelope(ir, files)
+    changed |= any(
+        before.content != after.content
+        for before, after in zip(files, envelope_projected, strict=True)
+    )
+    files = envelope_projected
+    route_projected = _project_recovered_chapter_page_variants(ir, files)
+    changed |= any(
+        before.content != after.content
+        for before, after in zip(files, route_projected, strict=True)
+    )
+    files = route_projected
     filters_projected = _project_recovered_dynamic_filters(
         ir,
         files,

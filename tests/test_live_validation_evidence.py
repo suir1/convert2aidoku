@@ -33,8 +33,8 @@ def test_setting_defaults_require_matching_source_capability_and_are_fresh() -> 
     first = live_validation_evidence(with_capability).setting_overrides
     second = live_validation_evidence(with_capability).setting_overrides
     assert first == {
-        "v2.pref.api_domain": "mapi.copy20.com",
-        "api_domain": "mapi.copy20.com",
+        "v2.pref.api_domain": "api.manga2025.com",
+        "api_domain": "api.manga2025.com",
     }
     assert first is not second
 
@@ -65,14 +65,14 @@ def test_live_validated_setting_default_stays_inside_generated_allowlist() -> No
         capabilities=[Capability.DYNAMIC_BASE_URLS],
     )
     overrides = live_validation_evidence(ir).setting_overrides
-    allowed = GeneratedResources(manifest(["api.mangacopy.com", "mapi.copy20.com"])).with_defaults(
-        setting_overrides=overrides
-    )
+    allowed = GeneratedResources(
+        manifest(["api.mangacopy.com", "api.manga2025.com"])
+    ).with_defaults(setting_overrides=overrides)
     rejected = GeneratedResources(manifest(["api.mangacopy.com"])).with_defaults(
         setting_overrides=overrides
     )
     normalized_key = GeneratedResources(
-        manifest(["api.mangacopy.com", "mapi.copy20.com"], key="api_domain")
+        manifest(["api.mangacopy.com", "api.manga2025.com"], key="api_domain")
     ).with_defaults(setting_overrides=overrides)
 
     allowed_settings = json.loads(next(x.content for x in allowed.files if x.path.endswith("json")))
@@ -82,6 +82,6 @@ def test_live_validated_setting_default_stays_inside_generated_allowlist() -> No
     normalized_key_settings = json.loads(
         next(x.content for x in normalized_key.files if x.path.endswith("json"))
     )
-    assert allowed_settings[0]["items"][0]["default"] == "mapi.copy20.com"
+    assert allowed_settings[0]["items"][0]["default"] == "api.manga2025.com"
     assert rejected_settings[0]["items"][0]["default"] == "api.mangacopy.com"
-    assert normalized_key_settings[0]["items"][0]["default"] == "mapi.copy20.com"
+    assert normalized_key_settings[0]["items"][0]["default"] == "api.manga2025.com"

@@ -6,6 +6,7 @@ from convert2aidoku.decompiled_analysis import _java_request_header_policy
 from convert2aidoku.decompiled_input import (
     DecompiledInputInspection,
     DecompiledManifest,
+    decompiled_detail_uses_api_envelope,
     decompiled_dto_shapes,
     normalize_decompiled_java,
     project_java_behavior,
@@ -15,6 +16,23 @@ from convert2aidoku.ingest import ResolvedSource, collect_source_files
 from convert2aidoku.models import SourceFile
 
 FIXTURE = Path(__file__).parent / "fixtures" / "decompiled_apk"
+
+
+def test_detects_recovered_detail_api_envelope() -> None:
+    files = [
+        SourceFile(
+            path="CopyManga.java",
+            sha256="0",
+            content=(
+                "Reflection.typeOf(ApiResponse.class, "
+                "KTypeProjection.Companion.invariant("
+                "Reflection.typeOf(ComicDetailResult.class)))"
+            ),
+        )
+    ]
+
+    assert decompiled_detail_uses_api_envelope(files)
+    assert not decompiled_detail_uses_api_envelope([])
 
 
 def test_manifest_exposes_all_shared_apk_facts() -> None:

@@ -7,7 +7,12 @@ from pathlib import Path
 from typing import Literal
 
 from .constants import MAX_AI_DIAGNOSTIC_CHARS
-from .decompiled_input import DecompiledDtoField, DecompiledDtoShape, decompiled_dto_shapes
+from .decompiled_input import (
+    DecompiledDtoField,
+    DecompiledDtoShape,
+    decompiled_detail_uses_api_envelope,
+    decompiled_dto_shapes,
+)
 from .dependency_policy import evaluate_dependency_policy
 from .models import Capability, GeneratedResources, GenerationManifest, SourceIR
 from .rust_inspection import RustInspection
@@ -323,11 +328,7 @@ def evaluate_manifest_contract(
             "generated code incorrectly deserializes ranks as a direct ListResult<Comic>, "
             "producing empty manga titles and keys"
         )
-    if re.search(
-        r"ApiResponse\.class[\s\S]{0,300}?"
-        r"Reflection\.typeOf\(ComicDetailResult\.class\)",
-        input_content,
-    ) and _detail_helper_skips_api_envelope(rust):
+    if decompiled_detail_uses_api_envelope(ir.files) and _detail_helper_skips_api_envelope(rust):
         add(
             "detail endpoint is wrapped in ApiResponse<ComicDetailResult>, but generated detail "
             "helper deserializes the HTTP response directly into DetailResult; deserialize "
@@ -679,12 +680,13 @@ def _detail_helper_skips_api_envelope(rust: RustInspection) -> bool:
     for function in rust.functions:
         if "detail" not in function.name.lower():
             continue
-        text = function.text
-        signature = text.split("{", 1)[0]
+        signature = function.text.split("{", 1)[0]
+        reachable = rust.reachable_functions(function.name)
+        reachable_text = "\n".join(item.text for name in reachable for item in rust.named(name))
         if (
             re.search(r"Result<(?:Comic)?DetailResult>", signature)
-            and ".get_json_owned()" in text
-            and "ApiResponse<" not in text
+            and ".get_json_owned()" in reachable_text
+            and "ApiResponse<" not in reachable_text
         ):
             return True
     return False
