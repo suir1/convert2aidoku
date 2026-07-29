@@ -295,3 +295,46 @@ def test_compiler_patch_is_preferred_when_contract_gap_is_not_targetable(
     assert "fixed();" in result.value.files[0].content
     assert calls.repair_patch == 1
     assert calls.repair == 0
+
+
+def test_compiler_patch_precedes_targetable_contract_repair(tmp_path: Path) -> None:
+    store = CheckpointStore(tmp_path / "workspace")
+    source = store.project / "src"
+    source.mkdir(parents=True)
+    rust = "fn broken() { old(); }\n"
+    (source / "lib.rs").write_text(rust, encoding="utf-8")
+    manifest = generation_manifest(rust)
+
+    class UnexpectedContract:
+        messages = ["targetable contract gap"]
+
+        def repair(self, _project: Path):
+            raise AssertionError("contract repair must wait until the crate compiles")
+
+    repair = TargetedRepair(
+        ir=minimal_source_ir(),
+        store=store,
+        checkpoint=ConversionCheckpoint(
+            input_ref="fixture",
+            output="generated/en.example",
+            provider_base_url="http://local/v1",
+            model="test",
+        ),
+        manifest=manifest,
+        validation=ValidationResult(
+            stages=[
+                ValidationStage(
+                    name="cargo-check",
+                    kind="check",
+                    ok=False,
+                    output="error\n  --> src/lib.rs:1:15",
+                )
+            ]
+        ),
+        contract=UnexpectedContract(),  # type: ignore[arg-type]
+    )
+
+    request = repair._patch_request(repair.validation.diagnostics)
+
+    assert request is not None
+    assert request.scope == "compiler"

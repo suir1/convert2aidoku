@@ -76,6 +76,37 @@ def test_targeted_diagnostics_keep_exact_user_messages_and_structured_kinds() ->
     assert decompiled.messages == [DECOMPILED_RETRY_MESSAGE]
 
 
+def test_detail_request_dedup_ignores_relative_manga_key_prefixes() -> None:
+    ir = minimal_source_ir(capabilities=[Capability.DETAILS, Capability.CHAPTERS])
+    harmless = evaluate_manifest_contract(
+        ir,
+        _manifest(
+            """
+            fn get_manga_update(&self, needs_details: bool, needs_chapters: bool) {
+                let key = manga.key.strip_prefix("/comic/");
+                self.chapter_url(key);
+            }
+            fn chapter_url(&self, key: &str) { format!("/comic/{key}"); }
+            """
+        ),
+    )
+    repeated = evaluate_manifest_contract(
+        ir,
+        _manifest(
+            """
+            fn get_manga_update(&self, needs_details: bool, needs_chapters: bool) {
+                self.request("/api/v3/comic2/");
+                self.chapter_detail();
+            }
+            fn chapter_detail(&self) { self.request("/api/v3/comic2/"); }
+            """
+        ),
+    )
+
+    assert not any("same REST detail route" in message for message in harmless.messages)
+    assert any("same REST detail route" in message for message in repeated.messages)
+
+
 def test_mixed_diagnostics_cannot_request_a_targeted_repair(tmp_path: Path) -> None:
     source = tmp_path / "src"
     source.mkdir()

@@ -9,6 +9,7 @@ from convert2aidoku.decompiled_input import (
     decompiled_detail_uses_api_envelope,
     decompiled_dto_shapes,
     decompiled_dynamic_filter_endpoint,
+    decompiled_nullable_dto_fields,
     decompiled_rank_list_wraps_comic,
     decompiled_source_paths,
     normalize_decompiled_java,
@@ -244,6 +245,26 @@ def test_dto_shapes_preserve_generic_field_types_and_serialized_names() -> None:
     assert shapes[0].render() == (
         "ComicDetailResult { groups: Map<String, GroupInfo>, pathWord (json path_word): String }"
     )
+
+
+def test_dto_nullable_fields_follow_explicit_jadx_null_checks() -> None:
+    detail = SourceFile(
+        path="sources/example/api/dto/ChapterDetail.java",
+        sha256="0",
+        content="""
+        public final class ChapterDetail {
+            private final List<Integer> words;
+            private final List<ContentItem> contents;
+            public List<Page> toPageList() {
+                List<Integer> order = this.words;
+                if (order == null || order.isEmpty()) { return pages(this.contents); }
+                return sorted(this.contents, order);
+            }
+        }
+        """,
+    )
+
+    assert decompiled_nullable_dto_fields([detail]) == frozenset({("ChapterDetail", "words")})
 
 
 def test_dto_shapes_restore_kotlin_boolean_is_prefix_to_snake_case() -> None:

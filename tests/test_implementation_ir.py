@@ -12,6 +12,7 @@ from convert2aidoku.implementation_ir import (
     ListingEndpointIR,
     ListingImplementationIR,
     ListingRole,
+    ListingSelectionIR,
     project_implementation_ir,
 )
 from convert2aidoku.listing_renderer import (
@@ -19,6 +20,7 @@ from convert2aidoku.listing_renderer import (
     with_deterministic_search_listing,
 )
 from convert2aidoku.models import (
+    Capability,
     GeneratedFile,
     GenerationManifest,
     RequestHeaderProfile,
@@ -69,6 +71,10 @@ def _copymanga_listing_files() -> list[SourceFile]:
                     return getApiUrl() + "/comics?limit=21&offset=" +
                         ((page - 1) * pageSize) + "&ordering=-datetime_updated";
                 }
+                public final String newestPageUrl(int page) {
+                    return getApiUrl() + "/update/newest?limit=21&offset=" +
+                        ((page - 1) * pageSize);
+                }
                 public final String recommendPageUrl(int page) {
                     return getApiUrl() + "/recs?pos=3200102&limit=21&offset=" +
                         ((page - 1) * pageSize);
@@ -87,6 +93,24 @@ def _copymanga_listing_files() -> list[SourceFile]:
             "sources/example/CopyManga.java",
             """
             public final class CopyManga extends HttpSource {
+                static {
+                    int[] mapping = new int[LatestUpdateOption.values().length];
+                    mapping[LatestUpdateOption.NEW_BOOKS.ordinal()] = 1;
+                    mapping[LatestUpdateOption.LATEST_UPDATE.ordinal()] = 2;
+                }
+                protected Request popularMangaRequest(int page) {
+                    return GET(ApiRepo.INSTANCE.recommendPageUrl(page));
+                }
+                protected Request latestUpdatesRequest(int page) {
+                    int mode = latestMode();
+                    if (mode == 1) {
+                        return GET(ApiRepo.INSTANCE.newestPageUrl(page));
+                    }
+                    if (mode == 2) {
+                        return GET(ApiRepo.INSTANCE.newestPageUrl_update(page));
+                    }
+                    throw new NoWhenBranchMatchedException();
+                }
                 protected MangasPage searchMangaParse(Response response) {
                     if (contains(response.url(), "/api/v3/search/comic")) {
                         Reflection.typeOf(SearchResult.class);
@@ -115,6 +139,18 @@ def _copymanga_listing_files() -> list[SourceFile]:
                     builder.addQueryParameter("_update", "true");
                     return GET(builder.build());
                 }
+            }
+            """,
+        ),
+        _file(
+            "sources/example/LatestUpdateOption.java",
+            """
+            public final class LatestUpdateOption {
+                LATEST_UPDATE("Recent", "latest_update.latest_update"),
+                NEW_BOOKS("New", "latest_update.new_books");
+                public static final String KEY = "v2.pref.latest_update";
+                private static final String DEFAULT =
+                    new LatestUpdateOption("Recent", "latest_update.latest_update").entryKey;
             }
             """,
         ),
@@ -211,6 +247,23 @@ def _copymanga_listing_files() -> list[SourceFile]:
             """,
         ),
         _file(
+            "sources/example/api/dto/NewestItem.java",
+            """
+            public final class NewestItem { private final ComicSummary comic; }
+            """,
+        ),
+        _file(
+            "sources/example/api/dto/NewestResult.java",
+            """
+            public final class NewestResult {
+                private final int limit;
+                private final List<NewestItem> list;
+                private final int offset;
+                private final int total;
+            }
+            """,
+        ),
+        _file(
             "sources/example/api/dto/ChapterListResult.java",
             """
             // C2A compacted JADX DTO: generated constructors and value methods removed.
@@ -231,6 +284,7 @@ def test_projects_copymanga_listing_contract_without_provider() -> None:
         language="zh",
         source_format="decompiled_apk",
         main_class="CopyManga",
+        capabilities=[Capability.POPULAR, Capability.LATEST],
         files=_copymanga_listing_files(),
         request_header_profiles=[
             RequestHeaderProfile(
@@ -257,6 +311,7 @@ def test_projects_copymanga_listing_contract_without_provider() -> None:
     assert set(endpoints) == {
         "comicListUrl",
         "comicRankUrl",
+        "newestPageUrl",
         "newestPageUrl_update",
         "recommendPageUrl",
         "searchUrl",
@@ -281,6 +336,17 @@ def test_projects_copymanga_listing_contract_without_provider() -> None:
     assert endpoints["searchUrl"].response_evidence == "parser_path"
     assert endpoints["comicRankUrl"].response_type == "RankResult"
     assert endpoints["comicListUrl"].response_type == "ComicsListResult"
+    assert listing.provider is not None
+    assert listing.provider.popular_endpoint_id == "recommend_page"
+    assert listing.provider.latest == ListingSelectionIR(
+        default_endpoint_id="newest_page_url_update",
+        setting_key="v2.pref.latest_update",
+        setting_default="latest_update.latest_update",
+        endpoint_ids_by_setting_value={
+            "latest_update.new_books": "newest_page",
+            "latest_update.latest_update": "newest_page_url_update",
+        },
+    )
 
     containers = {container.type_name: container for container in listing.containers}
     assert "ChapterListResult" not in containers
@@ -301,6 +367,8 @@ def test_projects_copymanga_listing_contract_without_provider() -> None:
         "ComicSummary",
         "ComicsListResult",
         "ListItem",
+        "NewestItem",
+        "NewestResult",
         "RankResult",
         "RecommendResult",
         "SearchResult",
@@ -340,6 +408,7 @@ def test_deterministic_search_listing_renderer_uses_only_projected_contract() ->
         language="zh",
         source_format="decompiled_apk",
         main_class="CopyManga",
+        capabilities=[Capability.POPULAR, Capability.LATEST],
         files=_copymanga_listing_files(),
         request_header_profiles=[
             RequestHeaderProfile(
@@ -369,6 +438,11 @@ def test_deterministic_search_listing_renderer_uses_only_projected_contract() ->
     assert 'request = request.header("Version", "1");' in rendered.content
     assert 'request = request.header("X-Test", "<tag>\\u{8}");' in rendered.content
     assert "pub(crate) fn get_search_manga_list(" in rendered.content
+    assert "pub(crate) fn get_manga_list(" in rendered.content
+    assert '"popular" => fetch_recommend_page' in rendered.content
+    assert 'defaults_get::<String>("v2.pref.latest_update")' in rendered.content
+    assert '"latest_update.new_books" => fetch_newest_page' in rendered.content
+    assert "_ => fetch_newest_page_url_update" in rendered.content
 
 
 def test_effective_manifest_owns_listing_module_and_source_delegation() -> None:
@@ -377,6 +451,7 @@ def test_effective_manifest_owns_listing_module_and_source_delegation() -> None:
         language="zh",
         source_format="decompiled_apk",
         main_class="CopyManga",
+        capabilities=[Capability.POPULAR, Capability.LATEST],
         files=_copymanga_listing_files(),
     )
     manifest = GenerationManifest(
@@ -397,6 +472,15 @@ def test_effective_manifest_owns_listing_module_and_source_delegation() -> None:
                         panic!("provider-owned listing")
                     }
                 }
+                impl aidoku::ListingProvider for CopyManga {
+                    fn get_manga_list(
+                        &self,
+                        listing: aidoku::Listing,
+                        page: i32,
+                    ) -> aidoku::Result<aidoku::MangaPageResult> {
+                        panic!("provider-owned popular/latest")
+                    }
+                }
                 """,
             ),
             GeneratedFile(
@@ -414,6 +498,12 @@ def test_effective_manifest_owns_listing_module_and_source_delegation() -> None:
         "crate::c2a_listing::get_search_manga_list(query, page, filters)" in files["src/source.rs"]
     )
     assert "compile_error!" not in files["src/c2a_listing.rs"]
+    assert "impl aidoku::ListingProvider for CopyManga" in files["src/source.rs"]
+    assert "crate::c2a_listing::get_manga_list(listing, page)" in files["src/source.rs"]
+    assert "provider-owned popular/latest" not in files["src/source.rs"]
+    assert "get_manga_list(aidoku, aidoku)" not in files["src/source.rs"]
+    assert "ListingProvider" in effective.implemented_traits
+    assert "ListingProvider" in files["src/lib.rs"]
     assert "mod c2a_listing;" in files["src/lib.rs"]
     assert any(
         dependency.name == "serde" and "derive" in dependency.features
@@ -427,6 +517,7 @@ def test_generation_context_omits_tool_owned_listing_evidence() -> None:
         language="zh",
         source_format="decompiled_apk",
         main_class="CopyManga",
+        capabilities=[Capability.POPULAR, Capability.LATEST],
         files=_copymanga_listing_files(),
     )
 
@@ -437,8 +528,12 @@ def test_generation_context_omits_tool_owned_listing_evidence() -> None:
     assert "comicListUrl" not in api_repo
     assert "comicRankUrl" not in api_repo
     assert "searchUrl" not in api_repo
-    assert "recommendPageUrl" in api_repo
-    assert "searchMangaRequest" not in evidence["sources/example/CopyManga.java"]
+    assert "recommendPageUrl" not in api_repo
+    assert "newestPageUrl" not in api_repo
+    source = evidence["sources/example/CopyManga.java"]
+    assert "searchMangaRequest" not in source
+    assert "popularMangaRequest" not in source
+    assert "latestUpdatesRequest" not in source
     omitted = {item["path"]: item["reason"] for item in context["omitted_source_files"]}
     assert omitted["sources/example/api/dto/ComicSummary.java"] == (
         "represented_in_deterministic_search_listing"

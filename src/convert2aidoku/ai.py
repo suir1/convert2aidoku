@@ -33,7 +33,10 @@ from .dependency_policy import evaluate_dependency_policy, render_dependency_pol
 from .errors import AIProviderError, SecurityError
 from .generation_context import build_generation_context, build_settings_context
 from .kotlin_settings import with_kotlin_settings
-from .listing_renderer import deterministic_search_listing_available
+from .listing_renderer import (
+    deterministic_listing_provider_available,
+    deterministic_search_listing_available,
+)
 from .models import (
     AIRound,
     AIUsage,
@@ -606,6 +609,7 @@ class OpenAICompatibleClient:
     def generate(self, ir: SourceIR) -> AIResult[GenerationManifest]:
         source_payload = build_generation_context(ir).as_payload()
         deterministic_listing = deterministic_search_listing_available(ir)
+        deterministic_provider = deterministic_listing_provider_available(ir)
         listing_instruction = (
             "The tool deterministically owns src/c2a_listing.rs for search, rank, and browse. "
             "Do not return that file or reimplement its exclusive endpoints and DTOs. Implement "
@@ -614,6 +618,12 @@ class OpenAICompatibleClient:
             if deterministic_listing
             else ""
         )
+        if deterministic_provider:
+            listing_instruction += (
+                "It also owns popular/latest listing endpoints and will synthesize "
+                "ListingProvider; do not implement get_manga_list or include ListingProvider "
+                "in implemented_traits. "
+            )
         messages = [
             {
                 "role": "system",
@@ -731,7 +741,8 @@ class OpenAICompatibleClient:
                     "Rust-only replacement manifest, not a diff and never shell commands. "
                     "Return only src/**/*.rs; filters/settings are tool-owned and preserved. "
                     "src/c2a_listing.rs is also tool-owned, omitted from this request, and must "
-                    "not be returned or reimplemented. "
+                    "not be returned or reimplemented. Popular/latest ListingProvider behavior "
+                    "may also be tool-owned; preserve its current delegation and trait entry. "
                     "Make only the minimum "
                     "changes required by the supplied diagnostics. Preserve working code, "
                     "selectors, endpoints, dependencies, capabilities, and network behavior "

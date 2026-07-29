@@ -190,6 +190,44 @@ def decompiled_dto_shapes(files: Iterable[SourceFile]) -> tuple[DecompiledDtoSha
     return tuple(shapes)
 
 
+def decompiled_nullable_dto_fields(
+    files: Iterable[SourceFile],
+) -> frozenset[tuple[str, str]]:
+    """Recover DTO fields whose source behavior explicitly handles a null value."""
+    source_files = tuple(files)
+    shapes = {shape.name: shape for shape in decompiled_dto_shapes(source_files)}
+    nullable: set[tuple[str, str]] = set()
+    for source in source_files:
+        shape = shapes.get(PurePath(source.path).stem)
+        if shape is None:
+            continue
+        for field in shape.fields:
+            direct = rf"(?:this\.)?{re.escape(field.name)}\s*==\s*null"
+            reverse = rf"null\s*==\s*(?:this\.)?{re.escape(field.name)}\b"
+            getter = rf"get{re.escape(field.name[:1].upper() + field.name[1:])}\(\)\s*==\s*null"
+            is_nullable = any(
+                re.search(pattern, source.content) is not None
+                for pattern in (direct, reverse, getter)
+            )
+            if not is_nullable:
+                bindings = re.findall(
+                    rf"\b([A-Za-z_]\w*)\s*=\s*this\.{re.escape(field.name)}\s*;",
+                    source.content,
+                )
+                is_nullable = any(
+                    re.search(
+                        rf"(?:\b{re.escape(binding)}\s*==\s*null|"
+                        rf"null\s*==\s*{re.escape(binding)}\b)",
+                        source.content,
+                    )
+                    is not None
+                    for binding in bindings
+                )
+            if is_nullable:
+                nullable.add((shape.name, field.serialized_name))
+    return frozenset(nullable)
+
+
 def decompiled_detail_uses_api_envelope(files: Iterable[SourceFile]) -> bool:
     """Return whether JADX proves that manga details decode through ApiResponse.results."""
     return any(_DETAIL_API_ENVELOPE.search(source.content) is not None for source in files)

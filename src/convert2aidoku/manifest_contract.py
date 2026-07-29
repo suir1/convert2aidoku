@@ -221,12 +221,13 @@ def evaluate_manifest_contract(
         if rust.function_contains("get_manga_update", "needs_details") and rust.function_contains(
             "get_manga_update", "needs_chapters"
         ):
-            update_routes = rust.route_literals("get_manga_update")
+            update_routes = rust.request_route_literals("get_manga_update")
             chapter_helpers = {
                 name for name in rust.calls("get_manga_update") if "chapter" in name.lower()
             }
             for helper in chapter_helpers:
-                repeated_detail_routes.update(update_routes & rust.route_literals(helper))
+                helper_routes = rust.request_route_literals(helper)
+                repeated_detail_routes.update(update_routes & helper_routes)
         if repeated_detail_routes:
             add(
                 "get_manga_update and its chapter helper fetch the same REST detail route twice "

@@ -654,12 +654,17 @@ def test_generate_reserves_tool_owned_search_listing_module(
         "convert2aidoku.ai.deterministic_search_listing_available",
         lambda _ir: True,
     )
+    monkeypatch.setattr(
+        "convert2aidoku.ai.deterministic_listing_provider_available",
+        lambda _ir: True,
+    )
 
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
         prompt = payload["messages"][1]["content"]
         assert "deterministically owns src/c2a_listing.rs" in prompt
         assert "crate::c2a_listing::get_search_manga_list(query, page, filters)" in prompt
+        assert "will synthesize ListingProvider" in prompt
         return httpx.Response(
             200,
             json={"choices": [{"message": {"content": json.dumps(_manifest())}}]},

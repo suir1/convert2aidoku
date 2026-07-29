@@ -5,6 +5,7 @@ import pytest
 
 from convert2aidoku.checkpoint_store import CheckpointStore, ManifestWrite
 from convert2aidoku.errors import InputError
+from convert2aidoku.implementation_ir import ImplementationIR
 from convert2aidoku.models import (
     ConversionCheckpoint,
     GeneratedFile,
@@ -197,6 +198,24 @@ def test_resume_restores_an_installed_audit(tmp_path: Path) -> None:
     assert restored.read_source_ir() == ir.model_copy(update={"license_text": None})
     assert restored.read_implementation_ir().source_id == ir.metadata.source_id
     assert restored.read_round(1) == _manifest()
+
+
+def test_resume_refreshes_stale_deterministic_implementation_ir(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    output = tmp_path / "output"
+    ir = minimal_source_ir()
+    checkpoint = _checkpoint(output)
+    CheckpointStore.initialize(workspace, source_ir=ir, checkpoint=checkpoint)
+    (workspace / "implementation-ir.json").write_text(
+        ImplementationIR(source_id="stale").model_dump_json(),
+        encoding="utf-8",
+    )
+
+    restored, loaded = CheckpointStore.resume(workspace, installed_output=output)
+
+    assert loaded == checkpoint
+    assert restored.read_implementation_ir().source_id == ir.metadata.source_id
 
 
 def test_invalid_installed_checkpoint_does_not_move_output(tmp_path: Path) -> None:

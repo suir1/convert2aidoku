@@ -18,6 +18,7 @@ from .implementation_ir import (
     project_implementation_ir,
 )
 from .models import (
+    Capability,
     DependencyRequest,
     GeneratedFile,
     GenerationManifest,
@@ -84,6 +85,18 @@ class _HeaderProfileView:
 class SearchListingOwnership:
     java_methods: frozenset[str]
     dto_types: frozenset[str]
+
+
+def _provider_is_complete(ir: SourceIR, implementation: ImplementationIR) -> bool:
+    listing = implementation.listing
+    provider = listing.provider if listing is not None else None
+    if provider is None:
+        return False
+    if Capability.POPULAR in ir.capabilities and provider.popular_endpoint_id is None:
+        return False
+    if Capability.LATEST in ir.capabilities and provider.latest is None:
+        return False
+    return Capability.POPULAR in ir.capabilities or Capability.LATEST in ir.capabilities
 
 
 _RUST_KEYWORDS = {
@@ -484,7 +497,19 @@ def render_search_listing(
     browse = _endpoint_for_role(listing.endpoints, ListingRole.BROWSE, required=True)
     rank = _endpoint_for_role(listing.endpoints, ListingRole.RANK, required=False)
     assert search is not None and browse is not None
-    selected = [search, *([rank] if rank else []), browse]
+    provider = listing.provider if _provider_is_complete(ir, implementation) else None
+    endpoints_by_id = {endpoint.id: endpoint for endpoint in listing.endpoints}
+    provider_endpoint_ids: list[str] = []
+    if provider is not None:
+        if provider.popular_endpoint_id is not None:
+            provider_endpoint_ids.append(provider.popular_endpoint_id)
+        if provider.latest is not None:
+            provider_endpoint_ids.extend(provider.latest.endpoint_ids_by_setting_value.values())
+            provider_endpoint_ids.append(provider.latest.default_endpoint_id)
+    selected_ids = dict.fromkeys(
+        [search.id, *([rank.id] if rank else []), browse.id, *provider_endpoint_ids]
+    )
+    selected = [endpoints_by_id[endpoint_id] for endpoint_id in selected_ids]
     if listing.api_base.default_host is None:
         raise ValueError("deterministic listing renderer requires a default API host")
     containers = {container.type_name: container for container in listing.containers}
@@ -492,6 +517,7 @@ def render_search_listing(
     shapes = {shape.name: shape for shape in listing.data_shapes}
     filter_specs = {spec.id: spec for spec in ir.filter_specs}
     views = [_endpoint_view(endpoint, containers, mappings, filter_specs) for endpoint in selected]
+    views_by_id = {view.id: view for view in views}
     mapping_types = {
         containers[endpoint.response_type].manga_item_type
         for endpoint in selected
@@ -529,10 +555,39 @@ def render_search_listing(
             structs=_required_structs(selected, containers, mappings, shapes),
             mappings=sorted(mapping_views, key=lambda item: item.type_name),
             endpoints=views,
-            search_endpoint=views[0],
-            rank_endpoint=views[1] if rank else None,
-            browse_endpoint=views[-1],
+            search_endpoint=views_by_id[search.id],
+            rank_endpoint=views_by_id[rank.id] if rank else None,
+            browse_endpoint=views_by_id[browse.id],
             rank_filter=rank_filter,
+            popular_endpoint=(
+                views_by_id[provider.popular_endpoint_id]
+                if provider is not None and provider.popular_endpoint_id is not None
+                else None
+            ),
+            latest_endpoint=(
+                views_by_id[provider.latest.default_endpoint_id]
+                if provider is not None and provider.latest is not None
+                else None
+            ),
+            latest_setting_key=(
+                provider.latest.setting_key
+                if provider is not None and provider.latest is not None
+                else None
+            ),
+            latest_setting_default=(
+                provider.latest.setting_default
+                if provider is not None and provider.latest is not None
+                else None
+            ),
+            latest_alternates=(
+                tuple(
+                    (value, views_by_id[endpoint_id])
+                    for value, endpoint_id in provider.latest.endpoint_ids_by_setting_value.items()
+                    if endpoint_id != provider.latest.default_endpoint_id
+                )
+                if provider is not None and provider.latest is not None
+                else ()
+            ),
             global_headers=global_headers,
             default_profile=default_profile,
             conditional_profiles=conditional_profiles,
@@ -549,6 +604,15 @@ def deterministic_search_listing_available(ir: SourceIR) -> bool:
     return True
 
 
+def deterministic_listing_provider_available(ir: SourceIR) -> bool:
+    try:
+        implementation = project_implementation_ir(ir)
+        render_search_listing(ir, implementation)
+    except (KeyError, ValueError):
+        return False
+    return _provider_is_complete(ir, implementation)
+
+
 def search_listing_ownership(ir: SourceIR) -> SearchListingOwnership | None:
     try:
         implementation = project_implementation_ir(ir)
@@ -559,7 +623,19 @@ def search_listing_ownership(ir: SourceIR) -> SearchListingOwnership | None:
         browse = _endpoint_for_role(listing.endpoints, ListingRole.BROWSE, required=True)
         rank = _endpoint_for_role(listing.endpoints, ListingRole.RANK, required=False)
         assert search is not None and browse is not None
-        selected = [search, *([rank] if rank else []), browse]
+        provider = listing.provider if _provider_is_complete(ir, implementation) else None
+        endpoints_by_id = {endpoint.id: endpoint for endpoint in listing.endpoints}
+        provider_endpoint_ids: list[str] = []
+        if provider is not None:
+            if provider.popular_endpoint_id is not None:
+                provider_endpoint_ids.append(provider.popular_endpoint_id)
+            if provider.latest is not None:
+                provider_endpoint_ids.extend(provider.latest.endpoint_ids_by_setting_value.values())
+                provider_endpoint_ids.append(provider.latest.default_endpoint_id)
+        selected_ids = dict.fromkeys(
+            [search.id, *([rank.id] if rank else []), browse.id, *provider_endpoint_ids]
+        )
+        selected = [endpoints_by_id[endpoint_id] for endpoint_id in selected_ids]
         containers = {container.type_name: container for container in listing.containers}
         mappings = {mapping.item_type: mapping for mapping in listing.manga_mappings}
         shapes = {shape.name: shape for shape in listing.data_shapes}
@@ -572,6 +648,16 @@ def search_listing_ownership(ir: SourceIR) -> SearchListingOwnership | None:
             {
                 "searchMangaParse",
                 "searchMangaRequest",
+                *(
+                    {"popularMangaParse", "popularMangaRequest"}
+                    if provider is not None and provider.popular_endpoint_id is not None
+                    else set()
+                ),
+                *(
+                    {"latestUpdatesParse", "latestUpdatesRequest"}
+                    if provider is not None and provider.latest is not None
+                    else set()
+                ),
                 *(endpoint.source_method for endpoint in selected),
             }
         ),
@@ -588,11 +674,9 @@ def _delegate_search_function(content: str) -> str | None:
         relative_start = body.start_byte - function.node.start_byte
         relative_end = body.end_byte - function.node.start_byte
         encoded = function.text.encode("utf-8")
-        header = encoded[:relative_start].decode("utf-8", errors="replace")
-        parameters = re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*:", header)
-        if len(parameters) < 3:
+        if len(function.parameter_names) < 3:
             continue
-        query, page, filters = parameters[-3:]
+        query, page, filters = function.parameter_names[-3:]
         replacement_body = (
             "{\n"
             "        crate::c2a_listing::get_search_manga_list("
@@ -604,6 +688,40 @@ def _delegate_search_function(content: str) -> str | None:
         )
         return content.replace(function.text, replacement, 1)
     return None
+
+
+def _with_listing_provider_delegate(content: str, source_struct: str) -> str:
+    inspection = RustInspection.from_content(content)
+    for function in inspection.named("get_manga_list"):
+        body = function.node.child_by_field_name("body")
+        if body is None:
+            continue
+        relative_start = body.start_byte - function.node.start_byte
+        relative_end = body.end_byte - function.node.start_byte
+        encoded = function.text.encode("utf-8")
+        if len(function.parameter_names) < 2:
+            continue
+        listing, page = function.parameter_names[-2:]
+        replacement_body = (
+            f"{{\n        crate::c2a_listing::get_manga_list({listing}, {page})\n    }}"
+        ).encode()
+        replacement = (encoded[:relative_start] + replacement_body + encoded[relative_end:]).decode(
+            "utf-8"
+        )
+        return content.replace(function.text, replacement, 1)
+    implementation = (
+        "\n\nimpl aidoku::ListingProvider for "
+        f"{source_struct} {{\n"
+        "    fn get_manga_list(\n"
+        "        &self,\n"
+        "        listing: aidoku::Listing,\n"
+        "        page: i32,\n"
+        "    ) -> aidoku::Result<aidoku::MangaPageResult> {\n"
+        "        crate::c2a_listing::get_manga_list(listing, page)\n"
+        "    }\n"
+        "}\n"
+    )
+    return content.rstrip() + implementation
 
 
 def _with_serde_derive(dependencies: list[DependencyRequest]) -> list[DependencyRequest]:
@@ -630,9 +748,14 @@ def with_deterministic_search_listing(
 ) -> GenerationManifest:
     """Own the search-listing Rust file and Source delegation in an effective manifest."""
     try:
-        rendered = render_search_listing(ir)
+        implementation = project_implementation_ir(ir)
+        rendered = render_search_listing(ir, implementation)
     except (KeyError, ValueError):
         return manifest
+    provider_owned = _provider_is_complete(ir, implementation)
+    implemented_traits = list(manifest.implemented_traits)
+    if provider_owned and "ListingProvider" not in implemented_traits:
+        implemented_traits.append("ListingProvider")
     files: list[GeneratedFile] = []
     delegated = False
     for generated in manifest.files:
@@ -644,6 +767,8 @@ def with_deterministic_search_listing(
             if replacement is not None:
                 content = replacement
                 delegated = True
+        if provider_owned and generated.path == "src/source.rs":
+            content = _with_listing_provider_delegate(content, manifest.source_struct)
         files.append(generated.model_copy(update={"content": content}))
     if not delegated:
         return manifest
@@ -652,7 +777,7 @@ def with_deterministic_search_listing(
     if "src/source.rs" in generated_paths:
         lib_content = render_generated_lib_rs(
             manifest.source_struct,
-            list(manifest.implemented_traits),
+            implemented_traits,
             generated_paths,
         )
         files = [
@@ -665,5 +790,6 @@ def with_deterministic_search_listing(
         update={
             "files": files,
             "dependencies": _with_serde_derive(manifest.dependencies),
+            "implemented_traits": implemented_traits,
         }
     )

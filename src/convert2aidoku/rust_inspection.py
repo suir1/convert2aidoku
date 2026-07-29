@@ -9,6 +9,7 @@ from tree_sitter_language_pack import get_parser
 
 _FUNCTION_CALL = re.compile(r"\b(?:self\.)?([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 _ROUTE_LITERAL = re.compile(r'"(/[^"\\]*(?:\\.[^"\\]*)*)"')
+_REQUEST_CALL_TOKENS = frozenset({"delete", "fetch", "get", "patch", "post", "put", "request"})
 
 
 @dataclass(frozen=True)
@@ -18,6 +19,7 @@ class RustFunction:
     node: Node
     calls: frozenset[str]
     route_literals: frozenset[str]
+    parameter_names: tuple[str, ...]
 
     @classmethod
     def from_node(cls, node: Node) -> RustFunction | None:
@@ -25,12 +27,21 @@ class RustFunction:
         if identifier is None:
             return None
         text = node.text.decode("utf-8", errors="replace")
+        parameters = node.child_by_field_name("parameters")
+        parameter_names = tuple(
+            pattern.text.decode("utf-8", errors="replace")
+            for parameter in (parameters.named_children if parameters is not None else ())
+            if parameter.type == "parameter"
+            and (pattern := parameter.child_by_field_name("pattern")) is not None
+            and pattern.type == "identifier"
+        )
         return cls(
             name=identifier.text.decode("utf-8", errors="replace"),
             text=text,
             node=node,
             calls=frozenset(_FUNCTION_CALL.findall(text)),
             route_literals=frozenset(_ROUTE_LITERAL.findall(text)),
+            parameter_names=parameter_names,
         )
 
 
@@ -149,6 +160,19 @@ class RustInspection:
     def route_literals(self, name: str) -> set[str]:
         return {route for function in self.named(name) for route in function.route_literals}
 
+    def request_route_literals(self, name: str) -> set[str]:
+        routes: set[str] = set()
+        for function in self.named(name):
+            stack = [function.node]
+            while stack:
+                node = stack.pop()
+                if node.type == "string_literal":
+                    match = _ROUTE_LITERAL.fullmatch(node.text.decode("utf-8", errors="replace"))
+                    if match is not None and _has_request_call_ancestor(node, function.node):
+                        routes.add(match.group(1))
+                stack.extend(reversed(node.children))
+        return routes
+
     def reachable_functions(self, start: str) -> set[str]:
         reachable = {start}
         pending = [start]
@@ -178,3 +202,16 @@ class RustInspection:
         text = node.text.decode("utf-8", errors="replace")
         text = re.sub(r"/\*[\s\S]*?\*/|//[^\r\n]*", "", text)
         return "".join(text.split())
+
+
+def _has_request_call_ancestor(node: Node, function: Node) -> bool:
+    ancestor = node.parent
+    while ancestor is not None and ancestor != function:
+        if ancestor.type == "call_expression":
+            target = ancestor.child_by_field_name("function")
+            if target is not None:
+                call_name = target.text.decode("utf-8", errors="replace").rsplit(".", 1)[-1]
+                if _REQUEST_CALL_TOKENS.intersection(call_name.casefold().split("_")):
+                    return True
+        ancestor = ancestor.parent
+    return False

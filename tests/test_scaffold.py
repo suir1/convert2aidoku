@@ -469,6 +469,55 @@ fn filters() -> Vec<Filter> {
     assert normalize_pinned_aidoku_rust(normalized) == normalized
 
 
+def test_normalizer_adds_missing_sort_filter_default_direction() -> None:
+    content = """
+fn filter() -> aidoku::SortFilterDefault {
+    aidoku::SortFilterDefault { index: 1 }
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "aidoku::SortFilterDefault { index: 1, ascending: false }" in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
+def test_normalizer_folds_identical_if_branches_without_skipping_condition() -> None:
+    content = """
+fn chapter_key(info: Info) -> String {
+    if info.path.starts_with("/comic/") {
+        format!("/comic/{}/chapter/{}", info.path, info.uuid)
+    } else {
+        format!("/comic/{}/chapter/{}", info.path, info.uuid)
+    }
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert 'let _ = info.path.starts_with("/comic/");' in normalized
+    assert normalized.count('format!("/comic/{}/chapter/{}", info.path, info.uuid)') == 1
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
+def test_normalizer_repairs_dynamic_header_and_option_date_fallback() -> None:
+    content = """
+fn request(request: Request, cookie: String) -> Request {
+    request.header("Cookie", cookie)
+}
+fn date(value: &str) -> Option<i64> {
+    parse_date(value, "yyyy-MM-dd HH:mm:ss")
+        .or_else(|_| parse_date(value, "yyyy-MM-dd"))
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert 'request.header("Cookie", &cookie)' in normalized
+    assert ".or_else(|| parse_date" in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
 def test_normalizer_folds_default_model_field_assignments() -> None:
     content = """
 fn manga(dto: Dto) -> Manga {
@@ -921,6 +970,15 @@ fn chapter(value: String) -> Chapter {
         ..Default::default()
     }
 }
+fn parse_chapter_number(value: &str) -> Option<f32> {
+    value.parse::<f32>().ok()
+}
+fn parsed_chapter(title: String) -> Chapter {
+    Chapter {
+        chapter_number: Some((Self::parse_chapter_number(&title)) as f32),
+        ..Default::default()
+    }
+}
 fn page(image_url: String, chapter_url: String) -> Page {
     Page {
         content: PageContent::url_context(image_url, chapter_url.clone()),
@@ -948,10 +1006,11 @@ fn deep_link() -> DeepLinkResult {
     assert "description: Some(dto.description)" in normalized
     assert 'title: Some(format!("{}", value))' in normalized
     assert "chapter_number: value.parse::<f32>().ok()" in normalized
+    assert "chapter_number: Self::parse_chapter_number(&title)" in normalized
     assert 'PageContext::from([("referer".into(), chapter_url.clone())])' in normalized
     assert 'value.get("referer")' in normalized
     assert "send_error_type" not in normalized
-    assert 'Ok(Request::get(&url)?.header("referer", referer))' in normalized
+    assert 'Ok(Request::get(&url)?.header("referer", &referer))' in normalized
     assert "RequestError" not in normalized
     assert "use aidoku::imports::net::;" not in normalized
     assert "..Default::default()" not in normalized.split("DeepLinkResult::Manga", 1)[1]
@@ -968,6 +1027,19 @@ fn api_url(path: &str) -> String {
 }
 fn request(url: String) -> Result<Request> {
     Request::get(url)?.header("Accept", "application/json")
+}
+fn conditional_request(url: String, hot: bool) -> Result<Request> {
+    let request = Request::get(url)?;
+    Ok(if hot { request } else { request.header("Region", "0") })
+}
+fn previously_corrupted_request(url: String, hot: bool) -> Result<Request> {
+    let request = Request::get(url)?;
+    Ok(if hot { request } else { request = request.header("Region", "0") })
+}
+fn mutable_request(url: String) -> Result<Request> {
+    let mut request = Request::get(url)?;
+    request.header("Region", "0");
+    Ok(request)
 }
 fn get_image_request(url: String, _context: Option<PageContext>) -> Result<Request> {
     Request::get(url)?.header("Referer", "https://example.com")
@@ -998,6 +1070,9 @@ fn get_manga_update(
 
     assert 'Ok(Request::get(url)?.header("Accept", "application/json"))' in normalized
     assert 'Ok(Request::get(url)?.header("Referer", "https://example.com"))' in normalized
+    assert 'else { request.header("Region", "0") }' in normalized
+    assert 'request = request.header("Region", "0") })' not in normalized
+    assert 'request = request.header("Region", "0");' in normalized
     assert normalized.index("if needs_chapters") < normalized.index("if needs_details")
     assert 'format!("https://{}", api_domain())' in normalized
     assert 'defaults_get::<String>("v2.pref.api_domain")' in normalized
@@ -1053,6 +1128,110 @@ impl CopyManga {
 
     assert "let response: ApiResponse<DetailResult>" in source
     assert "Ok(response.results)" in source
+    assert normalize_generation_manifest(ir, normalized) == normalized
+
+
+def test_manifest_aliases_merged_nested_dto_to_recovered_json_field() -> None:
+    ir = minimal_source_ir(
+        source_format="decompiled_apk",
+        files=[
+            SourceFile(
+                path="api/dto/ComicDetail.java",
+                sha256="0",
+                content=(
+                    "public final class ComicDetail { "
+                    "private final Region region; "
+                    "private final List<ThemeInfo> theme; }"
+                ),
+            ),
+            SourceFile(
+                path="api/dto/Region.java",
+                sha256="0",
+                content=(
+                    "public final class Region { "
+                    "private final String display; private final int value; }"
+                ),
+            ),
+            SourceFile(
+                path="api/dto/ThemeInfo.java",
+                sha256="0",
+                content=(
+                    "public final class ThemeInfo { "
+                    "private final String name; private final String pathWord; }"
+                ),
+            ),
+        ],
+    )
+    manifest = GenerationManifest(
+        source_struct="CopyManga",
+        files=[
+            GeneratedFile(
+                path="src/lib.rs",
+                content="""
+#[derive(Deserialize)]
+struct ComicDetail { region: Option<NamedValue>, theme: Vec<NamedValue> }
+#[derive(Deserialize)]
+struct NamedValue { name: String }
+fn fields(detail: ComicDetail) -> Vec<String> {
+    let mut values = detail.theme.into_iter().map(|item| item.name).collect::<Vec<_>>();
+    if let Some(region) = detail.region { values.push(region.name); }
+    values
+}
+""",
+            )
+        ],
+    )
+
+    normalized = normalize_generation_manifest(ir, manifest)
+    source = normalized.files[0].content
+
+    assert '#[serde(alias = "display")]' in source
+    assert 'alias = "pathWord"' not in source
+    assert normalize_generation_manifest(ir, normalized) == normalized
+
+
+def test_manifest_defaults_recovered_nullable_dto_field() -> None:
+    ir = minimal_source_ir(
+        source_format="decompiled_apk",
+        files=[
+            SourceFile(
+                path="api/dto/ChapterDetail.java",
+                sha256="0",
+                content="""
+                public final class ChapterDetail {
+                    private final List<Integer> words;
+                    private final List<ContentItem> contents;
+                    public List<Page> pages() {
+                        List<Integer> order = this.words;
+                        if (order == null || order.isEmpty()) { return plain(contents); }
+                        return sorted(contents, order);
+                    }
+                }
+                """,
+            )
+        ],
+    )
+    manifest = GenerationManifest(
+        source_struct="CopyManga",
+        files=[
+            GeneratedFile(
+                path="src/lib.rs",
+                content="""
+#[derive(Default, Deserialize)]
+struct ChapterDetail { contents: Vec<ContentItem>, words: Vec<i32> }
+#[derive(Default, Deserialize)]
+struct ContentItem { url: String }
+fn pages(detail: ChapterDetail) -> usize { detail.contents.len() + detail.words.len() }
+""",
+            )
+        ],
+    )
+
+    normalized = normalize_generation_manifest(ir, manifest)
+    source = normalized.files[0].content
+
+    words = source.split("words: Vec<i32>", 1)[0]
+    assert words.rstrip().endswith("#[serde(default)]")
     assert normalize_generation_manifest(ir, normalized) == normalized
 
 
@@ -1680,7 +1859,7 @@ def test_manifest_projects_recovered_request_header_profiles(tmp_path: Path) -> 
     assert 'request.header("Webp", "1")' in source
     assert 'request.header("sec-fetch-mode", "navigate")' in source
     assert 'defaults_get::<aidoku::alloc::String>("v2.pref.platform")' in source
-    assert 'request.header("platform", platform)' in source
+    assert 'request.header("platform", &platform)' in source
     assert 'defaults_get::<aidoku::alloc::String>("v2.key.user_agent")' in source
     assert source.count("c2a_request(url)?.send()") == 2
     assert normalize_generation_manifest(ir, normalized) == normalized
@@ -1722,8 +1901,21 @@ def test_scaffold_reconciles_unique_setting_suffix_aliases(tmp_path: Path) -> No
     manifest = _manifest()
     manifest.files[0].content += """
 use aidoku::imports::defaults::defaults_get;
+const API_DOMAIN_KEY: &str = "v2.pref.http_api_domain";
+const DEFAULT_API_DOMAIN: &str = "stale-default.example";
 fn api_domain() -> String {
     defaults_get::<String>("api_domain").unwrap_or_else(|| "stale.example".into())
+}
+fn constant_api_domain() -> String {
+    defaults_get::<String>(API_DOMAIN_KEY).unwrap_or_else(|| DEFAULT_API_DOMAIN.into())
+}
+fn validated_api_domain() -> String {
+    let selected = defaults_get::<String>(API_DOMAIN_KEY)
+        .unwrap_or_else(|| "stale-selected.example".to_string());
+    match selected.as_str() {
+        "mapi.copy20.com" => selected,
+        _ => "stale-match.example".to_string(),
+    }
 }
 fn resolution() -> String {
     defaults_get("v2.pref.resolution").unwrap_or_else(|| "1500".into())
@@ -1757,8 +1949,14 @@ fn resolution_already_mapped() -> String {
 
     lib = (project / "src" / "lib.rs").read_text(encoding="utf-8")
     assert 'defaults_get::<String>("api_domain")' not in lib
+    assert '"v2.pref.http_api_domain"' not in lib
+    assert 'const API_DOMAIN_KEY: &str = "v2.pref.api_domain";' in lib
+    assert 'const DEFAULT_API_DOMAIN: &str = "mapi.copy20.com";' in lib
     assert 'defaults_get::<String>("v2.pref.api_domain")' in lib
     assert 'String::from("mapi.copy20.com")' in lib
+    assert "stale-default.example" not in lib
+    assert "stale-selected.example" not in lib
+    assert "stale-match.example" not in lib
     assert 'Some("resolution.r800") => String::from("800")' in lib
     assert 'Some("resolution.r1500") => String::from("1500")' in lib
     assert '_ => String::from("1500")' in lib
@@ -2002,6 +2200,30 @@ fn chapter_key(comic_path: &str, chapter_id: &str) -> String {
 
     lib = (project / "src" / "lib.rs").read_text(encoding="utf-8")
     assert 'format!("/comic/{}/chapter/{}", comic_path, chapter_id)' in lib
+
+
+def test_chapter_key_template_preserves_and_restores_prefix_guard() -> None:
+    correct = """
+fn chapter_key(info: Info) -> String {
+    if info.comic_path_word.starts_with("/comic/") {
+        format!("{}/chapter/{}", info.comic_path_word, info.uuid)
+    } else {
+        format!("/comic/{}/chapter/{}", info.comic_path_word, info.uuid)
+    }
+}
+"""
+    stale = correct.replace(
+        'format!("{}/chapter/{}", info.comic_path_word, info.uuid)',
+        'format!("/comic/{}/chapter/{}", info.comic_path_word, info.uuid)',
+    )
+    options = {"chapter_key_templates": ("/comic/{comic_path}/chapter/{chapter_id}",)}
+
+    normalized = normalize_pinned_aidoku_rust(correct, **options)
+    restored = normalize_pinned_aidoku_rust(stale, **options)
+
+    assert 'format!("{}/chapter/{}", info.comic_path_word, info.uuid)' in normalized
+    assert restored == normalized
+    assert normalize_pinned_aidoku_rust(normalized, **options) == normalized
 
 
 def test_scaffold_skips_unused_decompiled_dto_fields(tmp_path: Path) -> None:

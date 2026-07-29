@@ -183,14 +183,13 @@ class CheckpointStore:
 
     def _ensure_implementation_ir(self) -> None:
         path = self.workspace / "implementation-ir.json"
-        if path.is_file():
-            self.read_implementation_ir()
-            return
         source_ir = self.read_source_ir()
-        self._atomic_write(
-            path,
-            project_implementation_ir(source_ir).model_dump_json(indent=2) + "\n",
-        )
+        projected = project_implementation_ir(source_ir)
+        if path.is_file():
+            saved = self.read_implementation_ir()
+            if saved == projected:
+                return
+        self._atomic_write(path, projected.model_dump_json(indent=2) + "\n")
 
     @staticmethod
     def round_path(number: int) -> str:

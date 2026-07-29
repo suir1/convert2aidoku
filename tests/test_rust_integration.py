@@ -5,6 +5,7 @@ import pytest
 
 from convert2aidoku.listing_renderer import render_search_listing
 from convert2aidoku.models import (
+    Capability,
     DependencyRequest,
     GeneratedFile,
     GenerationManifest,
@@ -95,6 +96,22 @@ impl Source for Example {
 register_source!(Example);
 """
 
+LISTING_PROVIDER_RUST_SOURCE = LISTING_RUST_SOURCE.replace(
+    "\nregister_source!(Example);",
+    """
+impl aidoku::ListingProvider for Example {
+    fn get_manga_list(
+        &self,
+        listing: aidoku::Listing,
+        page: i32,
+    ) -> aidoku::Result<MangaPageResult> {
+        c2a_listing::get_manga_list(listing, page)
+    }
+}
+
+register_source!(Example, ListingProvider);""",
+)
+
 pytestmark = pytest.mark.skipif(
     os.getenv("C2A_RUN_RUST_INTEGRATION") != "1",
     reason="set C2A_RUN_RUST_INTEGRATION=1 to run the pinned Aidoku build",
@@ -167,13 +184,14 @@ def test_pinned_triple_des_dependencies_compile_for_wasm(tmp_path: Path) -> None
     assert validation.package_ok, validation.diagnostics
 
 
-def test_deterministic_search_listing_module_compiles_for_wasm(tmp_path: Path) -> None:
+def test_deterministic_listing_module_and_provider_compile_for_wasm(tmp_path: Path) -> None:
     assert find_tool("cargo")
     listing_ir = minimal_source_ir(
         source_id="zh.copymanga",
         language="zh",
         source_format="decompiled_apk",
         main_class="CopyManga",
+        capabilities=[Capability.POPULAR, Capability.LATEST],
         files=_copymanga_listing_files(),
         request_header_profiles=[
             RequestHeaderProfile(
@@ -190,8 +208,9 @@ def test_deterministic_search_listing_module_compiles_for_wasm(tmp_path: Path) -
         scaffold_ir,
         GenerationManifest(
             source_struct="Example",
+            implemented_traits=["ListingProvider"],
             files=[
-                GeneratedFile(path="src/lib.rs", content=LISTING_RUST_SOURCE),
+                GeneratedFile(path="src/lib.rs", content=LISTING_PROVIDER_RUST_SOURCE),
                 rendered,
             ],
             dependencies=[DependencyRequest(name="serde", features=["derive"])],

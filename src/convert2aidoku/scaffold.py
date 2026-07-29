@@ -12,7 +12,9 @@ from jinja2 import Environment, StrictUndefined
 from .constants import MAX_GENERATED_FILE_CHARS
 from .decompiled_input import (
     decompiled_detail_uses_api_envelope,
+    decompiled_dto_shapes,
     decompiled_dynamic_filter_endpoint,
+    decompiled_nullable_dto_fields,
     decompiled_rank_list_wraps_comic,
 )
 from .dependency_policy import (
@@ -326,8 +328,14 @@ def _normalize_pinned_model_shapes(content: str) -> str:
         content,
     )
     content = re.sub(
-        r"(?m)^(?P<indent>\s*)(?P<request>[A-Za-z_]\w*)\.header\((?P<args>[^;]+)\);",
+        r"(?m)^(?P<indent>\s*)(?P<request>[A-Za-z_]\w*)\.header\((?P<args>[^;\r\n]+)\);",
         r"\g<indent>\g<request> = \g<request>.header(\g<args>);",
+        content,
+    )
+    content = re.sub(
+        r"(?P<request>[A-Za-z_]\w*)\s*=\s*(?P=request)\.header\("
+        r"(?P<args>[^;\r\n]+)\)(?=\s*\})",
+        r"\g<request>.header(\g<args>)",
         content,
     )
     content = content.replace(
@@ -398,7 +406,13 @@ def _normalize_optional_model_shorthand(content: str) -> str:
 
 def _normalize_pinned_model_fields(content: str) -> str:
     replacements: list[tuple[str, str]] = []
-    for node in RustInspection.from_content(content).nodes("struct_expression"):
+    inspection = RustInspection.from_content(content)
+    option_number_functions = {
+        function.name
+        for function in inspection.functions
+        if re.search(r"->\s*(?:core::option::)?Option\s*<\s*f(?:32|64)\s*>", function.text)
+    }
+    for node in inspection.nodes("struct_expression"):
         name_node = node.child_by_field_name("name")
         body = node.child_by_field_name("body")
         if name_node is None or body is None:
@@ -432,17 +446,37 @@ def _normalize_pinned_model_fields(content: str) -> str:
             elif type_name == "Manga" and field_name == "status" and value.startswith("Some("):
                 replacement_value = value[5:-1]
             elif type_name == "Chapter" and field_name in {"chapter_number", "volume_number"}:
+                direct_option_call = re.fullmatch(
+                    r"(?:Self::)?(?P<name>[A-Za-z_]\w*)\([\s\S]*\)",
+                    value,
+                )
+                if (
+                    direct_option_call is not None
+                    and direct_option_call.group("name") in option_number_functions
+                ):
+                    continue
                 invalid_option_cast = re.fullmatch(
                     r"Some\(\((?P<value>[\s\S]+\.ok\(\))\)\s+as\s+f32\)", value
                 )
                 if invalid_option_cast is not None:
                     replacement_value = invalid_option_cast.group("value")
-                elif value.startswith(("Some(", "None")) or value.endswith(".ok()"):
-                    continue
-                elif ".map(" in value and ".unwrap_or" not in value:
-                    replacement_value = value.replace(" as f64", " as f32")
                 else:
-                    replacement_value = f"Some(({value}) as f32)"
+                    invalid_option_call = re.fullmatch(
+                        r"Some\(\((?P<value>(?:Self::)?(?P<name>[A-Za-z_]\w*)"
+                        r"\([\s\S]*\))\)\s+as\s+f32\)",
+                        value,
+                    )
+                    if (
+                        invalid_option_call is not None
+                        and invalid_option_call.group("name") in option_number_functions
+                    ):
+                        replacement_value = invalid_option_call.group("value")
+                    elif value.startswith(("Some(", "None")) or value.endswith(".ok()"):
+                        continue
+                    elif ".map(" in value and ".unwrap_or" not in value:
+                        replacement_value = value.replace(" as f64", " as f32")
+                    else:
+                        replacement_value = f"Some(({value}) as f32)"
             if replacement_value != value:
                 original = field.text.decode("utf-8", errors="replace")
                 replacements.append((original, f"{field_name}: {replacement_value}"))
@@ -1177,6 +1211,30 @@ def _normalize_select_filter_constructors(content: str) -> str:
         content = content.replace(original, replacement, 1)
 
     replacements = []
+    for node in RustInspection.from_content(content).nodes("struct_expression"):
+        name = node.child_by_field_name("name")
+        body = node.child_by_field_name("body")
+        if name is None or body is None:
+            continue
+        if name.text.decode("utf-8", errors="replace").rsplit("::", 1)[-1] != ("SortFilterDefault"):
+            continue
+        fields = {
+            field.text.decode("utf-8", errors="replace")
+            for child in body.named_children
+            if (field := child.child_by_field_name("field")) is not None
+        }
+        if "index" not in fields or "ascending" in fields:
+            continue
+        original = node.text.decode("utf-8", errors="replace")
+        body_text = body.text.decode("utf-8", errors="replace")
+        inner = body_text[1:-1].rstrip()
+        separator = "" if inner.endswith(",") else ","
+        replacement_body = "{" + inner + separator + " ascending: false }"
+        replacements.append((original, original.replace(body_text, replacement_body, 1)))
+    for original, replacement in replacements:
+        content = content.replace(original, replacement, 1)
+
+    replacements = []
     legacy_types = {
         "Check": "CheckFilter",
         "Checkbox": "CheckFilter",
@@ -1686,10 +1744,16 @@ def _normalize_request_builder_helpers(
 
 
 def _normalize_parse_date_option_patterns(content: str) -> str:
-    return re.sub(
+    content = re.sub(
         r"if\s+let\s+Ok\((?P<value>[A-Za-z_]\w*)\)\s*=\s*"
         r"(?P<call>(?:aidoku::)?imports::std::parse_(?:local_)?date\([^\n]+\))",
         r"if let Some(\g<value>) = \g<call>",
+        content,
+    )
+    return re.sub(
+        r"(?P<call>(?:aidoku::imports::std::)?parse_(?:local_)?date\([^;]{1,500}?\))"
+        r"\s*\.or_else\(\s*\|_\|",
+        r"\g<call>.or_else(||",
         content,
     )
 
@@ -2197,6 +2261,33 @@ def _normalize_discarded_enumerate_index(content: str) -> str:
     return content
 
 
+def _normalize_identical_if_branches(content: str) -> str:
+    replacements: list[tuple[str, str]] = []
+    for node in RustInspection.from_content(content).nodes("if_expression"):
+        condition = node.child_by_field_name("condition")
+        consequence = node.child_by_field_name("consequence")
+        alternative = node.child_by_field_name("alternative")
+        if condition is None or consequence is None or alternative is None:
+            continue
+        alternative_blocks = [
+            child for child in alternative.named_children if child.type == "block"
+        ]
+        if consequence.type != "block" or len(alternative_blocks) != 1:
+            continue
+        alternative_block = alternative_blocks[0]
+        if RustInspection.compact_node(consequence) != RustInspection.compact_node(
+            alternative_block
+        ):
+            continue
+        original = node.text.decode("utf-8", errors="replace")
+        condition_text = condition.text.decode("utf-8", errors="replace")
+        branch = consequence.text.decode("utf-8", errors="replace")[1:-1].strip()
+        replacements.append((original, f"{{ let _ = {condition_text}; {branch} }}"))
+    for original, replacement in replacements:
+        content = content.replace(original, replacement, 1)
+    return content
+
+
 def _normalize_filter_match_predicate(content: str) -> str:
     return re.sub(
         r"find\(\|(?P<item>[A-Za-z_][A-Za-z0-9_]*)\|\s*match\s+(?P=item)\s*\{\s*"
@@ -2335,14 +2426,77 @@ def _normalize_chapter_key_templates(
         if first_placeholder <= 0:
             continue
         expected_literal = json.dumps(expected)
+        key_prefix = expected[:first_placeholder]
         shortened = expected[first_placeholder:]
         candidates = {shortened, "/" + shortened.lstrip("/")}
+        shortened_literal = json.dumps(shortened)
+        restored: list[tuple[str, str]] = []
+        for node in RustInspection.from_content(content).nodes("if_expression"):
+            condition = node.child_by_field_name("condition")
+            consequence = node.child_by_field_name("consequence")
+            alternative = node.child_by_field_name("alternative")
+            if condition is None or consequence is None or alternative is None:
+                continue
+            alternative_blocks = [
+                child for child in alternative.named_children if child.type == "block"
+            ]
+            condition_text = condition.text.decode("utf-8", errors="replace")
+            if (
+                consequence.type != "block"
+                or len(alternative_blocks) != 1
+                or re.search(
+                    rf"\.starts_with\(\s*{re.escape(json.dumps(key_prefix))}\s*\)",
+                    condition_text,
+                )
+                is None
+                or RustInspection.compact_node(consequence)
+                != RustInspection.compact_node(alternative_blocks[0])
+            ):
+                continue
+            consequence_text = consequence.text.decode("utf-8", errors="replace")
+            if expected_literal not in consequence_text:
+                continue
+            original = node.text.decode("utf-8", errors="replace")
+            restored.append(
+                (
+                    original,
+                    original.replace(
+                        consequence_text,
+                        consequence_text.replace(expected_literal, shortened_literal, 1),
+                        1,
+                    ),
+                )
+            )
+        for original, replacement in restored:
+            content = content.replace(original, replacement, 1)
+
+        def replace_unguarded(
+            match: re.Match[str],
+            current_content: str = content,
+            prefix_literal: str = key_prefix,
+            replacement_literal: str = expected_literal,
+        ) -> str:
+            window = current_content[max(0, match.start() - 500) : match.start()]
+            guard = re.search(
+                rf"if\s+(?P<value>[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)"
+                rf"\.starts_with\(\s*{re.escape(json.dumps(prefix_literal))}\s*\)"
+                r"\s*\{[^{}]*$",
+                window,
+            )
+            arguments = current_content[match.end() : match.end() + 300]
+            if guard is not None and re.match(
+                rf"\s*,\s*{re.escape(guard.group('value'))}\s*,",
+                arguments,
+            ):
+                return match.group(0)
+            return match.group("prefix") + replacement_literal
+
         for candidate in candidates:
             if candidate == expected:
                 continue
             content = re.sub(
                 rf"(?P<prefix>\bformat!\(\s*){re.escape(json.dumps(candidate))}(?=\s*,)",
-                lambda match, literal=expected_literal: match.group("prefix") + literal,
+                replace_unguarded,
                 content,
             )
     return content
@@ -2524,8 +2678,20 @@ def _normalize_generated_setting_defaults(
         key_literal = json.dumps(key, ensure_ascii=False)
         default_literal = json.dumps(default, ensure_ascii=False)
         rust_string = r'"(?:\\.|[^"\\])*"'
+        key_constants = re.findall(
+            rf"\bconst\s+([A-Za-z_]\w*)\s*:\s*&str\s*=\s*"
+            rf"{re.escape(key_literal)}\s*;",
+            content,
+        )
+        key_reference = (
+            "(?:"
+            + "|".join(
+                [re.escape(key_literal), *(rf"\b{re.escape(name)}\b" for name in key_constants)]
+            )
+            + ")"
+        )
         content = re.sub(
-            rf"defaults_get(?:::<String>)?\(\s*{re.escape(key_literal)}\s*\)"
+            rf"defaults_get(?:::<String>)?\(\s*{key_reference}\s*\)"
             rf"\s*(?:\.unwrap_or_default\(\)|\.unwrap_or_else\(\|\|\s*"
             rf"(?:String::from\(\s*{rust_string}\s*\)|{rust_string}\.into\(\)|"
             rf"{rust_string}\.to_string\(\))\s*\))",
@@ -2534,7 +2700,7 @@ def _normalize_generated_setting_defaults(
             content,
         )
         content = re.sub(
-            rf"(?P<prefix>defaults_get(?:::<String>)?\(\s*{re.escape(key_literal)}\s*\)"
+            rf"(?P<prefix>defaults_get(?:::<String>)?\(\s*{key_reference}\s*\)"
             rf"[^;{{}}]{{0,500}}?\.unwrap_or_else\(\|\|\s*)"
             rf"{rust_string}\.to_string\(\)\s*\)",
             lambda match, literal=default_literal: (
@@ -2542,6 +2708,44 @@ def _normalize_generated_setting_defaults(
             ),
             content,
         )
+        fallback_constants = set(
+            re.findall(
+                rf"defaults_get(?:::<String>)?\(\s*{key_reference}\s*\)"
+                r"[^;{}]{0,500}?\.unwrap_or_else\(\|\|\s*"
+                r"([A-Z][A-Z0-9_]*)\s*\.into\(\)\s*\)",
+                content,
+            )
+        )
+        for constant in fallback_constants:
+            content = re.sub(
+                rf"(?P<prefix>\bconst\s+{re.escape(constant)}\s*:\s*&str\s*=\s*)"
+                rf"{rust_string}(?P<suffix>\s*;)",
+                rf"\g<prefix>{default_literal}\g<suffix>",
+                content,
+            )
+        if key.rsplit(".", 1)[-1] != "api_domain":
+            continue
+        function_replacements: list[tuple[str, str]] = []
+        for function in RustInspection.from_content(content).functions:
+            if (
+                re.search(
+                    rf"defaults_get(?:::<String>)?\(\s*{key_reference}\s*\)",
+                    function.text,
+                )
+                is None
+            ):
+                continue
+            normalized = re.sub(
+                rf"(?P<prefix>\b_\s*=>\s*)"
+                rf"(?:String::from\(\s*{rust_string}\s*\)|"
+                rf"{rust_string}\.to_string\(\)|{rust_string}\.into\(\))",
+                rf"\g<prefix>String::from({default_literal})",
+                function.text,
+            )
+            if normalized != function.text:
+                function_replacements.append((function.text, normalized))
+        for original, normalized in function_replacements:
+            content = content.replace(original, normalized, 1)
     return content
 
 
@@ -2606,6 +2810,22 @@ def _normalize_generated_setting_key_aliases(
             rf"\g<prefix>{key_literal}\g<suffix>",
             content,
         )
+    canonical = {suffix: matches[0] for suffix, matches in suffixes.items() if len(matches) == 1}
+    for literal in set(re.findall(r'"(?:\\.|[^"\\])*"', content)):
+        try:
+            value = json.loads(literal)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(value, str):
+            continue
+        prefix, separator, suffix = value.rpartition(".")
+        suffix = suffix.casefold()
+        if not separator or not suffix.startswith("http_"):
+            continue
+        normalized = suffix.removeprefix("http_")
+        key = canonical.get(normalized)
+        if key is not None and key.rpartition(".")[0].casefold() == prefix.casefold():
+            content = content.replace(literal, json.dumps(key, ensure_ascii=False))
     return content
 
 
@@ -2845,6 +3065,7 @@ def normalize_pinned_aidoku_rust(
     content = _normalize_prequeried_url_helpers(content, prequeried_url_helpers)
     content = _normalize_public_absolute_url(content, public_base_url)
     content = _normalize_chapter_key_templates(content, chapter_key_templates)
+    content = _normalize_identical_if_branches(content)
     content = _normalize_preserved_cover_urls(content, preserve_cover_urls)
     content = re.sub(
         r"\blet\s+domain\s*=\s*defaults_get\(",
@@ -2866,6 +3087,12 @@ def normalize_pinned_aidoku_rust(
         '.header("User-Agent", &get_user_agent())',
     )
     content = content.replace(".header(key, val)", ".header(key, &val)")
+    content = re.sub(
+        r'(?P<prefix>\.header\(\s*"(?:\\.|[^"\\])*"\s*,\s*)'
+        r"(?P<value>[A-Za-z_]\w*)(?P<suffix>\s*\))",
+        r"\g<prefix>&\g<value>\g<suffix>",
+        content,
+    )
     content = _normalize_dynamic_api_base(content, setting_defaults)
     content = _normalize_generated_setting_key_aliases(content, setting_defaults, setting_keys)
     content = _normalize_generated_setting_defaults(content, setting_defaults)
@@ -3014,6 +3241,161 @@ def _skip_unused_decompiled_dto_fields(
                     edits.append((field.node.start_byte, field.node.start_byte, attribute))
         for start, end, replacement in sorted(edits, reverse=True):
             raw[start:end] = replacement
+        content = raw.decode()
+        updated.append(
+            generated.model_copy(update={"content": content})
+            if content != generated.content
+            else generated
+        )
+    return updated
+
+
+def _project_recovered_nested_dto_aliases(
+    ir: SourceIR,
+    files: list[GeneratedFile],
+) -> list[GeneratedFile]:
+    source_shapes = {shape.name: shape for shape in decompiled_dto_shapes(ir.files)}
+    if not source_shapes:
+        return files
+    rust = RustInspection(
+        generated.content for generated in files if generated.path.endswith(".rs")
+    )
+
+    def nested_source_type(java_type: str) -> str | None:
+        candidates = re.findall(r"\b[A-Z][A-Za-z0-9_]*\b", java_type)
+        matches = [candidate for candidate in candidates if candidate in source_shapes]
+        return matches[0] if len(matches) == 1 else None
+
+    def nested_rust_type(rust_type: str) -> str | None:
+        candidates = re.findall(r"\b[A-Z][A-Za-z0-9_]*\b", rust_type)
+        matches = [candidate for candidate in candidates if rust.struct_named(candidate)]
+        return matches[0] if len(matches) == 1 else None
+
+    rust_primitives = {
+        "String": "String",
+        "int": "i32",
+        "Integer": "i32",
+        "long": "i64",
+        "Long": "i64",
+        "boolean": "bool",
+        "Boolean": "bool",
+    }
+    aliases: set[tuple[str, str, str]] = set()
+    for source_owner in source_shapes.values():
+        rust_owner = rust.struct_named(source_owner.name)
+        if rust_owner is None:
+            continue
+        for source_field in source_owner.fields:
+            expected_type = nested_source_type(source_field.java_type)
+            rust_field = next(
+                (
+                    field
+                    for field in rust_owner.fields
+                    if field.name == source_field.name
+                    or field.serialized_name == source_field.serialized_name
+                ),
+                None,
+            )
+            if expected_type is None or rust_field is None:
+                continue
+            actual_type = nested_rust_type(rust_field.type_text)
+            if actual_type is None or actual_type == expected_type:
+                continue
+            expected_shape = source_shapes[expected_type]
+            actual_shape = rust.struct_named(actual_type)
+            assert actual_shape is not None
+            if {field.serialized_name for field in expected_shape.fields} & {
+                field.serialized_name for field in actual_shape.fields
+            }:
+                continue
+            compatible = [
+                (expected, actual)
+                for expected in expected_shape.fields
+                for actual in actual_shape.fields
+                if rust_primitives.get(expected.java_type) == actual.type_text
+                and expected.serialized_name != actual.serialized_name
+            ]
+            if len(compatible) == 1:
+                expected, actual = compatible[0]
+                aliases.add((actual_type, actual.name, expected.serialized_name))
+    if not aliases:
+        return files
+
+    updated = []
+    for generated in files:
+        if not generated.path.endswith(".rs"):
+            updated.append(generated)
+            continue
+        raw = bytearray(generated.content.encode())
+        edits: list[tuple[int, bytes]] = []
+        inspection = RustInspection.from_content(generated.content)
+        for struct_name, field_name, alias in aliases:
+            field = inspection.struct_field(struct_name, field_name)
+            if field is None or any(
+                f'alias = "{alias}"' in attribute.text.decode("utf-8", errors="replace")
+                for attribute in field.attributes
+            ):
+                continue
+            line_start = generated.content.rfind("\n", 0, field.node.start_byte) + 1
+            prefix = generated.content[line_start : field.node.start_byte]
+            indent = prefix if not prefix.strip() else "    "
+            edits.append(
+                (
+                    field.node.start_byte,
+                    f'#[serde(alias = "{alias}")]\n{indent}'.encode(),
+                )
+            )
+        for position, replacement in sorted(edits, reverse=True):
+            raw[position:position] = replacement
+        content = raw.decode()
+        updated.append(
+            generated.model_copy(update={"content": content})
+            if content != generated.content
+            else generated
+        )
+    return updated
+
+
+def _project_recovered_nullable_dto_defaults(
+    ir: SourceIR,
+    files: list[GeneratedFile],
+) -> list[GeneratedFile]:
+    nullable = decompiled_nullable_dto_fields(ir.files)
+    if not nullable:
+        return files
+    updated = []
+    for generated in files:
+        if not generated.path.endswith(".rs"):
+            updated.append(generated)
+            continue
+        encoded = generated.content.encode()
+        raw = bytearray(encoded)
+        edits: list[tuple[int, bytes]] = []
+        inspection = RustInspection.from_content(generated.content)
+        for struct_name, serialized_name in nullable:
+            struct = inspection.struct_named(struct_name)
+            if struct is None:
+                continue
+            field = next(
+                (
+                    candidate
+                    for candidate in struct.fields
+                    if candidate.name == serialized_name
+                    or candidate.serialized_name == serialized_name
+                ),
+                None,
+            )
+            if field is None or any(
+                re.search(r"\bserde\s*\([^)]*\bdefault\b", attribute.text.decode())
+                for attribute in field.attributes
+            ):
+                continue
+            line_start = encoded.rfind(b"\n", 0, field.node.start_byte) + 1
+            prefix = encoded[line_start : field.node.start_byte].decode()
+            indent = prefix if not prefix.strip() else "    "
+            edits.append((field.node.start_byte, f"#[serde(default)]\n{indent}".encode()))
+        for position, replacement in sorted(edits, reverse=True):
+            raw[position:position] = replacement
         content = raw.decode()
         updated.append(
             generated.model_copy(update={"content": content})
@@ -3211,7 +3593,7 @@ def _recovered_request_builder(
                 f"        _ => {rendered_default},",
                 "    };",
                 "    if let Some(platform) = platform {",
-                '        request = request.header("platform", platform);',
+                '        request = request.header("platform", &platform);',
                 "    }",
             ]
         )
@@ -3995,6 +4377,16 @@ def normalize_generation_manifest(
             for before, after in zip(files, optionalized, strict=True)
         )
         files = optionalized
+        aliased = _project_recovered_nested_dto_aliases(ir, files)
+        changed |= any(
+            before.content != after.content for before, after in zip(files, aliased, strict=True)
+        )
+        files = aliased
+        defaulted = _project_recovered_nullable_dto_defaults(ir, files)
+        changed |= any(
+            before.content != after.content for before, after in zip(files, defaulted, strict=True)
+        )
+        files = defaulted
     header_projected = _project_recovered_request_headers(
         ir,
         files,

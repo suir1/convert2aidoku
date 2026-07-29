@@ -125,6 +125,36 @@ class MangaMappingIR(BaseModel):
     description_path: str | None = None
 
 
+class ListingSelectionIR(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    default_endpoint_id: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
+    setting_key: str | None = None
+    setting_default: str | None = None
+    endpoint_ids_by_setting_value: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def setting_contract_is_complete(self) -> ListingSelectionIR:
+        has_setting = self.setting_key is not None
+        if has_setting != (self.setting_default is not None):
+            raise ValueError("listing selection setting key and default must be declared together")
+        if not has_setting and self.endpoint_ids_by_setting_value:
+            raise ValueError("listing selection values require a setting key")
+        if has_setting and self.setting_default not in self.endpoint_ids_by_setting_value:
+            raise ValueError("listing selection default must map to an endpoint")
+        return self
+
+
+class ListingProviderIR(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    popular_endpoint_id: str | None = Field(
+        default=None,
+        pattern=r"^[a-z][a-z0-9_]*$",
+    )
+    latest: ListingSelectionIR | None = None
+
+
 class ListingImplementationIR(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -133,6 +163,7 @@ class ListingImplementationIR(BaseModel):
     data_shapes: list[DataShapeIR] = Field(default_factory=list)
     containers: list[ListingContainerIR] = Field(default_factory=list)
     manga_mappings: list[MangaMappingIR] = Field(default_factory=list)
+    provider: ListingProviderIR | None = None
 
     @model_validator(mode="after")
     def identities_are_unique(self) -> ListingImplementationIR:
@@ -148,6 +179,18 @@ class ListingImplementationIR(BaseModel):
         mapping_types = [mapping.item_type for mapping in self.manga_mappings]
         if len(mapping_types) != len(set(mapping_types)):
             raise ValueError("listing manga mapping item types must be unique")
+        endpoint_ids = set(endpoint_ids)
+        provider_ids = set()
+        if self.provider is not None:
+            if self.provider.popular_endpoint_id is not None:
+                provider_ids.add(self.provider.popular_endpoint_id)
+            if self.provider.latest is not None:
+                provider_ids.add(self.provider.latest.default_endpoint_id)
+                provider_ids.update(self.provider.latest.endpoint_ids_by_setting_value.values())
+        if missing := provider_ids - endpoint_ids:
+            raise ValueError(
+                "listing provider references unknown endpoints: " + ", ".join(sorted(missing))
+            )
         return self
 
 
@@ -578,6 +621,130 @@ def _listing_endpoints(java: str, base: ApiBaseIR) -> list[ListingEndpointIR]:
     return endpoints
 
 
+def _java_method_block(java: str, name: str) -> str:
+    declaration = re.search(rf"\b{re.escape(name)}\s*\([^)]*\)\s*(?:throws\s+[^\{{]+)?\{{", java)
+    return _brace_block(java, declaration.start()) if declaration is not None else ""
+
+
+def _called_listing_endpoints(
+    block: str,
+    endpoints: list[ListingEndpointIR],
+) -> list[ListingEndpointIR]:
+    return [
+        endpoint
+        for endpoint in endpoints
+        if re.search(rf"\.{re.escape(endpoint.source_method)}\s*\(", block)
+    ]
+
+
+def _option_class_block(java: str, class_name: str) -> str:
+    declaration = re.search(rf"\b(?:class|enum)\s+{re.escape(class_name)}\b[^\{{]*\{{", java)
+    return _brace_block(java, declaration.start()) if declaration is not None else ""
+
+
+def _latest_setting_selection(
+    java: str,
+    request_block: str,
+    endpoints: list[ListingEndpointIR],
+) -> ListingSelectionIR | None:
+    ordinal_indices = {
+        (found.group("class"), found.group("option")): int(found.group("index"))
+        for found in re.finditer(
+            r"(?P<class>[A-Z][A-Za-z0-9_]*)\.(?P<option>[A-Z][A-Z0-9_]*)"
+            r"\.ordinal\(\)\]\s*=\s*(?P<index>\d+)\s*;",
+            java,
+        )
+    }
+    option_class_blocks = {
+        class_name: _option_class_block(java, class_name) for class_name, _option in ordinal_indices
+    }
+    latest_option_classes = [
+        class_name
+        for class_name, block in option_class_blocks.items()
+        if re.search(r'\bKEY\s*=\s*"[^"]*latest[^"]*"', block, re.IGNORECASE)
+    ]
+    if len(latest_option_classes) != 1:
+        return None
+    option_class = latest_option_classes[0]
+    class_block = option_class_blocks[option_class]
+    if not class_block:
+        return None
+    key_match = re.search(r'\bKEY\s*=\s*"([^"]+)"', class_block)
+    if key_match is None:
+        return None
+    option_values = {
+        found.group("option"): found.group("value")
+        for found in re.finditer(
+            r'\b(?P<option>[A-Z][A-Z0-9_]*)\s*\(\s*"(?:\\.|[^"\\])*"\s*,\s*'
+            r'"(?P<value>(?:\\.|[^"\\])+)"\s*\)',
+            class_block,
+        )
+    }
+    default_match = re.search(
+        rf"\bDEFAULT\s*=\s*new\s+{re.escape(option_class)}\s*\("
+        r'\s*"(?:\\.|[^"\\])*"\s*,\s*"(?P<value>(?:\\.|[^"\\])+)"\s*\)'
+        r"\.entryKey",
+        class_block,
+    )
+    symbolic_default = re.search(
+        r"\bDEFAULT\s*=\s*(?P<option>[A-Z][A-Z0-9_]*)\.entryKey",
+        class_block,
+    )
+    if default_match is not None:
+        default_value = _decode_java_string(default_match.group("value"))
+    elif symbolic_default is not None:
+        default_value = option_values.get(symbolic_default.group("option"))
+    else:
+        default_value = None
+    if default_value is None:
+        return None
+
+    endpoint_by_index: dict[int, str] = {}
+    for branch in re.finditer(r"\bif\s*\(\s*[A-Za-z_]\w*\s*==\s*(\d+)\s*\)\s*\{", request_block):
+        branch_block = _brace_block(request_block, branch.start())
+        called = _called_listing_endpoints(branch_block, endpoints)
+        if len(called) == 1:
+            endpoint_by_index[int(branch.group(1))] = called[0].id
+    choices = {
+        value: endpoint_by_index[index]
+        for (class_name, option), index in ordinal_indices.items()
+        if class_name == option_class
+        and (value := option_values.get(option)) is not None
+        and index in endpoint_by_index
+    }
+    if len(choices) != len(endpoints) or default_value not in choices:
+        return None
+    return ListingSelectionIR(
+        default_endpoint_id=choices[default_value],
+        setting_key=key_match.group(1),
+        setting_default=default_value,
+        endpoint_ids_by_setting_value=choices,
+    )
+
+
+def _listing_provider(
+    java: str,
+    endpoints: list[ListingEndpointIR],
+) -> ListingProviderIR | None:
+    popular_block = _java_method_block(java, "popularMangaRequest")
+    popular = _called_listing_endpoints(popular_block, endpoints)
+    popular_endpoint = popular[0] if len(popular) == 1 else None
+
+    latest_block = _java_method_block(java, "latestUpdatesRequest")
+    latest_endpoints = _called_listing_endpoints(latest_block, endpoints)
+    latest: ListingSelectionIR | None = None
+    if len(latest_endpoints) == 1:
+        latest = ListingSelectionIR(default_endpoint_id=latest_endpoints[0].id)
+    elif len(latest_endpoints) > 1:
+        latest = _latest_setting_selection(java, latest_block, latest_endpoints)
+    if popular_endpoint is None and latest is None:
+        return None
+    return ListingProviderIR(
+        popular_endpoint_id=popular_endpoint.id if popular_endpoint is not None else None,
+        latest=latest,
+    )
+
+
 def _listing_parser_facts(
     java: str, container_names: set[str]
 ) -> list[tuple[str, str, str | None]]:
@@ -938,6 +1105,7 @@ def project_implementation_ir(ir: SourceIR) -> ImplementationIR:
             data_shapes=_listing_data_shapes(shapes, containers),
             containers=containers,
             manga_mappings=mappings,
+            provider=_listing_provider(java, endpoints),
         ),
         unresolved_facts=unresolved,
     )

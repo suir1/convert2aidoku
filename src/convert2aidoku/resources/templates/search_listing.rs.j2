@@ -4,7 +4,7 @@ use aidoku::helpers::uri::encode_uri_component;
 use aidoku::imports::defaults::defaults_get;
 use aidoku::imports::net::Request;
 use aidoku::serde::Deserialize;
-use aidoku::{FilterValue, Manga, MangaPageResult, Result};
+use aidoku::{FilterValue, Manga, MangaPageResult, Result{% if popular_endpoint or latest_endpoint %}, Listing{% endif %}};
 
 const SITE_URL: &str = {{ site_url | rust_string }};
 
@@ -187,3 +187,33 @@ pub(crate) fn get_search_manga_list(
 {% endif %}
     {{ browse_endpoint.fetch_function }}({{ browse_endpoint.url_function }}(&query, page, &filters))
 }
+{% if popular_endpoint or latest_endpoint %}
+
+pub(crate) fn get_manga_list(listing: Listing, page: i32) -> Result<MangaPageResult> {
+    match listing.id.as_str() {
+{% if popular_endpoint %}
+        "popular" => {{ popular_endpoint.fetch_function }}({{ popular_endpoint.url_function }}("", page, &[])),
+{% endif %}
+{% if latest_endpoint %}
+        "latest" => {
+{% if latest_setting_key and latest_setting_default %}
+            let selected = defaults_get::<String>({{ latest_setting_key | rust_string }})
+                .unwrap_or_else(|| String::from({{ latest_setting_default | rust_string }}));
+            match selected.as_str() {
+{% for value, endpoint in latest_alternates %}
+                {{ value | rust_string }} => {{ endpoint.fetch_function }}({{ endpoint.url_function }}("", page, &[])),
+{% endfor %}
+                _ => {{ latest_endpoint.fetch_function }}({{ latest_endpoint.url_function }}("", page, &[])),
+            }
+{% else %}
+            {{ latest_endpoint.fetch_function }}({{ latest_endpoint.url_function }}("", page, &[]))
+{% endif %}
+        }
+{% endif %}
+        _ => Err(aidoku::AidokuError::message(format!(
+            "unsupported listing: {}",
+            listing.id,
+        ))),
+    }
+}
+{% endif %}

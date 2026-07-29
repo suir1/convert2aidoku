@@ -23,6 +23,36 @@ def test_indexes_functions_calls_headers_and_routes_across_files() -> None:
     assert inspection.reachable_functions("fetch") == {"fetch", "request", "decode"}
 
 
+def test_function_parameter_names_ignore_fully_qualified_types() -> None:
+    inspection = RustInspection.from_content(
+        "fn get_manga_list(&self, listing: aidoku::Listing, page: i32) {}"
+    )
+
+    assert inspection.named("get_manga_list")[0].parameter_names == ("listing", "page")
+
+
+def test_request_routes_exclude_non_network_path_manipulation() -> None:
+    inspection = RustInspection.from_content(
+        """
+        fn update(&self, id: &str) {
+            let key = id.strip_prefix("/comic/");
+            self.get(format!("/comic2/{id}"));
+            self.send_get_retry("/api/detail/");
+        }
+        """
+    )
+
+    assert inspection.route_literals("update") == {
+        "/comic/",
+        "/comic2/{id}",
+        "/api/detail/",
+    }
+    assert inspection.request_route_literals("update") == {
+        "/comic2/{id}",
+        "/api/detail/",
+    }
+
+
 def test_walks_error_tolerant_tree_and_compacts_comments() -> None:
     inspection = RustInspection.from_content(
         "fn fetch() { Request /* keep tokens separate */ :: get(url); }"

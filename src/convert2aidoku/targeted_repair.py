@@ -47,7 +47,7 @@ def diagnostic_file_excerpts(
     locations: dict[str, set[int]] = {}
     for match in _RUST_DIAGNOSTIC_LOCATION.finditer(diagnostics):
         path = match.group("path")
-        if path == "src/generated_smoke.rs" or ".." in Path(path).parts:
+        if path in {"src/c2a_listing.rs", "src/generated_smoke.rs"} or ".." in Path(path).parts:
             continue
         locations.setdefault(path, set()).add(int(match.group("line")))
 
@@ -250,6 +250,10 @@ class TargetedRepair:
         return history
 
     def _patch_request(self, diagnostics: str) -> _PatchRequest | None:
+        excerpts = diagnostic_file_excerpts(self.store.project, diagnostics)
+        failed_stages = {stage.name for stage in self.validation.stages if not stage.ok}
+        if excerpts and failed_stages and failed_stages <= {"cargo-check", "clippy", "clippy-fix"}:
+            return _PatchRequest("compiler", excerpts, diagnostics, "targeted")
         contract_repair = self.contract.repair(self.store.project)
         if contract_repair is not None:
             return _PatchRequest(
@@ -258,10 +262,6 @@ class TargetedRepair:
                 contract_repair.diagnostics,
                 "contract",
             )
-        excerpts = diagnostic_file_excerpts(self.store.project, diagnostics)
-        failed_stages = {stage.name for stage in self.validation.stages if not stage.ok}
-        if excerpts and failed_stages and failed_stages <= {"cargo-check", "clippy", "clippy-fix"}:
-            return _PatchRequest("compiler", excerpts, diagnostics, "targeted")
         return None
 
     def request(self, client: OpenAICompatibleClient) -> AIResult[GenerationManifest]:
