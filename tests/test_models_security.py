@@ -81,6 +81,45 @@ def test_static_filter_resource_is_built_from_source_ir_specs() -> None:
     ]
 
 
+def test_check_and_text_filter_resources_are_built_from_source_ir_specs() -> None:
+    manifest = GenerationManifest(
+        source_struct="Source",
+        files=[GeneratedFile(path="src/lib.rs", content="#![no_std]")],
+    )
+    specs = [
+        SourceFilterSpec(
+            source_class="SearchToggle",
+            id="search_toggle",
+            title="Search as category",
+            kind="check",
+        ),
+        SourceFilterSpec(
+            source_class="CategoryFilter",
+            id="category",
+            title="Category",
+            kind="text",
+        ),
+    ]
+
+    generated = GeneratedResources(manifest).with_source_filters(specs)
+
+    resource = next(item for item in generated.files if item.path == "res/filters.json")
+    assert json.loads(resource.content) == [
+        {
+            "type": "check",
+            "id": "search_toggle",
+            "title": "Search as category",
+            "default": False,
+        },
+        {
+            "type": "text",
+            "id": "category",
+            "title": "Category",
+            "default": "",
+        },
+    ]
+
+
 def test_filter_object_options_are_normalized_to_parallel_arrays() -> None:
     generated = GeneratedFile(
         path="res/filters.json",

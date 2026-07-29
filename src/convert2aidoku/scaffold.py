@@ -513,6 +513,83 @@ def _normalize_pinned_model_fields(content: str) -> str:
     return content
 
 
+def _normalize_nested_optional_model_fields(content: str) -> str:
+    inspection = RustInspection.from_content(content)
+    parameter_types: dict[int, dict[str, str]] = {}
+    for function in inspection.functions:
+        types: dict[str, str] = {}
+        parameters = function.node.child_by_field_name("parameters")
+        for parameter in parameters.named_children if parameters is not None else ():
+            if parameter.type != "parameter":
+                continue
+            pattern = parameter.child_by_field_name("pattern")
+            type_node = parameter.child_by_field_name("type")
+            if pattern is None or type_node is None or pattern.type != "identifier":
+                continue
+            type_match = re.fullmatch(
+                r"&\s*(?:mut\s+)?(?P<borrowed>[A-Za-z_]\w*)|(?P<owned>[A-Za-z_]\w*)",
+                type_node.text.decode("utf-8", errors="replace").strip(),
+            )
+            if type_match is not None:
+                types[pattern.text.decode("utf-8", errors="replace")] = type_match.group(
+                    "borrowed"
+                ) or type_match.group("owned")
+        parameter_types[function.node.start_byte] = types
+
+    edits: list[tuple[int, int, bytes]] = []
+    for call in inspection.nodes("call_expression"):
+        callee = call.child_by_field_name("function")
+        arguments = call.child_by_field_name("arguments")
+        if (
+            callee is None
+            or callee.text != b"Some"
+            or arguments is None
+            or len(arguments.named_children) != 1
+        ):
+            continue
+        argument = arguments.named_children[0]
+        if argument.type != "field_expression":
+            continue
+        source = argument.child_by_field_name("value")
+        field = argument.child_by_field_name("field")
+        if source is None or field is None or source.type != "identifier":
+            continue
+
+        owner = call
+        model_target = False
+        function_node = None
+        while owner.parent is not None:
+            owner = owner.parent
+            if owner.type == "field_initializer":
+                struct = owner.parent
+                while struct is not None and struct.type != "struct_expression":
+                    struct = struct.parent
+                name = struct.child_by_field_name("name") if struct is not None else None
+                model_target = name is not None and name.text in {b"Manga", b"Chapter"}
+            elif owner.type == "assignment_expression":
+                left = owner.child_by_field_name("left")
+                model_target = (
+                    left is not None and re.match(rb"(?:manga|chapter)\.", left.text) is not None
+                )
+            if owner.type == "function_item":
+                function_node = owner
+                break
+        if not model_target or function_node is None:
+            continue
+        source_name = source.text.decode("utf-8", errors="replace")
+        source_type = parameter_types.get(function_node.start_byte, {}).get(source_name)
+        field_name = field.text.decode("utf-8", errors="replace")
+        field_type = inspection.struct_field_type(source_type or "", field_name)
+        if field_type is None or re.match(r"(?:core::option::)?Option\s*<", field_type) is None:
+            continue
+        edits.append((call.start_byte, call.end_byte, argument.text))
+
+    encoded = content.encode("utf-8")
+    for begin, end, replacement in sorted(edits, reverse=True):
+        encoded = encoded[:begin] + replacement + encoded[end:]
+    return encoded.decode("utf-8")
+
+
 def _normalize_base_url_provider(content: str) -> str:
     replacements: list[tuple[str, str]] = []
     for function in RustInspection.from_content(content).functions:
@@ -3295,6 +3372,7 @@ def normalize_pinned_aidoku_rust(
     content = _normalize_pinned_model_shapes(content)
     content = _normalize_optional_model_shorthand(content)
     content = _normalize_pinned_model_fields(content)
+    content = _normalize_nested_optional_model_fields(content)
     content = _normalize_base_url_provider(content)
     content = _normalize_comic_path_helper(content)
     content = _normalize_struct_expression_defaults(content)
@@ -4316,15 +4394,21 @@ def _project_recovered_chapter_image_resolution(
 
 
 def _rust_filter_expression(spec: SourceFilterSpec) -> str:
+    base = (
+        f"id: {json.dumps(spec.id)}.into(), "
+        f"title: Some({json.dumps(spec.title, ensure_ascii=False)}.into()), "
+    )
+    if spec.kind == "check":
+        return (
+            "aidoku::CheckFilter { " + base + "default: Some(false), ..Default::default() }.into()"
+        )
+    if spec.kind == "text":
+        return "aidoku::TextFilter { " + base + "..Default::default() }.into()"
     options = ", ".join(
         f"{json.dumps(item.title, ensure_ascii=False)}.into()" for item in spec.options
     )
     ids = ", ".join(f"{json.dumps(item.value, ensure_ascii=False)}.into()" for item in spec.options)
-    common = (
-        f"id: {json.dumps(spec.id)}.into(), "
-        f"title: Some({json.dumps(spec.title, ensure_ascii=False)}.into()), "
-        f"options: aidoku::alloc::vec![{options}], "
-    )
+    common = base + f"options: aidoku::alloc::vec![{options}], "
     if spec.kind == "sort":
         return (
             "aidoku::SortFilter { "
@@ -4571,6 +4655,53 @@ def _project_recovered_dynamic_filter_queries(
     return updated
 
 
+_CHECK_FILTER_HELPER = """
+fn c2a_check_value(filters: &[aidoku::FilterValue], id: &str) -> bool {
+    filters.iter().any(|filter| {
+        matches!(
+            filter,
+            aidoku::FilterValue::Check { id: filter_id, value }
+                if filter_id == id && *value > 0
+        )
+    })
+}
+""".strip()
+
+
+def _project_recovered_check_filter_mappings(
+    ir: SourceIR,
+    files: list[GeneratedFile],
+) -> list[GeneratedFile]:
+    check_ids = [spec.id for spec in ir.filter_specs if spec.kind == "check"]
+    if not check_ids:
+        return files
+    updated: list[GeneratedFile] = []
+    for generated in files:
+        content = generated.content
+        if not generated.path.endswith(".rs"):
+            updated.append(generated)
+            continue
+        normalized = content
+        for filter_id in check_ids:
+            literal = re.escape(json.dumps(filter_id))
+            normalized = re.sub(
+                rf"(?:Self::|self\.)?[A-Za-z_]\w*\(\s*"
+                rf"(?P<filters>&?[A-Za-z_]\w*)\s*,\s*{literal}\s*\)\.is_some\(\)",
+                lambda match, filter_id=filter_id: (
+                    f"c2a_check_value({match.group('filters')}, {json.dumps(filter_id)})"
+                ),
+                normalized,
+            )
+        if normalized != content and "fn c2a_check_value(" not in normalized:
+            normalized = normalized.rstrip() + "\n\n" + _CHECK_FILTER_HELPER + "\n"
+        updated.append(
+            generated.model_copy(update={"content": normalized})
+            if normalized != content
+            else generated
+        )
+    return updated
+
+
 def normalize_generation_manifest(
     ir: SourceIR,
     manifest: GenerationManifest,
@@ -4682,6 +4813,12 @@ def normalize_generation_manifest(
         for before, after in zip(files, query_projected, strict=True)
     )
     files = query_projected
+    check_projected = _project_recovered_check_filter_mappings(ir, files)
+    changed |= any(
+        before.content != after.content
+        for before, after in zip(files, check_projected, strict=True)
+    )
+    files = check_projected
     topologized = _normalize_generated_module_topology(files)
     changed |= any(
         before.content != after.content for before, after in zip(files, topologized, strict=True)
@@ -4852,7 +4989,9 @@ def apply_generation_manifest(
             deep_link_handler="DeepLinkHandler" in manifest.implemented_traits,
             popular_listing=Capability.POPULAR in ir.capabilities,
             latest_listing=Capability.LATEST in ir.capabilities,
-            query_expression=(f"Some({json.dumps(query)}.into())" if query else "None"),
+            query_expression=(
+                f"Some({json.dumps(query, ensure_ascii=False)}.into())" if query else "None"
+            ),
             static_filter_cases=GeneratedResources(manifest).static_filter_cases(),
         )
     )

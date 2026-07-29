@@ -126,6 +126,31 @@ def _kotlin_uri_part_filter_specs(kotlin: str) -> list[SourceFilterSpec]:
     return specs
 
 
+def _kotlin_simple_filter_specs(kotlin: str) -> list[SourceFilterSpec]:
+    pattern = re.compile(
+        rf"\bclass\s+(?P<class>[A-Za-z_]\w*)[^:{{]*:\s*"
+        rf"Filter\.(?P<kind>CheckBox|Text)\s*\(\s*(?P<title>{_KOTLIN_STRING})"
+    )
+    specs: list[SourceFilterSpec] = []
+    for declaration in _kotlin_class_declarations(kotlin):
+        found = pattern.search(declaration)
+        if found is None:
+            continue
+        title = _decode_kotlin_string(found.group("title"))
+        if title is None:
+            continue
+        class_name = found.group("class")
+        specs.append(
+            SourceFilterSpec(
+                source_class=class_name,
+                id=_snake_case(class_name.removesuffix("Filter")),
+                title=title,
+                kind="check" if found.group("kind") == "CheckBox" else "text",
+            )
+        )
+    return specs
+
+
 def _kotlin_filter_specs(kotlin: str) -> list[SourceFilterSpec]:
     specs: list[SourceFilterSpec] = []
     pattern = re.compile(
@@ -176,6 +201,10 @@ def _kotlin_filter_specs(kotlin: str) -> list[SourceFilterSpec]:
     existing_ids = {spec.id for spec in specs}
     specs.extend(
         spec for spec in _kotlin_uri_part_filter_specs(kotlin) if spec.id not in existing_ids
+    )
+    existing_ids.update(spec.id for spec in specs)
+    specs.extend(
+        spec for spec in _kotlin_simple_filter_specs(kotlin) if spec.id not in existing_ids
     )
     return specs
 

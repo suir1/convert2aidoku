@@ -250,7 +250,7 @@ def convert_source(
         store=store,
         project=project,
         checkpoint=checkpoint,
-        query=query,
+        query=checkpoint.query,
         live=live,
         proxy=proxy,
         progress=notify,

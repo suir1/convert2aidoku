@@ -70,6 +70,16 @@ def test_scaffold_is_deterministic_and_preserves_license(tmp_path: Path) -> None
     assert "rev =" in cargo
 
 
+def test_smoke_query_uses_valid_rust_unicode_literal(tmp_path: Path) -> None:
+    project, ir = scaffold_project(tmp_path)
+
+    apply_generation_manifest(project, ir, _manifest("serde"), query="漫画")
+
+    smoke = (project / "src" / "generated_smoke.rs").read_text(encoding="utf-8")
+    assert 'Some("漫画".into())' in smoke
+    assert "\\u6f2b" not in smoke
+
+
 def test_scaffold_rejects_unapproved_dependency(tmp_path: Path) -> None:
     project, ir = scaffold_project(tmp_path)
     with pytest.raises(SecurityError, match="disallowed dependency"):
@@ -1017,6 +1027,35 @@ fn deep_link() -> DeepLinkResult {
     assert normalize_pinned_aidoku_rust(normalized) == normalized
 
 
+def test_normalizer_does_not_double_wrap_optional_dto_model_fields() -> None:
+    content = """
+#[derive(Deserialize)]
+struct MangaDto {
+    cover_img_url: Option<String>,
+    description: Option<String>,
+}
+fn manga(dto: MangaDto) -> Manga {
+    Manga {
+        cover: Some(dto.cover_img_url),
+        description: Some(dto.description),
+        ..Default::default()
+    }
+}
+fn update(manga: &mut Manga, dto: MangaDto) {
+    manga.cover = Some(dto.cover_img_url);
+    manga.description = Some(dto.description);
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "cover: dto.cover_img_url" in normalized
+    assert "description: dto.description" in normalized
+    assert "manga.cover = dto.cover_img_url;" in normalized
+    assert "manga.description = dto.description;" in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
 def test_normalizer_repairs_bound_optional_numbers_context_and_request_headers() -> None:
     content = """
 fn chapter(serial: &str) -> Chapter {
@@ -1742,6 +1781,48 @@ fn get_dynamic_filters(&self) -> Result<Vec<Filter>> {
     assert 'id: "status".into()' in source
     assert 'ids: Some(aidoku::alloc::vec!["".into(), "END".into()])' in source
     assert "let mut c2a_filters" in source
+    assert normalize_generation_manifest(ir, normalized) == normalized
+
+
+def test_manifest_projects_recovered_check_filter_lookup(tmp_path: Path) -> None:
+    _project, ir = scaffold_project(tmp_path)
+    ir = ir.model_copy(
+        update={
+            "filter_specs": [
+                SourceFilterSpec(
+                    source_class="SearchCategoryToggle",
+                    id="search_category_toggle",
+                    title="Search as category",
+                    kind="check",
+                )
+            ]
+        }
+    )
+    manifest = GenerationManifest(
+        source_struct="Simple",
+        files=[
+            GeneratedFile(
+                path="src/lib.rs",
+                content="""
+fn search_value(filters: &[FilterValue], id: &str) -> Option<String> {
+    filters.iter().find_map(|filter| match filter {
+        FilterValue::Text { id: filter_id, value } if filter_id == id => Some(value.clone()),
+        _ => None,
+    })
+}
+fn search(filters: &[FilterValue]) -> bool {
+    Self::search_value(filters, "search_category_toggle").is_some()
+}
+""",
+            )
+        ],
+    )
+
+    normalized = normalize_generation_manifest(ir, manifest)
+    source = normalized.files[0].content
+
+    assert 'c2a_check_value(filters, "search_category_toggle")' in source
+    assert "aidoku::FilterValue::Check" in source
     assert normalize_generation_manifest(ir, normalized) == normalized
 
 

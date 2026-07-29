@@ -113,6 +113,40 @@ def test_site_probe_classifies_runner_request_error_when_httpx_succeeds(
     assert "proxy/TLS compatibility problem" in diagnostic
 
 
+def test_site_probe_classifies_generated_json_api_challenge(tmp_path: Path, monkeypatch) -> None:
+    source_metadata_project(tmp_path)
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "source.rs").write_text(
+        'const API_URL: &str = "https://api.example.com";\n'
+        'fn search() { format!("{}/api/v1/search/items?title={}", API_URL, "x"); }\n',
+        encoding="utf-8",
+    )
+    responses = iter(
+        [
+            httpx.Response(200, text="<main>Site</main>"),
+            httpx.Response(
+                567,
+                text="<html>edge challenge</html>",
+                headers={"content-type": "text/html"},
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        "convert2aidoku.validator.httpx.get",
+        lambda *_args, **_kwargs: next(responses),
+    )
+
+    diagnostic = _blocked_site_probe(
+        tmp_path,
+        runner_output='JsonParseError(Error("expected value", line: 1, column: 1))',
+    )
+
+    assert diagnostic is not None
+    assert "generated JSON API probe returned HTTP 567" in diagnostic
+    assert "api.example.com/api/v1/search/items" in diagnostic
+
+
 def test_runner_assertion_failure_is_not_misclassified_as_network_failure() -> None:
     assert not _is_runner_network_failure(
         "panicked at src/generated_smoke.rs:94: chapter date is missing"
@@ -120,6 +154,7 @@ def test_runner_assertion_failure_is_not_misclassified_as_network_failure() -> N
     assert _is_runner_network_failure("request failed: RequestError(RequestError)")
     assert _is_runner_network_failure("first image returned HTTP 403")
     assert _is_runner_network_failure("popular listing returned no manga")
+    assert _is_runner_network_failure('JsonParseError(Error("expected value", line: 1, column: 1))')
 
 
 def test_proxy_is_passed_to_probe_without_being_reported(tmp_path: Path, monkeypatch) -> None:

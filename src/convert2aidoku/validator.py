@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 import tomllib
 from collections.abc import Callable
@@ -18,7 +19,7 @@ from .models import StageKind, ValidationResult, ValidationStage
 from .scaffold import read_generated_files, validate_generated_content
 from .toolchain import find_tool
 
-_BLOCKED_HTTP_STATUSES = {403, 429, 503, 521, 522, 523, 524}
+_BLOCKED_HTTP_STATUSES = {403, 429, 503, 521, 522, 523, 524, 567}
 _CHALLENGE_BODY_MARKERS = (
     "/cdn-cgi/challenge-platform/",
     "cf-chl-",
@@ -58,6 +59,7 @@ _RUNNER_NETWORK_FAILURE_MARKERS = (
     "latest listing returned no manga",
     "timed out",
     "timeout",
+    'jsonparseerror(error("expected value", line: 1, column: 1))',
 )
 type _StageRunner = Callable[
     [str, StageKind, list[str], Path, int, dict[str, str] | None], ValidationStage
@@ -179,6 +181,73 @@ def _test_wasm(project: Path) -> Path | None:
     return max(artifacts, key=lambda path: path.stat().st_mtime)
 
 
+def _generated_json_api_probe_urls(project: Path) -> list[str]:
+    contents = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted((project / "src").rglob("*.rs"))
+        if path.name != "generated_smoke.rs" and path.is_file() and not path.is_symlink()
+    )
+    bases = {
+        match.group("url").rstrip("/")
+        for match in re.finditer(
+            r"\bconst\s+[A-Za-z_]*API[A-Za-z_]*_URL\s*:\s*&str\s*=\s*"
+            r'"(?P<url>https?://[^"\\]+)"',
+            contents,
+        )
+    }
+    routes = {
+        match.group("route") for match in re.finditer(r"(?P<route>/api/[A-Za-z0-9_./-]+)", contents)
+    }
+    return [f"{base}{route}" for base in sorted(bases) for route in sorted(routes)][:6]
+
+
+def _generated_json_api_blocker(
+    project: Path,
+    *,
+    proxy: str | None,
+    runner_output: str,
+) -> str | None:
+    lowered = runner_output.lower()
+    if "jsonparseerror" not in lowered or "expected value" not in lowered:
+        return None
+    route = " via configured proxy" if proxy else ""
+    for url in _generated_json_api_probe_urls(project):
+        try:
+            response = httpx.get(
+                url,
+                headers={
+                    "User-Agent": _BROWSER_PROBE_HEADERS["User-Agent"],
+                    "Accept": "application/json,text/plain,*/*",
+                },
+                follow_redirects=True,
+                timeout=20,
+                trust_env=False,
+                proxy=proxy,
+            )
+        except httpx.HTTPError:
+            continue
+        body = response.text[:20_000]
+        content_type = response.headers.get("content-type", "").split(";", 1)[0]
+        html_response = content_type == "text/html" or body.lstrip().lower().startswith(
+            ("<!doctype html", "<html")
+        )
+        if response.status_code in _BLOCKED_HTTP_STATUSES or (
+            response.status_code == 404 and html_response
+        ):
+            return (
+                f"generated JSON API probe{route} returned HTTP {response.status_code} "
+                f"{content_type or 'unknown content'} for {url}; the endpoint is challenged, "
+                "unavailable, or stale, so AI source repair is disabled until connectivity or "
+                "the input source changes"
+            )
+        if html_response and _is_browser_challenge(body):
+            return (
+                f"generated JSON API probe{route} received browser-challenge HTML for {url}; "
+                "AI source repair is disabled until connectivity changes"
+            )
+    return None
+
+
 def _blocked_site_probe(
     project: Path,
     *,
@@ -251,6 +320,13 @@ def _blocked_site_probe(
             f"with HTTP {response.status_code}; this validation process does not share a browser "
             "session, so the result does not prove the site is unavailable in a normal browser"
         )
+    api_blocker = _generated_json_api_blocker(
+        project,
+        proxy=proxy,
+        runner_output=runner_output,
+    )
+    if api_blocker is not None:
+        return api_blocker
     if "requesterror" in runner_output.lower():
         return (
             "Aidoku runner returned a network RequestError while the independent HTTPX probe"

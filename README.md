@@ -98,6 +98,9 @@ uv run c2a convert \
 
 # Resume a saved staging workspace after a failed/interrupted run.
 uv run c2a convert <same-input> --out generated/zh.mycomic --resume --yes
+
+# Add or replace only the live-test query while reusing all completed AI rounds.
+uv run c2a convert <same-input> --out generated/zh.vomic --resume --query 漫画 --yes
 ```
 
 CLI flags override environment variables, which override `c2a.toml`. `--no-live` skips network

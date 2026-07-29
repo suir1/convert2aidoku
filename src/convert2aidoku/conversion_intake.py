@@ -106,6 +106,9 @@ class ConversionIntake:
             installed_output=request.output,
         )
         _check_resume_compatibility(checkpoint, request)
+        if request.query is not None and request.query != checkpoint.query:
+            checkpoint.query = request.query
+            store.commit(checkpoint=checkpoint)
         if not store.project.is_dir() or store.project.is_symlink():
             raise InputError(f"resume staging project is missing or unsafe: {store.project}")
         source_ir = _refresh_source_ir(
@@ -137,7 +140,7 @@ def _refresh_source_ir(
     input_ref: str,
     store: CheckpointStore,
 ) -> SourceIR:
-    if source_ir.schema_version >= 6:
+    if source_ir.schema_version >= 7:
         return source_ir
     with resolve_source(input_ref) as resolved:
         refreshed = analyze_source(resolved)
@@ -181,8 +184,6 @@ def _check_resume_compatibility(
         mismatches.append("base URL")
     if checkpoint.model != request.settings.model:
         mismatches.append("model")
-    if checkpoint.query != request.query:
-        mismatches.append("query")
     if checkpoint.live != request.live:
         mismatches.append("live mode")
     if mismatches:

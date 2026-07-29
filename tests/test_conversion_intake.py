@@ -78,8 +78,29 @@ def test_resume_refreshes_legacy_source_ir(tmp_path: Path) -> None:
         resume=True,
     )
 
-    assert resumed.source_ir.schema_version == 6
-    assert resumed.store.read_source_ir().schema_version == 6
+    assert resumed.source_ir.schema_version == 7
+    assert resumed.store.read_source_ir().schema_version == 7
+
+
+def test_resume_can_add_or_replace_live_test_query(tmp_path: Path) -> None:
+    output = tmp_path / "generated" / "en.simple"
+    settings = conversion_settings()
+    ConversionIntake.prepare(
+        str(SIMPLE_FIXTURE),
+        output=output,
+        settings=settings,
+    )
+
+    resumed = ConversionIntake.prepare(
+        str(SIMPLE_FIXTURE),
+        output=output,
+        settings=settings,
+        query="example",
+        resume=True,
+    )
+
+    assert resumed.checkpoint.query == "example"
+    assert resumed.store.read_checkpoint().query == "example"
 
 
 def test_completed_resume_bumps_generated_source_and_source_ir_versions(tmp_path: Path) -> None:

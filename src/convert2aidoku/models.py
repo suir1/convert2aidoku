@@ -113,17 +113,21 @@ class SourceFilterSpec(BaseModel):
     source_class: str
     id: str = Field(pattern=r"^[a-z][a-z0-9_\[\]-]*$")
     title: str
-    kind: Literal["select", "sort"]
-    options: list[SourceFilterOption] = Field(min_length=1)
+    kind: Literal["check", "text", "select", "sort"]
+    options: list[SourceFilterOption] = Field(default_factory=list)
     default_index: int = Field(default=0, ge=0)
     default_ascending: bool | None = None
 
     @model_validator(mode="after")
     def default_is_valid(self) -> SourceFilterSpec:
-        if self.default_index >= len(self.options):
+        if self.kind in {"select", "sort"} and not self.options:
+            raise ValueError("select and sort filters require options")
+        if self.kind in {"check", "text"} and self.options:
+            raise ValueError("check and text filters cannot declare options")
+        if self.options and self.default_index >= len(self.options):
             raise ValueError("filter default index is outside its options")
-        if self.kind == "select" and self.default_ascending is not None:
-            raise ValueError("select filters cannot declare an ascending default")
+        if self.kind != "sort" and self.default_ascending is not None:
+            raise ValueError("only sort filters can declare an ascending default")
         return self
 
 
@@ -136,7 +140,7 @@ class RequestHeaderProfile(BaseModel):
 
 
 class SourceIR(BaseModel):
-    schema_version: Literal[1, 2, 3, 4, 5, 6] = 6
+    schema_version: Literal[1, 2, 3, 4, 5, 6, 7] = 7
     input_ref: str
     commit: str | None = None
     source_format: Literal["kotlin_module", "decompiled_apk"] = "kotlin_module"
@@ -583,10 +587,19 @@ class GeneratedResources:
                 "type": spec.kind,
                 "id": spec.id,
                 "title": spec.title,
-                "options": [option.title for option in spec.options],
-                "ids": values,
             }
-            if spec.kind == "sort":
+            if spec.kind in {"select", "sort"}:
+                item.update(
+                    {
+                        "options": [option.title for option in spec.options],
+                        "ids": values,
+                    }
+                )
+            if spec.kind == "check":
+                item["default"] = False
+            elif spec.kind == "text":
+                item["default"] = ""
+            elif spec.kind == "sort":
                 item.update(
                     {
                         "default": {
@@ -596,7 +609,7 @@ class GeneratedResources:
                         "canAscend": True,
                     }
                 )
-            else:
+            elif spec.kind == "select":
                 item["default"] = values[spec.default_index]
             filters.append(item)
         generated = GeneratedFile(
@@ -635,12 +648,18 @@ class GeneratedResources:
                 )
             expected_titles = [option.title for option in spec.options]
             expected_values = [option.value for option in spec.options]
-            if item.get("options") != expected_titles:
+            if spec.kind in {"select", "sort"} and item.get("options") != expected_titles:
                 gaps.append(
                     f"filter {spec.id!r} does not preserve recovered display options "
                     f"{expected_titles!r}"
                 )
-            if spec.kind == "select":
+            if spec.kind == "check":
+                if item.get("default") is not False:
+                    gaps.append(f"filter {spec.id!r} default must be false")
+            elif spec.kind == "text":
+                if item.get("default") != "":
+                    gaps.append(f"filter {spec.id!r} default must be empty text")
+            elif spec.kind == "select":
                 if item.get("ids") != expected_values:
                     gaps.append(f"filter {spec.id!r} site values must be {expected_values!r}")
                 expected_default: Any = expected_values[spec.default_index]
@@ -681,7 +700,11 @@ class GeneratedResources:
                     spec = specs.get(item.get("id"))
                     if spec is None:
                         continue
-                    if spec.kind == "select":
+                    if spec.kind == "check":
+                        value = False
+                    elif spec.kind == "text":
+                        value = ""
+                    elif spec.kind == "select":
                         value: Any = spec.options[spec.default_index].value
                     else:
                         value = {

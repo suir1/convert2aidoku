@@ -241,6 +241,31 @@ def test_recovers_kotlin_uri_part_filter_pairs_and_constants(tmp_path: Path) -> 
     ]
 
 
+def test_recovers_kotlin_check_and_text_filters(tmp_path: Path) -> None:
+    (tmp_path / "build.gradle.kts").write_text(
+        'keiyoushi { name = "Filters"; source { lang = "zh"; '
+        'baseUrl { custom("https://filters.example") } } }'
+    )
+    source = tmp_path / "src" / "Filters.kt"
+    source.parent.mkdir()
+    source.write_text(
+        """
+        class Filters : HttpSource() {
+            override fun getFilterList() = FilterList(SearchToggle(), CategoryFilter())
+        }
+        private class SearchToggle : Filter.CheckBox("将搜索词视为分类")
+        private class CategoryFilter : Filter.Text("分类")
+        """
+    )
+
+    ir = analyze_path(str(tmp_path))
+
+    assert [(spec.id, spec.title, spec.kind, spec.options) for spec in ir.filter_specs] == [
+        ("search_toggle", "将搜索词视为分类", "check", []),
+        ("category", "分类", "text", []),
+    ]
+
+
 def test_analyzes_decompiled_apk_as_public_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
