@@ -151,6 +151,151 @@ def _kotlin_simple_filter_specs(kotlin: str) -> list[SourceFilterSpec]:
     return specs
 
 
+def _balanced_content(
+    text: str,
+    opening: int,
+    *,
+    open_character: str = "(",
+    close_character: str = ")",
+) -> str | None:
+    depth = 0
+    quoted = False
+    escaped = False
+    for index in range(opening, len(text)):
+        character = text[index]
+        if quoted:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                quoted = False
+            continue
+        if character == '"':
+            quoted = True
+        elif character == open_character:
+            depth += 1
+        elif character == close_character:
+            depth -= 1
+            if depth == 0:
+                return text[opening + 1 : index]
+    return None
+
+
+def _top_level_arguments(content: str) -> list[str]:
+    arguments: list[str] = []
+    start = 0
+    round_depth = square_depth = brace_depth = 0
+    quoted = False
+    escaped = False
+    for index, character in enumerate(content):
+        if quoted:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                quoted = False
+            continue
+        if character == '"':
+            quoted = True
+        elif character == "(":
+            round_depth += 1
+        elif character == ")":
+            round_depth -= 1
+        elif character == "[":
+            square_depth += 1
+        elif character == "]":
+            square_depth -= 1
+        elif character == "{":
+            brace_depth += 1
+        elif character == "}":
+            brace_depth -= 1
+        elif character == "," and not (round_depth or square_depth or brace_depth):
+            arguments.append(content[start:index].strip())
+            start = index + 1
+    final = content[start:].strip()
+    if final:
+        arguments.append(final)
+    return arguments
+
+
+def _kotlin_constructor_filter_specs(kotlin: str) -> list[SourceFilterSpec]:
+    """Recover filters whose labels and site values are supplied to custom constructors."""
+    filter_list = re.search(r"\bgetFilterList\s*\([^)]*\)\s*=\s*FilterList\s*\(", kotlin)
+    if filter_list is None:
+        return []
+    opening = filter_list.end() - 1
+    body = _balanced_content(kotlin, opening)
+    if body is None:
+        return []
+
+    declarations = {
+        found.group(1): declaration
+        for declaration in _kotlin_class_declarations(kotlin)
+        if (found := re.search(r"\bclass\s+([A-Za-z_]\w*Filter)\b", declaration))
+    }
+    specs: list[SourceFilterSpec] = []
+    for call in re.finditer(r"\b(?P<class>[A-Za-z_]\w*Filter)\s*\(", body):
+        class_name = call.group("class")
+        declaration = declarations.get(class_name, "")
+        if "Filter.Select" not in declaration and "Filter.Sort" not in declaration:
+            continue
+        call_body = _balanced_content(body, call.end() - 1)
+        if call_body is None:
+            continue
+        arguments = _top_level_arguments(call_body)
+        if len(arguments) < 2:
+            continue
+        title = _decode_kotlin_string(arguments[0]) if arguments[0].startswith('"') else None
+        array_match = re.match(r"arrayOf\s*\(", arguments[1])
+        if title is None or array_match is None:
+            continue
+        array_body = _balanced_content(arguments[1], array_match.end() - 1)
+        if array_body is None:
+            continue
+        options: list[SourceFilterOption] = []
+        seen: set[str] = set()
+        for expression in _top_level_arguments(array_body):
+            constructor = re.match(r"(?:Pair|[A-Za-z_]\w*)\s*\(", expression)
+            if constructor is None:
+                options = []
+                break
+            option_body = _balanced_content(expression, constructor.end() - 1)
+            if option_body is None:
+                options = []
+                break
+            option_arguments = _top_level_arguments(option_body)
+            if not all(argument.startswith('"') for argument in option_arguments):
+                options = []
+                break
+            parts = [_decode_kotlin_string(argument) for argument in option_arguments]
+            if len(parts) < 2 or any(part is None for part in parts):
+                options = []
+                break
+            values = [part for part in parts if part is not None]
+            if len(values) > 2 and any(":" in value for value in values[1:]):
+                options = []
+                break
+            value = values[1] if len(values) == 2 else ":".join(values[1:])
+            if value in seen:
+                continue
+            seen.add(value)
+            options.append(SourceFilterOption(title=values[0], value=value))
+        if options:
+            specs.append(
+                SourceFilterSpec(
+                    source_class=class_name,
+                    id=_snake_case(class_name.removesuffix("Filter")),
+                    title=title,
+                    kind="sort" if "Filter.Sort" in declaration else "select",
+                    options=options,
+                    default_ascending=False if "Filter.Sort" in declaration else None,
+                )
+            )
+    return specs
+
+
 def _kotlin_filter_specs(kotlin: str) -> list[SourceFilterSpec]:
     specs: list[SourceFilterSpec] = []
     pattern = re.compile(
@@ -205,6 +350,10 @@ def _kotlin_filter_specs(kotlin: str) -> list[SourceFilterSpec]:
     existing_ids.update(spec.id for spec in specs)
     specs.extend(
         spec for spec in _kotlin_simple_filter_specs(kotlin) if spec.id not in existing_ids
+    )
+    existing_ids.update(spec.id for spec in specs)
+    specs.extend(
+        spec for spec in _kotlin_constructor_filter_specs(kotlin) if spec.id not in existing_ids
     )
     return specs
 
@@ -298,7 +447,6 @@ def _unsupported_features(
             "scramble",
         ),
         "custom web or crypto processing": (
-            "MessageDigest",
             "Mac.getInstance",
             "WebView",
             "loadUrl(",
@@ -335,7 +483,10 @@ def analyze_kotlin_source(resolved: ResolvedSource) -> SourceIR:
         language = match(r"override\s+val\s+lang\s*=\s*\"([^\"]+)\"", kotlin, "multi")
     if not re.fullmatch(r"[a-z]{2,3}(?:-[a-z0-9]+)*", language):
         raise InputError(f"unsupported or invalid source language code: {language}")
-    name = match(r"\bname\s*=\s*['\"]([^'\"]+)['\"]", build_file.content)
+    source_block = match(r"\bsource\s*\{([\s\S]*?)\}", build_file.content)
+    name = match(r"\bname\s*=\s*['\"]([^'\"]+)['\"]", source_block)
+    if not name:
+        name = match(r"\bname\s*=\s*['\"]([^'\"]+)['\"]", build_file.content)
     if not name:
         name = match(r"\bextName\s*=\s*['\"]([^'\"]+)['\"]", build_file.content)
     if not name:
@@ -350,7 +501,7 @@ def analyze_kotlin_source(resolved: ResolvedSource) -> SourceIR:
     version_text = match(r"\b(?:extVersionCode|versionCode)\s*=\s*(\d+)", build_file.content, "1")
 
     method_names = sorted(set(re.findall(r"override\s+(?:suspend\s+)?fun\s+(\w+)", kotlin)))
-    header_names_set = set(re.findall(r"\.(?:add|set)\(\s*\"([^\"]+)\"\s*,", kotlin))
+    header_names_set = set(re.findall(r"(?:\.|\b)(?:add|set)\(\s*\"([^\"]+)\"\s*,", kotlin))
     if "super.headersBuilder()" in kotlin:
         header_names_set.add("User-Agent")
     header_names = sorted(header_names_set)

@@ -167,6 +167,33 @@ def builtin_templates() -> tuple[TemplateSpec, ...]:
             license_note=_LICENSE_NOTE,
         ),
         TemplateSpec(
+            template_id="rsa-pkcs1-device-bootstrap",
+            aidoku_revision=AIDOKU_RS_REV,
+            description="RSA PKCS#1 v1.5 anonymous-device and token bootstrap.",
+            required_capabilities=[Capability.RSA_PKCS1_V15],
+            slots=[
+                _slot("public_key", "rust", "Exact embedded X.509 DER public key."),
+                _slot("device_identity", "rust", "Stable locally persisted device identifiers."),
+                _slot("bootstrap_body", "rust", "Exact encrypted key types and JSON envelope."),
+                _slot("token_storage", "rust", "Manual fallback and persisted anonymous token."),
+            ],
+            provenance=_PROVENANCE,
+            license_note=_LICENSE_NOTE,
+        ),
+        TemplateSpec(
+            template_id="md5-request-signing",
+            aidoku_revision=AIDOKU_RS_REV,
+            description="Sorted salted MD5 request signing with source-defined URL encoding.",
+            required_capabilities=[Capability.MD5_REQUEST_SIGNING],
+            slots=[
+                _slot("salt", "rust", "Exact source signing salt."),
+                _slot("canonicalization", "rust", "Parameter order, body inclusion, and encoding."),
+                _slot("timestamp", "rust", "Live source-compatible timestamp."),
+            ],
+            provenance=_PROVENANCE,
+            license_note=_LICENSE_NOTE,
+        ),
+        TemplateSpec(
             template_id="dynamic-base-url",
             aidoku_revision=AIDOKU_RS_REV,
             description="A settings-backed allowlisted base URL selector.",

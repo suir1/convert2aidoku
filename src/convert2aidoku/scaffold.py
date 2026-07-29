@@ -1141,6 +1141,56 @@ def _inject_source_new(content: str) -> str:
     return content
 
 
+def _normalize_defaults_set_string_values(content: str) -> str:
+    """Wrap obvious owned String expressions for the pinned defaults_set API."""
+    pattern = re.compile(
+        r"(?P<prefix>\bdefaults_set\(\s*\"(?:\\.|[^\"\\])*\"\s*,\s*)"
+        r"(?P<value>[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\.(?:clone|to_string)\(\))"
+        r"(?P<suffix>\s*\);)"
+    )
+    return pattern.sub(
+        lambda found: (
+            found.group("prefix")
+            + "aidoku::imports::defaults::DefaultValue::String("
+            + found.group("value")
+            + ")"
+            + found.group("suffix")
+        ),
+        content,
+    )
+
+
+def _normalize_rsa_bootstrap_diagnostics(content: str) -> str:
+    """Preserve a signed API's response body when anonymous bootstrap JSON is rejected."""
+    if "Pkcs1v15Encrypt" not in content:
+        return content
+    pattern = re.compile(
+        r"(?P<prefix>\bfn\s+fetch_token\b[\s\S]{0,8000}?)"
+        r"(?P<indent>^[ \t]*)let\s+(?P<name>[A-Za-z_]\w*)\s*:\s*"
+        r"(?P<type>[A-Za-z_]\w*)\s*=\s*(?P<request>[A-Za-z_]\w*)"
+        r"\.send\(\)\?\.get_json_owned\(\)\?;",
+        re.MULTILINE,
+    )
+
+    def replace(found: re.Match[str]) -> str:
+        indent = found.group("indent")
+        response_text = f"{found.group('name')}_text"
+        return (
+            found.group("prefix")
+            + f"{indent}let {response_text} = {found.group('request')}.send()?.get_string()?;\n"
+            + f"{indent}let {found.group('name')}: {found.group('type')} = "
+            + f"serde_json::from_str(&{response_text})\n"
+            + f"{indent}    .map_err(|_| aidoku::AidokuError::message({response_text}))?;"
+        )
+
+    content = pattern.sub(replace, content, count=1)
+    # Tachi Date().time is milliseconds. Aidoku current_date() is seconds.
+    return content.replace(
+        "(current_date() / 1_000) * 1_000",
+        "current_date() * 1_000",
+    )
+
+
 def _normalize_mutated_aidoku_models(content: str) -> str:
     content = re.sub(
         r"(?P<target>\b[A-Za-z_]\w*)\.author\s*=\s*"
@@ -3336,6 +3386,8 @@ def normalize_pinned_aidoku_rust(
     content = _normalize_manga_replacement_chapters(content)
     content = _normalize_legacy_request_errors(content)
     content = _normalize_defaults_get_bindings(content)
+    content = _normalize_defaults_set_string_values(content)
+    content = _normalize_rsa_bootstrap_diagnostics(content)
     content = _normalize_aidoku_result_errors(content)
     content = _normalize_raw_json_response_bindings(content)
     content = _normalize_request_builder_helpers(content, request_builder_helpers)

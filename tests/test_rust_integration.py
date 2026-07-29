@@ -58,6 +58,35 @@ TRIPLE_DES_RUST_SOURCE = RUST_SOURCE.replace(
     "    }",
 )
 
+RSA_MD5_RUST_SOURCE = RUST_SOURCE.replace(
+    "use aidoku::{",
+    "use base64::{Engine as _, engine::general_purpose::STANDARD};\n"
+    "use md5::{Digest as _, Md5};\n"
+    "use rand_chacha::ChaCha20Rng;\n"
+    "use rand_core::SeedableRng as _;\n"
+    "use rsa::{Pkcs1v15Encrypt, RsaPublicKey, pkcs8::DecodePublicKey as _};\n"
+    "use aidoku::{",
+).replace(
+    "fn new() -> Self { Self }",
+    "fn new() -> Self {\n"
+    "        let public_key = concat!(\n"
+    '            "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmFCg289dTws27v8G",\n'
+    '            "tqIffkP4zgFR+MYIuUIeVO5AGiBV0rfpRh5gg7i8RrT12E9j6XwKoe3x",\n'
+    '            "Jz1khDnPc65P5f7CJcNJ9A8bj7Al5K4jYGxz+4Q+n0YzSllXPit/Vz/i",\n'
+    '            "W5jFdlP6CTIgUVwvIoGEL2sS4cqqqSpCDKHSeiXh9CtMsktc6YyrSN+8",\n'
+    '            "mQbBvoSSew18r/vC07iQiaYkClcs7jIPq9tuilL//2uR9kWn5jsp8zHK",\n'
+    '            "VjmXuLtHDhM9lObZGCVJwdlN2KDKTh276u/pzQ1s5u8z/ARtK26N8e5w",\n'
+    '            "8mNlGcHcHfwyhjfEQurvrnkqYH37+12U3jGk5YNHGyOPcwIDAQAB",\n'
+    "        );\n"
+    "        let der = STANDARD.decode(public_key).unwrap();\n"
+    "        let key = RsaPublicKey::from_public_key_der(&der).unwrap();\n"
+    "        let mut rng = ChaCha20Rng::from_seed([7_u8; 32]);\n"
+    '        let _ = key.encrypt(&mut rng, Pkcs1v15Encrypt, b"device").unwrap();\n'
+    '        let _ = Md5::digest(b"payload");\n'
+    "        Self\n"
+    "    }",
+)
+
 LISTING_RUST_SOURCE = """#![no_std]
 
 use aidoku::{Chapter, FilterValue, Manga, MangaPageResult, Page, Result, Source};
@@ -174,6 +203,31 @@ def test_pinned_triple_des_dependencies_compile_for_wasm(tmp_path: Path) -> None
                 DependencyRequest(name="des"),
                 DependencyRequest(name="cbc"),
                 DependencyRequest(name="base64"),
+            ],
+        ),
+        query=None,
+    )
+
+    validation = validate_project(project, live=False)
+    assert validation.build_ok, validation.diagnostics
+    assert validation.package_ok, validation.diagnostics
+
+
+def test_pinned_rsa_and_md5_dependencies_compile_for_wasm(tmp_path: Path) -> None:
+    assert find_tool("cargo")
+    project, ir = scaffold_project(tmp_path, name="rsa-md5-project")
+    apply_generation_manifest(
+        project,
+        ir,
+        GenerationManifest(
+            source_struct="Simple",
+            files=[GeneratedFile(path="src/lib.rs", content=RSA_MD5_RUST_SOURCE)],
+            dependencies=[
+                DependencyRequest(name="base64"),
+                DependencyRequest(name="md-5"),
+                DependencyRequest(name="rand_chacha"),
+                DependencyRequest(name="rand_core"),
+                DependencyRequest(name="rsa"),
             ],
         ),
         query=None,

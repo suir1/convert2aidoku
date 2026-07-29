@@ -118,6 +118,20 @@ Mapping rules:
   `aidoku::imports::std::current_date()` is available and returns Unix seconds; multiply by 1000
   when the Tachi source uses `System.currentTimeMillis()`. Use this live value both in the signed
   payload and the request parameter. Never substitute `0` or another fixed timestamp.
+- For a source explicitly classified with `rsa_pkcs1_v15`, preserve the embedded X.509 DER public
+  key and RSA/ECB/PKCS1Padding semantics with the pinned `rsa`, `rand_core`, `rand_chacha`, and
+  `serde_json` crates. Seed a local ChaCha RNG from live `current_date()` plus source-local varying input; do
+  not use `getrandom`, a fixed ciphertext, a private key, or network-provided executable code.
+  Preserve device-key types and the exact JSON body used by anonymous-token bootstrap. Persist any
+  generated stable device identifier with `defaults_get`/`defaults_set` so later signed requests
+  do not silently change identity. If the input exposes manual User ID and Token preferences as a
+  fallback needed for public reading, preserve those settings and prefer their non-empty values.
+  At the pinned revision, `defaults_set` takes a typed `DefaultValue`; wrap stored strings as
+  `aidoku::imports::defaults::DefaultValue::String(value)`.
+- For a source explicitly classified with `md5_request_signing`, reproduce the exact source field
+  sorting, salt placement, HTTP method casing, body inclusion, URL-encoding rules, live timestamp,
+  and lowercase MD5 hex encoding with the pinned `md-5` crate. Sign the same decoded parameter
+  values that are sent on the request; do not sign a differently encoded or reordered projection.
 - To return a user-visible source error, use `aidoku::AidokuError::message(...)` (or `bail!`). The
   pinned `RequestError` enum has no `new` constructor.
 - Preserve JSON response envelopes at every endpoint. If the Tachi input deserializes

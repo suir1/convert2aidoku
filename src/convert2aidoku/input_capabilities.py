@@ -51,7 +51,12 @@ _DIALECT_MARKERS: dict[InputDialect, _Markers] = {
         ),
     ),
 }
-_CRYPTO_MARKERS = ("javax.crypto", "Cipher.getInstance", "SecretKeySpec")
+_CRYPTO_MARKERS = (
+    "javax.crypto",
+    "Cipher.getInstance",
+    "SecretKeySpec",
+    "MessageDigest",
+)
 _CRYPTO_TRANSFORMATIONS = {
     Capability.ENCRYPTED_JSON: frozenset({"AES/CBC/PKCS5Padding", "AES/CBC/PKCS7Padding"}),
     Capability.TRIPLE_DES_CBC: frozenset({"DESede/CBC/PKCS5Padding", "DESede/CBC/PKCS7Padding"}),
@@ -64,18 +69,54 @@ class InputCapabilityRecognition:
     unsupported_crypto: bool
 
 
-def _supported_crypto(content: str) -> Capability | None:
+def _crypto_capabilities(content: str) -> tuple[set[Capability], bool]:
+    """Recognize only crypto constructions with a pinned Rust implementation path."""
+    capabilities: set[Capability] = set()
+    unsupported = False
     transformations = frozenset(re.findall(r'Cipher\.getInstance\(\s*"([^"]+)"', content))
-    if not transformations or "SecretKeySpec" not in content or "IvParameterSpec" not in content:
-        return None
-    return next(
-        (
-            capability
-            for capability, supported in _CRYPTO_TRANSFORMATIONS.items()
-            if transformations <= supported
-        ),
-        None,
+    remaining = set(transformations)
+
+    symmetric = [
+        capability
+        for capability, supported in _CRYPTO_TRANSFORMATIONS.items()
+        if transformations.intersection(supported)
+    ]
+    if symmetric:
+        if len(symmetric) == 1 and "SecretKeySpec" in content and "IvParameterSpec" in content:
+            capability = symmetric[0]
+            capabilities.add(capability)
+            remaining.difference_update(_CRYPTO_TRANSFORMATIONS[capability])
+        else:
+            unsupported = True
+
+    rsa_transformations = {"RSA/ECB/PKCS1Padding"}
+    if remaining.intersection(rsa_transformations):
+        if 'KeyFactory.getInstance("RSA")' in content and "X509EncodedKeySpec" in content:
+            capabilities.add(Capability.RSA_PKCS1_V15)
+            remaining.difference_update(rsa_transformations)
+        else:
+            unsupported = True
+    if remaining:
+        unsupported = True
+
+    digest_names = set(
+        re.findall(
+            r'MessageDigest\s*\.\s*getInstance\(\s*"([^"]+)"',
+            content,
+        )
     )
+    if re.search(r"MessageDigest\s*\.\s*getInstance\(\s*type\s*\)", content):
+        digest_names.update(re.findall(r'hashString\(\s*"([^"]+)"', content))
+    if digest_names:
+        if digest_names == {"MD5"}:
+            capabilities.add(Capability.MD5_REQUEST_SIGNING)
+        else:
+            unsupported = True
+
+    has_crypto_markers = any(marker in content for marker in _CRYPTO_MARKERS)
+    if has_crypto_markers and not capabilities:
+        unsupported = True
+    return capabilities, unsupported
 
 
 def recognize_input_capabilities(
@@ -98,11 +139,9 @@ def recognize_input_capabilities(
         ):
             detected.add(Capability.DYNAMIC_FILTERS)
 
-    crypto_capability = _supported_crypto(content)
-    if crypto_capability is not None:
-        detected.add(crypto_capability)
+    crypto_capabilities, unsupported_crypto = _crypto_capabilities(content)
+    detected.update(crypto_capabilities)
     return InputCapabilityRecognition(
         capabilities=tuple(capability for capability in Capability if capability in detected),
-        unsupported_crypto=crypto_capability is None
-        and any(marker in content for marker in _CRYPTO_MARKERS),
+        unsupported_crypto=unsupported_crypto,
     )

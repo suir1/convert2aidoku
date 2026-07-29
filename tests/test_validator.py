@@ -155,6 +155,7 @@ def test_runner_assertion_failure_is_not_misclassified_as_network_failure() -> N
     assert _is_runner_network_failure("first image returned HTTP 403")
     assert _is_runner_network_failure("popular listing returned no manga")
     assert _is_runner_network_failure('JsonParseError(Error("expected value", line: 1, column: 1))')
+    assert _is_runner_network_failure('errorResponse: {"message":"初始化失败"}')
 
 
 def test_proxy_is_passed_to_probe_without_being_reported(tmp_path: Path, monkeypatch) -> None:

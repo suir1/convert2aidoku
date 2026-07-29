@@ -28,6 +28,8 @@ class Capability(StrEnum):
     JSON_API = "json_api"
     ENCRYPTED_JSON = "encrypted_json"
     TRIPLE_DES_CBC = "triple_des_cbc"
+    RSA_PKCS1_V15 = "rsa_pkcs1_v15"
+    MD5_REQUEST_SIGNING = "md5_request_signing"
     DYNAMIC_BASE_URLS = "dynamic_base_urls"
 
 

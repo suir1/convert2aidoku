@@ -21,7 +21,11 @@ def test_policy_owns_complete_sorted_allowlist_and_cargo_projection() -> None:
         "cbc",
         "des",
         "hex",
+        "md-5",
+        "rand_chacha",
+        "rand_core",
         "regex",
+        "rsa",
         "serde",
         "serde_json",
     )
@@ -42,7 +46,11 @@ def test_policy_owns_complete_sorted_allowlist_and_cargo_projection() -> None:
         "cbc": ("0.1.2", False, ("block-padding",)),
         "des": ("0.8.1", False, ()),
         "hex": ("0.4.3", False, ("alloc",)),
+        "md-5": ("0.10.6", False, ()),
+        "rand_chacha": ("0.3.1", False, ()),
+        "rand_core": ("0.6.4", False, ()),
         "regex": ("1.11.1", False, ("unicode",)),
+        "rsa": ("0.9.8", False, ()),
         "serde": ("1.0.219", False, ("derive",)),
         "serde_json": ("1.0.140", False, ("alloc",)),
     }
@@ -55,6 +63,8 @@ def test_policy_reports_capability_requirements_from_the_same_rules() -> None:
             Capability.JSON_API,
             Capability.ENCRYPTED_JSON,
             Capability.TRIPLE_DES_CBC,
+            Capability.RSA_PKCS1_V15,
+            Capability.MD5_REQUEST_SIGNING,
         ],
     )
     encrypted = evaluate_dependency_policy(
@@ -71,6 +81,9 @@ def test_policy_reports_capability_requirements_from_the_same_rules() -> None:
         "encrypted JSON source omitted required pinned dependencies: aes, cbc, serde, serde_json",
         "encrypted JSON source requested neither hex nor base64 decoding",
         "3DES-CBC request signing omitted required pinned dependencies: base64, cbc, des",
+        "RSA PKCS#1 v1.5 device bootstrap omitted required pinned dependencies: "
+        "base64, rand_chacha, rand_core, rsa, serde_json",
+        "MD5 request signing omitted required pinned dependencies: md-5",
     )
     assert not encrypted.diagnostics
     assert not triple_des.diagnostics
@@ -83,6 +96,11 @@ def test_ai_contract_is_rendered_from_policy_and_includes_des() -> None:
     assert "`des`" in contract
     assert "`triple_des_cbc`: request `base64`, `cbc`, `des`" in contract
     assert "`encrypted_json`: request `aes`, `cbc`, `serde`, `serde_json`" in contract
+    assert (
+        "`rsa_pkcs1_v15`: request `base64`, `rand_chacha`, `rand_core`, `rsa`, `serde_json`"
+        in contract
+    )
+    assert "`md5_request_signing`: request `md-5`" in contract
 
 
 @pytest.mark.parametrize(

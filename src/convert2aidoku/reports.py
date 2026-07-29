@@ -24,6 +24,25 @@ def classify_status(validation: ValidationResult, *, live_requested: bool) -> Co
     return ConversionStatus.FAILED
 
 
+def _blocked_status_context(report: ConversionReport) -> str:
+    live_output = "\n".join(
+        stage.output
+        for stage in report.validation.stages
+        if stage.kind is StageKind.LIVE_TEST and not stage.ok
+    )
+    if "初始化失败" in live_output:
+        return (
+            "`blocked` means the remote API rejected anonymous-device initialization. The "
+            "source built and packaged successfully, but live reading requires a valid User ID "
+            "and Token in the generated source settings before validation can continue."
+        )
+    return (
+        "`blocked` means this CLI/test-runner network environment could not complete live "
+        "validation. It does not mean the source site is globally unavailable or unusable in a "
+        "normal browser."
+    )
+
+
 def write_report(project: Path, report: ConversionReport) -> None:
     (project / "report.json").write_text(
         report.model_dump_json(indent=2, exclude_none=True) + "\n",
@@ -54,9 +73,7 @@ def write_report(project: Path, report: ConversionReport) -> None:
             [
                 "## Status context",
                 "",
-                "`blocked` means this CLI/test-runner network environment could not complete "
-                "live validation. It does not mean the source site is globally unavailable or "
-                "unusable in a normal browser.",
+                _blocked_status_context(report),
                 "",
             ]
         )

@@ -70,6 +70,48 @@ def test_scaffold_is_deterministic_and_preserves_license(tmp_path: Path) -> None
     assert "rev =" in cargo
 
 
+def test_normalizes_owned_string_values_for_pinned_defaults_set() -> None:
+    content = """
+use aidoku::imports::defaults::{defaults_get, defaults_set};
+fn save(received_token: String, response: Response) {
+    defaults_set("token", received_token.clone());
+    defaults_set("userId", response.user_id.to_string());
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert (
+        'defaults_set("token", '
+        "aidoku::imports::defaults::DefaultValue::String(received_token.clone()));" in normalized
+    )
+    assert (
+        'defaults_set("userId", '
+        "aidoku::imports::defaults::DefaultValue::String(response.user_id.to_string()));"
+        in normalized
+    )
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
+def test_rsa_bootstrap_preserves_server_error_body_and_millisecond_time() -> None:
+    content = """
+use rsa::Pkcs1v15Encrypt;
+fn last_used_time() -> i64 { (current_date() / 1_000) * 1_000 }
+fn fetch_token() -> Result<String> {
+    let response: AnonymousBody = request.send()?.get_json_owned()?;
+    Ok(response.token)
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "let response_text = request.send()?.get_string()?;" in normalized
+    assert "serde_json::from_str(&response_text)" in normalized
+    assert "aidoku::AidokuError::message(response_text)" in normalized
+    assert "current_date() * 1_000" in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
 def test_smoke_query_uses_valid_rust_unicode_literal(tmp_path: Path) -> None:
     project, ir = scaffold_project(tmp_path)
 
@@ -2467,7 +2509,16 @@ fn iterator_next(values: &mut impl Iterator<Item = String>) { let _ = values.nex
 
 @pytest.mark.parametrize(
     ("dependency", "version"),
-    [("aes", "0.8.4"), ("des", "0.8.1"), ("cbc", "0.1.2"), ("hex", "0.4.3")],
+    [
+        ("aes", "0.8.4"),
+        ("des", "0.8.1"),
+        ("cbc", "0.1.2"),
+        ("hex", "0.4.3"),
+        ("md-5", "0.10.6"),
+        ("rand_chacha", "0.3.1"),
+        ("rand_core", "0.6.4"),
+        ("rsa", "0.9.8"),
+    ],
 )
 def test_scaffold_pins_allowed_crypto_dependencies(
     tmp_path: Path, dependency: str, version: str

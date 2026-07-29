@@ -60,6 +60,22 @@ def test_recognition_shares_supported_crypto_policy_across_dialects(
     assert not recognition.unsupported_crypto
 
 
+@pytest.mark.parametrize("dialect", ["kotlin", "decompiled_java"])
+def test_recognition_supports_rsa_device_bootstrap_and_md5_signing(
+    dialect: InputDialect,
+) -> None:
+    recognition = recognize_input_capabilities(
+        'Cipher.getInstance("RSA/ECB/PKCS1Padding"); '
+        'KeyFactory.getInstance("RSA"); X509EncodedKeySpec(key); '
+        'MessageDigest\n  .getInstance(type); hashString("MD5", payload)',
+        dialect=dialect,
+    )
+
+    assert Capability.RSA_PKCS1_V15 in recognition.capabilities
+    assert Capability.MD5_REQUEST_SIGNING in recognition.capabilities
+    assert not recognition.unsupported_crypto
+
+
 @pytest.mark.parametrize(
     "content",
     [

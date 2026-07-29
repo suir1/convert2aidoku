@@ -29,6 +29,10 @@ _PINNED_DEPENDENCIES: Mapping[str, PinnedDependency] = MappingProxyType(
         "des": PinnedDependency("0.8.1"),
         "cbc": PinnedDependency("0.1.2", features=("block-padding",)),
         "hex": PinnedDependency("0.4.3", features=("alloc",)),
+        "md-5": PinnedDependency("0.10.6"),
+        "rand_chacha": PinnedDependency("0.3.1"),
+        "rand_core": PinnedDependency("0.6.4"),
+        "rsa": PinnedDependency("0.9.8"),
     }
 )
 
@@ -37,6 +41,10 @@ _REQUIRED_DEPENDENCIES: Mapping[Capability, frozenset[str]] = MappingProxyType(
         Capability.JSON_API: frozenset({"serde"}),
         Capability.ENCRYPTED_JSON: frozenset({"aes", "cbc", "serde", "serde_json"}),
         Capability.TRIPLE_DES_CBC: frozenset({"des", "cbc", "base64"}),
+        Capability.RSA_PKCS1_V15: frozenset(
+            {"base64", "rand_chacha", "rand_core", "rsa", "serde_json"}
+        ),
+        Capability.MD5_REQUEST_SIGNING: frozenset({"md-5"}),
     }
 )
 _ONE_OF_DEPENDENCIES: Mapping[Capability, frozenset[str]] = MappingProxyType(
@@ -88,6 +96,19 @@ def evaluate_dependency_policy(
             diagnostics.append(
                 "3DES-CBC request signing omitted required pinned dependencies: "
                 + ", ".join(missing)
+            )
+    if Capability.RSA_PKCS1_V15 in capability_set:
+        missing = sorted(_REQUIRED_DEPENDENCIES[Capability.RSA_PKCS1_V15] - requested_names)
+        if missing:
+            diagnostics.append(
+                "RSA PKCS#1 v1.5 device bootstrap omitted required pinned dependencies: "
+                + ", ".join(missing)
+            )
+    if Capability.MD5_REQUEST_SIGNING in capability_set:
+        missing = sorted(_REQUIRED_DEPENDENCIES[Capability.MD5_REQUEST_SIGNING] - requested_names)
+        if missing:
+            diagnostics.append(
+                "MD5 request signing omitted required pinned dependencies: " + ", ".join(missing)
             )
 
     return DependencyEvaluation(

@@ -165,8 +165,9 @@ class _ConversionRoundRunner:
         repair_number = max(0, len(self.checkpoint.ai_rounds) - 1)
         if self.validation.blocked:
             warning = (
-                "AI repair skipped because live validation is blocked by the external network; "
-                "resume the saved checkpoint after connectivity changes"
+                "AI repair skipped because live validation is blocked by an external site or "
+                "network condition; "
+                "resume the saved checkpoint after that condition changes"
             )
             if warning not in self.checkpoint.warnings:
                 self.checkpoint.warnings.append(warning)

@@ -81,6 +81,73 @@ def test_analyzes_supported_triple_des_request_signing(tmp_path: Path) -> None:
     assert not ir.unsupported_features
 
 
+def test_analyzes_supported_rsa_bootstrap_and_md5_request_signing(tmp_path: Path) -> None:
+    (tmp_path / "build.gradle.kts").write_text(
+        'keiyoushi { name = "M"; versionCode = 1; source { lang = "zh"; '
+        'baseUrl = "https://m.example" } }'
+    )
+    source = tmp_path / "src" / "M.kt"
+    source.parent.mkdir()
+    source.write_text(
+        """
+        abstract class M : HttpSource() {
+            fun encrypt(value: String) {
+                X509EncodedKeySpec(key)
+                KeyFactory.getInstance("RSA")
+                Cipher.getInstance("RSA/ECB/PKCS1Padding")
+            }
+            fun hashString(type: String, value: String) =
+                MessageDigest.getInstance(type).digest(value.toByteArray())
+            fun sign(value: String) = hashString("MD5", value)
+            override fun pageListRequest(chapter: SChapter): Request = TODO()
+        }
+        """
+    )
+
+    ir = analyze_path(str(tmp_path))
+
+    assert Capability.RSA_PKCS1_V15 in ir.capabilities
+    assert Capability.MD5_REQUEST_SIGNING in ir.capabilities
+    assert not ir.unsupported_features
+
+
+def test_recovers_constructor_supplied_pair_and_composite_filters(tmp_path: Path) -> None:
+    (tmp_path / "build.gradle.kts").write_text(
+        'keiyoushi { name = "Manhuaren"; versionCode = 1; source { name = "漫画人"; '
+        'lang = "zh"; baseUrl = "https://m.example" } }'
+    )
+    source = tmp_path / "src" / "M.kt"
+    source.parent.mkdir()
+    source.write_text(
+        """
+        abstract class M : HttpSource() {
+            override fun getFilterList() = FilterList(
+                SortFilter("状态", arrayOf(Pair("热门", "0"), Pair("更新", "1"))),
+                CategoryFilter(
+                    "分类",
+                    arrayOf(Category("全部", "0", "0"), Category("热血", "0", "31")),
+                ),
+            )
+        }
+        private data class Category(val name: String, val type: String, val id: String)
+        private class SortFilter(name: String, val vals: Array<Pair<String, String>>) :
+            Filter.Select<String>(name, vals.map { it.first }.toTypedArray())
+        private class CategoryFilter(name: String, val vals: Array<Category>) :
+            Filter.Select<String>(name, vals.map { it.name }.toTypedArray())
+        """
+    )
+
+    ir = analyze_path(str(tmp_path))
+
+    assert ir.metadata.name == "漫画人"
+    assert [(spec.id, spec.title) for spec in ir.filter_specs] == [
+        ("sort", "状态"),
+        ("category", "分类"),
+    ]
+    assert [option.value for option in ir.filter_specs[0].options] == ["0", "1"]
+    assert [option.value for option in ir.filter_specs[1].options] == ["0:0", "0:31"]
+
+
 def test_omits_explicitly_unsupported_latest_but_detects_deep_links(tmp_path: Path) -> None:
     (tmp_path / "build.gradle.kts").write_text(
         'keiyoushi { name = "Links"; source { lang = "zh"; '

@@ -23,4 +23,5 @@ BLOCKED_OUTPUT_MARKERS = (
     "timed out",
     "timeout",
     "site unavailable",
+    "初始化失败",
 )

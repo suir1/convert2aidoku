@@ -59,6 +59,32 @@ def test_blocked_report_describes_runner_environment(tmp_path: Path) -> None:
     assert "does not mean the source site is globally unavailable" in markdown
 
 
+def test_blocked_report_describes_anonymous_initialization_requirement(tmp_path: Path) -> None:
+    report = ConversionReport(
+        status=ConversionStatus.BLOCKED,
+        input_ref="source",
+        source_id="zh.manhuaren",
+        validation=ValidationResult(
+            blocked=True,
+            stages=[
+                ValidationStage(
+                    name="core-live-smoke",
+                    kind=StageKind.LIVE_TEST,
+                    ok=False,
+                    output='errorResponse: {"message":"初始化失败"}',
+                    blocked=True,
+                )
+            ],
+        ),
+    )
+
+    write_report(tmp_path, report)
+
+    markdown = (tmp_path / "report.md").read_text(encoding="utf-8")
+    assert "remote API rejected anonymous-device initialization" in markdown
+    assert "valid User ID and Token" in markdown
+
+
 def test_report_lists_template_matches(tmp_path: Path) -> None:
     template = builtin_templates()[0]
     report = ConversionReport(
