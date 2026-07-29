@@ -19,6 +19,7 @@ from convert2aidoku.targeted_repair import (
     diagnostic_file_excerpts,
     repair_diagnostics,
     repair_required,
+    repair_round_limit,
     repair_state_signature,
 )
 from tests.scenarios import (
@@ -29,11 +30,45 @@ from tests.scenarios import (
 )
 
 
-def test_blocked_validation_repairs_only_when_contract_has_gaps() -> None:
+def test_blocked_validation_never_repairs_even_with_contract_gaps() -> None:
     validation = ValidationResult(build_ok=True, package_ok=True, blocked=True)
 
     assert not repair_required(validation, [], live=True)
-    assert repair_required(validation, ["relative URL gap"], live=True)
+    assert not repair_required(validation, ["relative URL gap"], live=True)
+
+
+def test_compile_and_contract_repairs_are_capped_at_one_round() -> None:
+    compiler_failure = ValidationResult(
+        stages=[ValidationStage(name="cargo-check", kind="check", ok=False, output="error")]
+    )
+    live_failure = ValidationResult(
+        stages=[
+            ValidationStage(name="core-live-smoke", kind="live_test", ok=False, output="wrong")
+        ],
+        build_ok=True,
+        package_ok=True,
+    )
+
+    assert repair_round_limit(compiler_failure, [], live=True, configured_limit=8) == 1
+    assert (
+        repair_round_limit(
+            ValidationResult(build_ok=True, package_ok=True),
+            ["contract gap"],
+            live=True,
+            configured_limit=8,
+        )
+        == 1
+    )
+    assert repair_round_limit(live_failure, [], live=True, configured_limit=8) == 8
+    assert (
+        repair_round_limit(
+            ValidationResult(build_ok=True, package_ok=True, blocked=True),
+            ["contract gap"],
+            live=True,
+            configured_limit=8,
+        )
+        == 0
+    )
 
 
 def test_repair_diagnostics_include_live_validation_evidence(monkeypatch) -> None:

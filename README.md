@@ -39,7 +39,7 @@ argument.
 [ai]
 base_url = "http://localhost:50048/v1"
 model = "your-model-id"
-max_repair_rounds = 3
+max_repair_rounds = 1
 timeout_seconds = 300
 generation_reasoning_effort = "auto"
 repair_reasoning_effort = "low"
@@ -71,6 +71,11 @@ supplied excerpt, match once, stay inside the generated-file allowlist, and pass
 safety checks. Full repair fallback is also Rust-only and inherits tool-owned resources.
 Live-behavior failures retain the full repair context. This keeps repair prompts small without
 weakening path, dependency, or code-execution boundaries.
+
+Repair is adaptive. Compiler and contract failures are capped at one compact repair even when a
+higher maximum is configured. Non-blocked live-behavior failures honor the explicit maximum.
+HTTP 403, TLS challenges, maintenance responses, DNS failures, and timeouts never trigger AI;
+their checkpoint is retained for a later `--resume` run.
 
 ## Analyze and convert
 

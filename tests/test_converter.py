@@ -208,6 +208,75 @@ def test_repair_stops_after_two_attempts_with_the_same_validation_state(
     assert any("Repair stopped" in message for message in progress)
 
 
+def test_compiler_failure_uses_at_most_one_repair_even_when_configured_higher(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    ai_calls = _install_ai_scenario(monkeypatch, repair=_baseline_generation())
+    monkeypatch.setattr(
+        "convert2aidoku.converter.validate_project",
+        lambda *_args, **_kwargs: ValidationResult(
+            stages=[
+                ValidationStage(
+                    name="cargo-check",
+                    kind="check",
+                    ok=False,
+                    output="error: synthetic compiler failure",
+                )
+            ]
+        ),
+    )
+
+    outcome = convert_source(
+        str(FIXTURE),
+        output=tmp_path / "generated" / "en.simple",
+        settings=conversion_settings(max_repair_rounds=8),
+        live=True,
+    )
+
+    assert outcome.report.status is ConversionStatus.FAILED
+    assert ai_calls.repair == 1
+    assert len(outcome.report.ai_rounds) == 2
+
+
+def test_blocked_live_validation_skips_ai_repair_and_preserves_checkpoint(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    ai_calls = _install_ai_scenario(monkeypatch, repair=_baseline_generation())
+    monkeypatch.setattr(
+        "convert2aidoku.converter.validate_project",
+        lambda *_args, **_kwargs: ValidationResult(
+            build_ok=True,
+            package_ok=True,
+            blocked=True,
+            stages=[
+                ValidationStage(
+                    name="core-live-smoke",
+                    kind="live_test",
+                    ok=False,
+                    blocked=True,
+                    output="runner-network probe returned HTTP 403",
+                )
+            ],
+        ),
+    )
+    progress: list[str] = []
+
+    outcome = convert_source(
+        str(FIXTURE),
+        output=tmp_path / "generated" / "en.simple",
+        settings=conversion_settings(max_repair_rounds=8),
+        live=True,
+        progress=progress.append,
+    )
+
+    assert outcome.report.status is ConversionStatus.BLOCKED
+    assert ai_calls.repair == 0
+    assert any("AI repair skipped" in item for item in progress)
+    assert any("resume the saved checkpoint" in item for item in outcome.report.warnings)
+
+
 def test_interrupted_conversion_resumes_saved_manifest_without_regeneration(
     tmp_path: Path,
     monkeypatch,

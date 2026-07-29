@@ -145,7 +145,11 @@ def convert(
     query: Annotated[str | None, typer.Option(help="Optional live-smoke search query.")] = None,
     max_repairs: Annotated[
         int | None,
-        typer.Option(min=0, max=MAX_REPAIR_ROUNDS, help="Maximum cumulative AI repair rounds."),
+        typer.Option(
+            min=0,
+            max=MAX_REPAIR_ROUNDS,
+            help="Maximum cumulative AI repairs; compiler/contract failures are capped at one.",
+        ),
     ] = None,
     generation_reasoning: Annotated[
         ReasoningEffort | None,

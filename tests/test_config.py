@@ -13,6 +13,7 @@ def test_loads_env_key_without_exposing_it(monkeypatch: pytest.MonkeyPatch) -> N
     assert "secret-value" not in repr(settings)
     assert settings.generation_reasoning_effort == ReasoningEffort.AUTO
     assert settings.repair_reasoning_effort == ReasoningEffort.LOW
+    assert settings.max_repair_rounds == 1
 
 
 def test_rejects_key_in_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

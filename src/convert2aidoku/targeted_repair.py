@@ -167,11 +167,30 @@ def repair_required(
 ) -> bool:
     if any(stage.kind.value == "toolchain" for stage in validation.stages):
         return False
-    if capability_gaps:
-        return True
     if validation.blocked:
         return False
+    if capability_gaps:
+        return True
     return not (validation.build_ok and validation.package_ok and (validation.live_ok or not live))
+
+
+def repair_round_limit(
+    validation: ValidationResult,
+    capability_gaps: list[str],
+    *,
+    live: bool,
+    configured_limit: int,
+) -> int:
+    """Cap cheap compiler/contract repair while preserving explicit live-repair control."""
+    if not repair_required(validation, capability_gaps, live=live):
+        return 0
+    build_or_contract_failure = (
+        bool(capability_gaps)
+        or not validation.build_ok
+        or not validation.package_ok
+        or any(not stage.ok and stage.kind.value != "live_test" for stage in validation.stages)
+    )
+    return min(configured_limit, 1) if build_or_contract_failure else configured_limit
 
 
 def repair_state_signature(

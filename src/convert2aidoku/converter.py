@@ -34,7 +34,12 @@ from .models import (
 )
 from .reports import classify_status, write_report
 from .scaffold import apply_generation_manifest, normalize_generation_manifest
-from .targeted_repair import TargetedRepair, repair_required, repair_state_signature
+from .targeted_repair import (
+    TargetedRepair,
+    repair_required,
+    repair_round_limit,
+    repair_state_signature,
+)
 from .validator import validate_project
 
 
@@ -158,13 +163,28 @@ class _ConversionRoundRunner:
 
     def repair(self, settings: AISettings) -> None:
         repair_number = max(0, len(self.checkpoint.ai_rounds) - 1)
+        if self.validation.blocked:
+            warning = (
+                "AI repair skipped because live validation is blocked by the external network; "
+                "resume the saved checkpoint after connectivity changes"
+            )
+            if warning not in self.checkpoint.warnings:
+                self.checkpoint.warnings.append(warning)
+                self.store.commit(checkpoint=self.checkpoint)
+            self.progress("AI repair skipped: live validation is externally blocked")
+            return
         if not repair_required(self.validation, self.capability_gaps, live=self.live):
             return
         with OpenAICompatibleClient(settings) as client:
-            while (
-                repair_required(self.validation, self.capability_gaps, live=self.live)
-                and repair_number < settings.max_repair_rounds
-            ):
+            while repair_required(self.validation, self.capability_gaps, live=self.live):
+                round_limit = repair_round_limit(
+                    self.validation,
+                    self.capability_gaps,
+                    live=self.live,
+                    configured_limit=settings.max_repair_rounds,
+                )
+                if repair_number >= round_limit:
+                    break
                 signature = repair_state_signature(self.validation, self.capability_gaps)
                 if self.checkpoint.repair_attempt_signatures.count(signature) >= 2:
                     warning = "repair stopped after two attempts with an unchanged validation state"
@@ -176,7 +196,7 @@ class _ConversionRoundRunner:
                 self.checkpoint.repair_attempt_signatures.append(signature)
                 self.store.commit(checkpoint=self.checkpoint)
                 repair_number += 1
-                self.progress(f"Requesting AI repair {repair_number}/{settings.max_repair_rounds}")
+                self.progress(f"Requesting AI repair {repair_number}/{round_limit}")
                 repair = TargetedRepair(
                     ir=self.ir,
                     store=self.store,
