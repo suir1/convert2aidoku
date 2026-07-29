@@ -61,13 +61,16 @@ def test_initialize_and_commit_preserve_raw_typed_state_in_order(
 
     assert writes == [
         "source-ir.json",
+        "implementation-ir.json",
         "checkpoint.json",
         "source-ir.json",
+        "implementation-ir.json",
         "round-01.json",
         "checkpoint.json",
     ]
     assert store.read_checkpoint() == checkpoint
     assert store.read_source_ir().license_text is None
+    assert store.read_implementation_ir().source_id == ir.metadata.source_id
     assert store.read_manifest(checkpoint.current_manifest) == manifest
     assert "private license body" not in (workspace / "source-ir.json").read_text()
     assert not list(workspace.rglob(".*.tmp-*"))
@@ -152,6 +155,7 @@ def test_publish_replaces_audit_and_returns_stable_file_order(tmp_path: Path) ->
     assert files == [
         ".c2a/checkpoint.json",
         ".c2a/source-ir.json",
+        ".c2a/implementation-ir.json",
         ".c2a/manifests/round-01.json",
         ".c2a/manifests/round-02.json",
     ]
@@ -177,6 +181,8 @@ def test_resume_restores_an_installed_audit(tmp_path: Path) -> None:
     )
     original.commit(manifest=ManifestWrite(1, _manifest()))
     original.publish_audit(output)
+    # Installed outputs from before Implementation IR remain resumable.
+    (output / ".c2a" / "implementation-ir.json").unlink()
     shutil.rmtree(original_workspace)
     restored_workspace = tmp_path / "restored-workspace"
 
@@ -189,6 +195,7 @@ def test_resume_restores_an_installed_audit(tmp_path: Path) -> None:
     assert not output.exists()
     assert (restored.project / "keep.txt").read_text() == "generated source"
     assert restored.read_source_ir() == ir.model_copy(update={"license_text": None})
+    assert restored.read_implementation_ir().source_id == ir.metadata.source_id
     assert restored.read_round(1) == _manifest()
 
 

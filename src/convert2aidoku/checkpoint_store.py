@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import InputError
+from .implementation_ir import ImplementationIR, project_implementation_ir
 from .models import ConversionCheckpoint, GenerationManifest, SourceIR
 
 
@@ -48,6 +49,7 @@ class CheckpointStore:
                     f"no resumable conversion workspace for output: {installed_output}"
                 )
             store._restore_installed(installed_output)
+        store._ensure_implementation_ir()
         return store, store.read_checkpoint()
 
     @property
@@ -65,6 +67,10 @@ class CheckpointStore:
             self._atomic_write(
                 self.workspace / "source-ir.json",
                 source_ir.model_dump_json(indent=2, exclude={"license_text"}) + "\n",
+            )
+            self._atomic_write(
+                self.workspace / "implementation-ir.json",
+                project_implementation_ir(source_ir).model_dump_json(indent=2) + "\n",
             )
         if manifest is not None:
             relative = self.round_path(manifest.number)
@@ -93,6 +99,13 @@ class CheckpointStore:
         except (OSError, ValueError) as exc:
             raise InputError(f"invalid saved SourceIR {path}: {exc}") from exc
 
+    def read_implementation_ir(self) -> ImplementationIR:
+        path = self.workspace / "implementation-ir.json"
+        try:
+            return ImplementationIR.model_validate_json(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise InputError(f"invalid saved Implementation IR {path}: {exc}") from exc
+
     def read_manifest(self, relative: str) -> GenerationManifest:
         path = self._manifest_path(relative)
         if not path.is_file():
@@ -117,12 +130,20 @@ class CheckpointStore:
         destination.mkdir()
         shutil.copy2(self.workspace / "checkpoint.json", destination / "checkpoint.json")
         shutil.copy2(self.workspace / "source-ir.json", destination / "source-ir.json")
+        shutil.copy2(
+            self.workspace / "implementation-ir.json",
+            destination / "implementation-ir.json",
+        )
         shutil.copytree(manifests, destination / "manifests")
         return self.audit_files(project)
 
     def audit_files(self, project: Path | None = None) -> list[str]:
         manifest_root = (project / ".c2a" if project is not None else self.workspace) / "manifests"
-        files = [".c2a/checkpoint.json", ".c2a/source-ir.json"]
+        files = [
+            ".c2a/checkpoint.json",
+            ".c2a/source-ir.json",
+            ".c2a/implementation-ir.json",
+        ]
         files.extend(f".c2a/manifests/{path.name}" for path in sorted(manifest_root.glob("*.json")))
         return files
 
@@ -144,12 +165,32 @@ class CheckpointStore:
             installed_audit = self.project / ".c2a"
             shutil.copy2(installed_audit / "checkpoint.json", self.workspace / "checkpoint.json")
             shutil.copy2(installed_audit / "source-ir.json", self.workspace / "source-ir.json")
+            implementation_path = installed_audit / "implementation-ir.json"
+            if implementation_path.is_file():
+                shutil.copy2(implementation_path, self.workspace / "implementation-ir.json")
+            else:
+                source_ir = self.read_source_ir()
+                self._atomic_write(
+                    self.workspace / "implementation-ir.json",
+                    project_implementation_ir(source_ir).model_dump_json(indent=2) + "\n",
+                )
             shutil.copytree(installed_audit / "manifests", self.workspace / "manifests")
         except BaseException:
             if self.project.exists() and not output.exists():
                 os.replace(self.project, output)
             shutil.rmtree(self.workspace, ignore_errors=True)
             raise
+
+    def _ensure_implementation_ir(self) -> None:
+        path = self.workspace / "implementation-ir.json"
+        if path.is_file():
+            self.read_implementation_ir()
+            return
+        source_ir = self.read_source_ir()
+        self._atomic_write(
+            path,
+            project_implementation_ir(source_ir).model_dump_json(indent=2) + "\n",
+        )
 
     @staticmethod
     def round_path(number: int) -> str:
