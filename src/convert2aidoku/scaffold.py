@@ -412,6 +412,18 @@ def _normalize_pinned_model_fields(content: str) -> str:
         for function in inspection.functions
         if re.search(r"->\s*(?:core::option::)?Option\s*<\s*f(?:32|64)\s*>", function.text)
     }
+    option_f32_bindings = {
+        function.node.start_byte: {
+            match.group("name")
+            for match in re.finditer(
+                r"\blet\s+(?:mut\s+)?(?P<name>[A-Za-z_]\w*)\s*=\s*"
+                r"[^;]{0,800}?\.parse\s*::\s*<\s*f32\s*>\s*\(\s*\)\s*"
+                r"\.ok\s*\(\s*\)\s*;",
+                function.text,
+            )
+        }
+        for function in inspection.functions
+    }
     for node in inspection.nodes("struct_expression"):
         name_node = node.child_by_field_name("name")
         body = node.child_by_field_name("body")
@@ -446,6 +458,12 @@ def _normalize_pinned_model_fields(content: str) -> str:
             elif type_name == "Manga" and field_name == "status" and value.startswith("Some("):
                 replacement_value = value[5:-1]
             elif type_name == "Chapter" and field_name in {"chapter_number", "volume_number"}:
+                owner = node
+                while owner.parent is not None and owner.type != "function_item":
+                    owner = owner.parent
+                local_option_f32_bindings = option_f32_bindings.get(owner.start_byte, set())
+                if value in local_option_f32_bindings:
+                    continue
                 direct_option_call = re.fullmatch(
                     r"(?:Self::)?(?P<name>[A-Za-z_]\w*)\([\s\S]*\)",
                     value,
@@ -455,10 +473,18 @@ def _normalize_pinned_model_fields(content: str) -> str:
                     and direct_option_call.group("name") in option_number_functions
                 ):
                     continue
+                invalid_bound_cast = re.fullmatch(
+                    r"Some\(\(\s*(?P<name>[A-Za-z_]\w*)\s*\)\s+as\s+f32\)", value
+                )
                 invalid_option_cast = re.fullmatch(
                     r"Some\(\((?P<value>[\s\S]+\.ok\(\))\)\s+as\s+f32\)", value
                 )
-                if invalid_option_cast is not None:
+                if (
+                    invalid_bound_cast is not None
+                    and invalid_bound_cast.group("name") in local_option_f32_bindings
+                ):
+                    replacement_value = invalid_bound_cast.group("name")
+                elif invalid_option_cast is not None:
                     replacement_value = invalid_option_cast.group("value")
                 else:
                     invalid_option_call = re.fullmatch(
@@ -1378,6 +1404,33 @@ def _normalize_legacy_page_context(content: str) -> str:
 
 
 def _normalize_page_url_context(content: str) -> str:
+    replacements: list[tuple[str, str]] = []
+    for function in RustInspection.from_content(content).functions:
+        normalized = function.text
+        contexts = {
+            match.group("context")
+            for match in re.finditer(
+                r"PageContext::from\(\[\(\s*\"referer\"\.into\(\),\s*"
+                r"(?P<context>[A-Za-z_]\w*)\.clone\(\)\s*\)\]\)",
+                normalized,
+            )
+        }
+        for context in contexts:
+            normalized = re.sub(
+                rf"\blet\s+(?P<mut>mut\s+)?{re.escape(context)}\s*=\s*"
+                r"(?P<owner>[A-Za-z_]\w*)\.url\.clone\(\)\s*;",
+                lambda match, context=context: (
+                    f"let {match.group('mut') or ''}{context} = "
+                    f"{match.group('owner')}.url.clone().unwrap_or_else(|| "
+                    f"{match.group('owner')}.key.clone());"
+                ),
+                normalized,
+            )
+        if normalized != function.text:
+            replacements.append((function.text, normalized))
+    for original, replacement in replacements:
+        content = content.replace(original, replacement, 1)
+
     replacements: list[tuple[int, int, str]] = []
     for node in RustInspection.from_content(content).nodes("call_expression"):
         function = node.child_by_field_name("function")
@@ -1487,6 +1540,33 @@ def _normalize_image_request_result(content: str) -> str:
                 and "Request::get" in receiver.text.decode("utf-8", errors="replace")
             ):
                 edits.append((begin, end, b"Ok(" + receiver.text + b")"))
+    encoded = content.encode("utf-8")
+    for begin, end, replacement in sorted(edits, reverse=True):
+        encoded = encoded[:begin] + replacement + encoded[end:]
+    content = encoded.decode("utf-8")
+
+    edits = []
+    for function in RustInspection.from_content(content).functions:
+        signature = function.text[: function.text.find("{")]
+        if re.search(r"->\s*(?:aidoku::)?Result\s*<\s*Request\s*>", signature) is None:
+            continue
+        for node in RustInspection.from_content(function.text).nodes("try_expression"):
+            expression = node.named_child(0)
+            if expression is None or expression.type != "call_expression":
+                continue
+            callee = expression.child_by_field_name("function")
+            if callee is None or callee.type != "field_expression":
+                continue
+            field = callee.child_by_field_name("field")
+            if field is None or field.text != b"header":
+                continue
+            edits.append(
+                (
+                    function.node.start_byte + node.start_byte,
+                    function.node.start_byte + node.end_byte,
+                    expression.text,
+                )
+            )
     encoded = content.encode("utf-8")
     for begin, end, replacement in sorted(edits, reverse=True):
         encoded = encoded[:begin] + replacement + encoded[end:]
@@ -1923,6 +2003,113 @@ def _normalize_graphql_body_fragment(content: str) -> str:
         wrap,
         content,
     )
+
+
+def _graphql_field_end(query: str, start: int) -> int | None:
+    opening = query.find("{{", start)
+    if opening < 0:
+        return None
+    depth = 0
+    index = opening
+    while index < len(query) - 1:
+        token = query[index : index + 2]
+        if token == "{{":
+            depth += 1
+            index += 2
+            continue
+        if token == "}}":
+            depth -= 1
+            index += 2
+            if depth == 0:
+                return index
+            continue
+        index += 1
+    return None
+
+
+def _split_graphql_manga_query(query: str) -> tuple[str, str] | None:
+    detail_start = query.find("comicById")
+    chapters_start = query.find("chaptersByComicId")
+    if detail_start < 0 or chapters_start < 0:
+        return None
+    detail_end = _graphql_field_end(query, detail_start)
+    chapters_end = _graphql_field_end(query, chapters_start)
+    if detail_end is None or chapters_end is None:
+        return None
+    first_start = min(detail_start, chapters_start)
+    last_end = max(detail_end, chapters_end)
+    prefix = query[:first_start]
+    suffix = query[last_end:]
+    detail = prefix + query[detail_start:detail_end] + suffix
+    chapters = prefix + query[chapters_start:chapters_end] + suffix
+    return detail, chapters
+
+
+def _normalize_graphql_manga_update_projection(content: str) -> str:
+    replacements: list[tuple[str, str]] = []
+    for function in RustInspection.from_content(content).functions:
+        if function.name != "manga_query" or "(true, false)" in function.text:
+            continue
+        query_match = re.search(
+            r'format!\(\s*(?P<literal>"(?:\\.|[^"\\])*")\s*\)',
+            function.text,
+        )
+        if query_match is None:
+            continue
+        try:
+            query = json.loads(query_match.group("literal"))
+        except json.JSONDecodeError:
+            continue
+        projections = _split_graphql_manga_query(query)
+        if projections is None:
+            continue
+        details_query, chapters_query = projections
+        signature = re.search(
+            r"(?P<head>fn\s+manga_query\s*\((?P<params>[\s\S]*?)\))"
+            r"(?P<return>\s*->\s*String)",
+            function.text,
+        )
+        if signature is None or "needs_details" in signature.group("params"):
+            continue
+        params = signature.group("params").rstrip()
+        separator = " " if params.endswith(",") else ", "
+        new_signature = (
+            f"fn manga_query({params}{separator}"
+            f"needs_details: bool, needs_chapters: bool){signature.group('return')}"
+        )
+        combined_literal = json.dumps(query, ensure_ascii=False)
+        details_literal = json.dumps(details_query, ensure_ascii=False)
+        chapters_literal = json.dumps(chapters_query, ensure_ascii=False)
+        projection = (
+            "match (needs_details, needs_chapters) {\n"
+            f"            (true, true) => format!({combined_literal}),\n"
+            f"            (true, false) => format!({details_literal}),\n"
+            f"            (false, true) => format!({chapters_literal}),\n"
+            "            _ => String::new(),\n"
+            "        }"
+        )
+        normalized = function.text.replace(signature.group(0), new_signature, 1)
+        normalized = normalized.replace(query_match.group(0), projection, 1)
+        replacements.append((function.text, normalized))
+    for original, replacement in replacements:
+        content = content.replace(original, replacement, 1)
+
+    replacements = []
+    for function in RustInspection.from_content(content).named("get_manga_update"):
+        if "needs_details" not in function.text or "needs_chapters" not in function.text:
+            continue
+        normalized = re.sub(
+            r"self\.manga_query\((?P<args>[^(),\n]+)\)",
+            lambda match: (
+                f"self.manga_query({match.group('args').strip()}, needs_details, needs_chapters)"
+            ),
+            function.text,
+        )
+        if normalized != function.text:
+            replacements.append((function.text, normalized))
+    for original, replacement in replacements:
+        content = content.replace(original, replacement, 1)
+    return content
 
 
 def _normalize_graphql_request_body(content: str) -> str:
@@ -3008,6 +3195,7 @@ def normalize_pinned_aidoku_rust(
     content = _normalize_aidoku_api_paths(content)
     content = _normalize_generic_deserialize(content)
     content = _normalize_graphql_body_fragment(content)
+    content = _normalize_graphql_manga_update_projection(content)
     content = _normalize_image_request_result(content)
     content = _normalize_result_request_tails(content)
     content = _normalize_detail_partial_move(content)

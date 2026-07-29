@@ -1017,6 +1017,87 @@ fn deep_link() -> DeepLinkResult {
     assert normalize_pinned_aidoku_rust(normalized) == normalized
 
 
+def test_normalizer_repairs_bound_optional_numbers_context_and_request_headers() -> None:
+    content = """
+fn chapter(serial: &str) -> Chapter {
+    let number = serial.parse::<f32>().ok();
+    Chapter {
+        chapter_number: Some((number) as f32),
+        ..Default::default()
+    }
+}
+fn pages(&self, chapter: Chapter, image_url: String) -> Vec<Page> {
+    let context = chapter.url.clone();
+    vec![Page {
+        content: PageContent::url_context(
+            image_url,
+            PageContext::from([("referer".into(), context.clone())]),
+        ),
+        ..Default::default()
+    }]
+}
+fn get_image_request(&self, url: String, context: Option<PageContext>) -> Result<Request> {
+    let referer = context
+        .as_ref()
+        .and_then(|value| value.get("referer"))
+        .map(String::as_str)
+        .unwrap_or(BASE_URL);
+    Ok(Request::get(url)?
+        .header("accept", "image/*")?
+        .header("referer", &referer))
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "chapter_number: number" in normalized
+    assert "Some((number) as f32)" not in normalized
+    assert (
+        "let context = chapter.url.clone().unwrap_or_else(|| chapter.key.clone());"
+    ) in normalized
+    assert '.header("accept", "image/*")?' not in normalized
+    assert '.header("accept", "image/*")' in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
+def test_normalizer_splits_combined_graphql_manga_update_projection() -> None:
+    content = """
+fn manga_query(&self, manga_id: &str) -> String {
+    let fields = Self::comic_fields();
+    format!(
+        "query chapterByComicId($comicId: ID!) {{ \
+        comicById(comicId: $comicId) {{ {fields} }} \
+        chaptersByComicId(comicId: $comicId) {{ id serial }} }}"
+    )
+}
+fn get_manga_update(
+    &self,
+    manga_id: &str,
+    needs_details: bool,
+    needs_chapters: bool,
+) {
+    self.graphql(&self.manga_query(manga_id));
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert (
+        "fn manga_query(&self, manga_id: &str, needs_details: bool, needs_chapters: bool)"
+        in normalized
+    )
+    assert "match (needs_details, needs_chapters)" in normalized
+    assert '(true, false) => format!("query chapterByComicId' in normalized
+    details_arm = normalized.split("(true, false) =>", 1)[1].split("(false, true) =>", 1)[0]
+    chapters_arm = normalized.split("(false, true) =>", 1)[1].split("_ =>", 1)[0]
+    assert "comicById" in details_arm
+    assert "chaptersByComicId" not in details_arm
+    assert "comicById" not in chapters_arm
+    assert "chaptersByComicId" in chapters_arm
+    assert "self.manga_query(manga_id, needs_details, needs_chapters)" in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
 def test_normalizer_repairs_request_tails_partial_detail_move_and_dynamic_api_base() -> None:
     content = """
 const API: &str = "https://api.example.com";
