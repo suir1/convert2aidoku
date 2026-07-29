@@ -12,6 +12,7 @@ from .decompiled_input import (
     DecompiledDtoShape,
     decompiled_detail_uses_api_envelope,
     decompiled_dto_shapes,
+    decompiled_rank_list_wraps_comic,
 )
 from .dependency_policy import evaluate_dependency_policy
 from .models import Capability, GeneratedResources, GenerationManifest, SourceIR
@@ -317,12 +318,7 @@ def evaluate_manifest_contract(
         add("input chapters expose date_upload but generated chapters omit date_uploaded")
     if "scanlator" in input_content and "scanlators" not in rust_content:
         add("input chapters expose scanlator but generated chapters omit scanlators")
-    if re.search(
-        r"\bclass\s+RankResult\b[\s\S]{0,1000}?\bList<ListItem>\s+list\b", input_content
-    ) and re.search(
-        r"[\"]/ranks\?[\s\S]{0,3000}?\bApiResponse<ListResult>\b",
-        rust_content,
-    ):
+    if decompiled_rank_list_wraps_comic(ir.files) and _rank_helper_skips_item_wrapper(rust):
         add(
             "rank endpoint returns RankResult.list entries wrapping the manga in ListItem.comic; "
             "generated code incorrectly deserializes ranks as a direct ListResult<Comic>, "
@@ -690,6 +686,26 @@ def _detail_helper_skips_api_envelope(rust: RustInspection) -> bool:
         ):
             return True
     return False
+
+
+def _rank_helper_skips_item_wrapper(rust: RustInspection) -> bool:
+    text = "\n".join(function.text for function in rust.named("get_search_manga_list"))
+    if '"/ranks' not in text:
+        return False
+    if re.search(
+        r"contains\(\s*\"/ranks\"\s*\)[\s\S]{0,1800}?"
+        r"ApiResponse\s*<[^>]*<\s*(?:C2a)?RankItem\s*>>"
+        r"[\s\S]{0,1800}?\.comic\b",
+        text,
+    ):
+        return False
+    return (
+        re.search(
+            r"ApiResponse\s*<(?:ListResult|[A-Za-z_]\w*\s*<\s*Comic\s*>)>",
+            text,
+        )
+        is not None
+    )
 
 
 def _has_idempotent_get_retry(rust: RustInspection) -> bool:

@@ -59,12 +59,8 @@ def _report(
         failed_ai_exchanges=checkpoint.failed_ai_exchanges,
         generated_files=_generated_files(store, checkpoint),
         template_matches=match_templates(ir),
-        warnings=list(
-            dict.fromkeys(
-                checkpoint.warnings + checkpoint.manifest_warnings + checkpoint.capability_gaps
-            )
-        ),
-        unsupported_features=list(dict.fromkeys(checkpoint.unsupported_features)),
+        warnings=list(dict.fromkeys(checkpoint.warnings + checkpoint.capability_gaps)),
+        unsupported_features=list(dict.fromkeys(ir.unsupported_features)),
         validation=validation,
         provenance={
             "input_commit": ir.commit,

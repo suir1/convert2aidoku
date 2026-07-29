@@ -40,6 +40,7 @@ from tests.scenarios import (
     ScriptedAICalls,
     conversion_settings,
     generation_manifest,
+    minimal_source_ir,
     scaffold_project,
     scripted_ai_client,
 )
@@ -688,6 +689,39 @@ def test_detail_api_response_envelope_is_a_contract_gap() -> None:
 
     assert any("ApiResponse<ComicDetailResult>" in gap for gap in gaps)
     assert any("response.results" in gap for gap in gaps)
+
+
+def test_rank_item_comic_wrapper_is_a_contract_gap() -> None:
+    ir = minimal_source_ir(
+        files=[
+            SourceFile(
+                path="RankResult.java",
+                sha256="0",
+                content="class RankResult { private final List<ListItem> list; }",
+            ),
+            SourceFile(
+                path="ListItem.java",
+                sha256="0",
+                content="class ListItem { private final ComicSummary comic; }",
+            ),
+        ]
+    )
+    manifest = generation_manifest(
+        """
+fn get_search_manga_list(&self, url: String) -> Result<MangaPageResult> {
+    let rank_path = "/ranks?type=1";
+    let response: ApiResponse<PageResult<Comic>> = self.json(url)?;
+    Ok(MangaPageResult {
+        entries: response.results.list.into_iter().map(Self::manga).collect(),
+        has_next_page: false,
+    })
+}
+"""
+    )
+
+    gaps = _contract_messages(ir, manifest)
+
+    assert any("RankResult.list" in gap and "ListItem.comic" in gap for gap in gaps)
 
 
 def test_recovered_filter_defaults_are_injected_deterministically() -> None:

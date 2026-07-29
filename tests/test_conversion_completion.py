@@ -8,6 +8,7 @@ from convert2aidoku.conversion_completion import complete_conversion
 from convert2aidoku.models import (
     ConversionCheckpoint,
     ConversionStatus,
+    GenerationManifest,
     SourceIR,
     ValidationResult,
 )
@@ -54,6 +55,45 @@ def test_completion_installs_verified_source_and_removes_workspace(tmp_path: Pat
     assert (output / "report.json").is_file()
     assert (output / ".c2a" / "checkpoint.json").is_file()
     assert not store.workspace.exists()
+
+
+def test_completion_reports_deterministic_findings_not_raw_manifest_claims(
+    tmp_path: Path,
+) -> None:
+    store, ir, checkpoint, output = _completion_scenario(tmp_path)
+    ir = ir.model_copy(update={"unsupported_features": ["input unsupported"]})
+    raw_manifest = generation_manifest("fn source() {}").model_copy(
+        update={
+            "warnings": ["model warning superseded by deterministic projection"],
+            "unsupported_features": ["model unsupported claim"],
+        }
+    )
+    store.commit(manifest=ManifestWrite(1, raw_manifest))
+    checkpoint.warnings = ["input or provider warning"]
+    checkpoint.manifest_warnings = list(raw_manifest.warnings)
+    checkpoint.capability_gaps = ["deterministic contract gap"]
+    checkpoint.unsupported_features = [
+        "input unsupported",
+        *raw_manifest.unsupported_features,
+    ]
+
+    outcome = complete_conversion(
+        store,
+        ir,
+        checkpoint,
+        ValidationResult(build_ok=True, package_ok=True, live_ok=True),
+    )
+
+    assert outcome.report.warnings == [
+        "input or provider warning",
+        "deterministic contract gap",
+    ]
+    assert outcome.report.unsupported_features == ["input unsupported"]
+    audited = GenerationManifest.model_validate_json(
+        (output / ".c2a" / "manifests" / "round-01.json").read_text(encoding="utf-8")
+    )
+    assert audited.warnings == raw_manifest.warnings
+    assert audited.unsupported_features == raw_manifest.unsupported_features
 
 
 def test_completion_keeps_contract_failure_resumable(tmp_path: Path) -> None:

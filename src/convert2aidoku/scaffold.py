@@ -10,7 +10,10 @@ from typing import Any
 from jinja2 import Environment, StrictUndefined
 
 from .constants import MAX_GENERATED_FILE_CHARS
-from .decompiled_input import decompiled_detail_uses_api_envelope
+from .decompiled_input import (
+    decompiled_detail_uses_api_envelope,
+    decompiled_rank_list_wraps_comic,
+)
 from .dependency_policy import (
     AIDOKU_RS_REPOSITORY,
     AIDOKU_RS_REV,
@@ -340,6 +343,13 @@ def _normalize_pinned_model_shapes(content: str) -> str:
         ".unwrap_or(core::cmp::Ordering::Equal))",
         content,
     )
+    content = re.sub(
+        r"(?P<right>[A-Za-z_]\w*)\.(?P<field>chapter_number|volume_number)"
+        r"\.total_cmp\(&(?P<left>[A-Za-z_]\w*)\.(?P=field)\)",
+        r"\g<right>.\g<field>.partial_cmp(&\g<left>.\g<field>)"
+        r".unwrap_or(core::cmp::Ordering::Equal)",
+        content,
+    )
     content = re.sub(r"\bhas_next\s*:", "has_next_page:", content)
     content = re.sub(
         r"let\s+pages\s*=\s*if\s+words\.is_empty\(\)\s*\{\s*contents\s*\}",
@@ -353,6 +363,36 @@ def _normalize_pinned_model_shapes(content: str) -> str:
             content,
         )
     return content
+
+
+def _normalize_optional_model_shorthand(content: str) -> str:
+    optional = {
+        "Manga": {"url", "cover", "description"},
+        "Chapter": {"url", "title"},
+    }
+    edits: list[tuple[int, int, bytes]] = []
+    for node in RustInspection.from_content(content).nodes("struct_expression"):
+        name_node = node.child_by_field_name("name")
+        body = node.child_by_field_name("body")
+        if name_node is None or body is None:
+            continue
+        fields = optional.get(name_node.text.decode("utf-8", errors="replace"), set())
+        for field in body.named_children:
+            if field.type != "shorthand_field_initializer":
+                continue
+            field_name = field.text.decode("utf-8", errors="replace")
+            if field_name in fields:
+                edits.append(
+                    (
+                        field.start_byte,
+                        field.end_byte,
+                        f"{field_name}: Some({field_name})".encode(),
+                    )
+                )
+    encoded = content.encode("utf-8")
+    for begin, end, replacement in reversed(edits):
+        encoded = encoded[:begin] + replacement + encoded[end:]
+    return encoded.decode("utf-8")
 
 
 def _normalize_pinned_model_fields(content: str) -> str:
@@ -981,13 +1021,13 @@ def _normalize_mutated_aidoku_models(content: str) -> str:
 
     content = re.sub(
         r"(?m)^(?P<indent>[ \t]*)(?P<target>manga)\."
-        r"(?P<field>cover|description)\s*=\s*(?P<expression>[^;\n]+);",
+        r"(?P<field>url|cover|description)\s*=\s*(?P<expression>[^;\n]+);",
         wrap_optional,
         content,
     )
     content = re.sub(
         r"(?m)^(?P<indent>[ \t]*)(?P<target>chapter)\."
-        r"(?P<field>title)\s*=\s*(?P<expression>[^;\n]+);",
+        r"(?P<field>url|title)\s*=\s*(?P<expression>[^;\n]+);",
         wrap_optional,
         content,
     )
@@ -1289,7 +1329,34 @@ def _normalize_page_url_context(content: str) -> str:
             continue
         context = arguments.named_children[1]
         context_text = context.text.decode("utf-8", errors="replace")
-        if re.fullmatch(r"[A-Za-z_]\w*url(?:\.clone\(\))?", context_text) is None:
+        context_name = context_text.removesuffix(".clone()")
+        if re.fullmatch(r"[A-Za-z_]\w*", context_name) is None:
+            continue
+        owner = node
+        while owner.parent is not None and owner.type != "function_item":
+            owner = owner.parent
+        if owner.type != "function_item":
+            continue
+        function_text = owner.text.decode("utf-8", errors="replace")
+        signature = function_text.split("{", 1)[0]
+        string_context = (
+            re.search(
+                rf"\b{re.escape(context_name)}\s*:\s*(?:aidoku::alloc::)?String\b",
+                signature,
+            )
+            is not None
+        )
+        if not string_context:
+            binding = re.search(
+                rf"\blet\s+(?:mut\s+)?{re.escape(context_name)}\s*=\s*"
+                r"(?P<value>[^;]+);",
+                function_text,
+            )
+            string_context = binding is not None and any(
+                marker in binding.group("value")
+                for marker in ("url", "format!", "String::", ".to_string()")
+            )
+        if not string_context:
             continue
         replacements.append(
             (
@@ -1305,6 +1372,14 @@ def _normalize_page_url_context(content: str) -> str:
 
 
 def _normalize_image_request_result(content: str) -> str:
+    content = re.sub(
+        r"(?P<context>[A-Za-z_]\w*)\s*\.map\(\s*\|(?P<value>[A-Za-z_]\w*)\|\s*"
+        r"(?P=value)\.referer\s*\)",
+        lambda match: (
+            f'{match.group("context")}.as_ref().and_then(|value| value.get("referer")).cloned()'
+        ),
+        content,
+    )
     content = re.sub(
         r"let\s+(?P<referer>[A-Za-z_]\w*)\s*=\s*"
         r"(?P<context>[A-Za-z_]\w*)\.unwrap_or_else\(\|\|\s*"
@@ -1385,6 +1460,56 @@ def _normalize_result_request_tails(content: str) -> str:
     return encoded.decode("utf-8")
 
 
+def _normalize_generic_deserialize(content: str) -> str:
+    pattern = re.compile(
+        r"(?P<derive>#\[derive\([^\]]*\bDeserialize\b[^\]]*\)\]\s*)"
+        r"(?P<attributes>(?:#\[[^\]]+\]\s*)*)"
+        r"(?P<header>struct\s+(?P<name>[A-Za-z_]\w*)\s*<(?P<params>[^>{}]+)>\s*\{)"
+        r"(?P<body>[\s\S]*?\n\})"
+    )
+
+    def add_bound(match: re.Match[str]) -> str:
+        attributes = match.group("attributes")
+        if "serde(bound" in attributes or "serde(default)" not in match.group("body"):
+            return match.group(0)
+        params = [item.strip() for item in match.group("params").split(",")]
+        names = [item.split(":", 1)[0].strip() for item in params]
+        if not names or not all(re.fullmatch(r"[A-Za-z_]\w*", name) for name in names):
+            return match.group(0)
+        bound = ", ".join(f"{name}: aidoku::serde::Deserialize<'de>" for name in names)
+        return (
+            match.group("derive")
+            + f'#[serde(bound(deserialize = "{bound}"))]\n'
+            + attributes
+            + match.group("header")
+            + match.group("body")
+        )
+
+    content = pattern.sub(add_bound, content)
+    content = re.sub(
+        r"(?P<type>[A-Za-z_]\w*)\s*:\s*Deserialize\s*<\s*'static\s*>",
+        r"\g<type>: for<'de> Deserialize<'de>",
+        content,
+    )
+    generic_structs = re.findall(
+        r"\bstruct\s+(?P<name>[A-Za-z_]\w*)\s*<(?P<params>[^>{}]+)>\s*\{",
+        content,
+    )
+    for name, params in generic_structs:
+        declarations = [item.strip() for item in params.split(",")]
+        arguments = [item.split(":", 1)[0].strip() for item in declarations]
+        if not arguments or not all(
+            re.fullmatch(r"[A-Za-z_]\w*", argument) for argument in arguments
+        ):
+            continue
+        content = re.sub(
+            rf"\bimpl\s+{re.escape(name)}\s*\{{",
+            f"impl<{', '.join(declarations)}> {name}<{', '.join(arguments)}> {{",
+            content,
+        )
+    return content
+
+
 def _normalize_detail_partial_move(content: str) -> str:
     replacements: list[tuple[str, str]] = []
     for function in RustInspection.from_content(content).functions:
@@ -1403,6 +1528,33 @@ def _normalize_detail_partial_move(content: str) -> str:
                 details = branch
             elif chapters is None and "&detail" in text:
                 chapters = branch
+        if details is None or chapters is None:
+            branches = list(local.nodes("if_expression"))
+            for candidate in branches:
+                candidate_text = candidate.text.decode("utf-8", errors="replace")
+                moved = re.findall(
+                    r"\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\.comic\b",
+                    candidate_text,
+                )
+                if not moved:
+                    continue
+                borrowed = next(
+                    (
+                        later
+                        for later in branches
+                        if later.start_byte > candidate.start_byte
+                        and "chapters" in later.text.decode("utf-8", errors="replace")
+                        and any(
+                            f"&{owner}" in later.text.decode("utf-8", errors="replace")
+                            for owner in moved
+                        )
+                    ),
+                    None,
+                )
+                if borrowed is not None:
+                    details = candidate
+                    chapters = borrowed
+                    break
         if details is None or chapters is None or details.end_byte >= chapters.start_byte:
             continue
         encoded = function.text.encode("utf-8")
@@ -1766,14 +1918,25 @@ def _normalize_pagination_result_impls(content: str) -> str:
         if not {"total", "limit", "offset"}.issubset(fields):
             continue
         has_impl = re.search(
-            rf"\bimpl\s+{re.escape(struct.name)}\s*\{{[\s\S]*?"
+            rf"\bimpl(?:\s*<[^>]+>)?\s+{re.escape(struct.name)}"
+            r"(?:\s*<[^>]+>)?\s*\{[\s\S]*?"
             r"\bfn\s+has_next\s*\(",
             content,
         )
         if has_impl is not None:
             continue
+        generic = re.search(
+            rf"\bstruct\s+{re.escape(struct.name)}\s*<(?P<params>[^>]+)>",
+            struct.text,
+        )
+        header = f"impl {struct.name}"
+        if generic is not None:
+            declarations = [item.strip() for item in generic.group("params").split(",")]
+            arguments = [item.split(":", 1)[0].strip() for item in declarations]
+            if arguments and all(re.fullmatch(r"[A-Za-z_]\w*", argument) for argument in arguments):
+                header = f"impl<{', '.join(declarations)}> {struct.name}<{', '.join(arguments)}>"
         additions.append(
-            f"impl {struct.name} {{\n"
+            f"{header} {{\n"
             "    pub fn has_next(&self) -> bool {\n"
             "        self.total >= self.offset + self.limit\n"
             "    }\n"
@@ -2556,6 +2719,7 @@ def normalize_pinned_aidoku_rust(
     content = _normalize_safe_std_paths(content, remove_extern_std=remove_extern_std)
     content = _normalize_graphql_request_body(content)
     content = _normalize_aidoku_api_paths(content)
+    content = _normalize_generic_deserialize(content)
     content = _normalize_graphql_body_fragment(content)
     content = _normalize_image_request_result(content)
     content = _normalize_result_request_tails(content)
@@ -2596,6 +2760,7 @@ def normalize_pinned_aidoku_rust(
     )
     content = _normalize_idempotent_get_retry(content)
     content = _normalize_pinned_model_shapes(content)
+    content = _normalize_optional_model_shorthand(content)
     content = _normalize_pinned_model_fields(content)
     content = _normalize_base_url_provider(content)
     content = _normalize_comic_path_helper(content)
@@ -3130,6 +3295,77 @@ def _project_recovered_detail_api_envelope(
     return updated
 
 
+def _project_recovered_rank_item_wrapper(
+    ir: SourceIR,
+    files: list[GeneratedFile],
+) -> list[GeneratedFile]:
+    rust_content = "\n".join(
+        generated.content for generated in files if generated.path.endswith(".rs")
+    )
+    if not decompiled_rank_list_wraps_comic(ir.files) or "struct C2aRankItem" in rust_content:
+        return files
+
+    updated: list[GeneratedFile] = []
+    projected = False
+    for generated in files:
+        content = generated.content
+        if projected or not generated.path.endswith(".rs"):
+            updated.append(generated)
+            continue
+        for function in RustInspection.from_content(content).named("get_search_manga_list"):
+            if '"/ranks' not in function.text:
+                continue
+            response = re.search(
+                r"(?m)^(?P<indent>[ \t]*)let\s+(?P<response>[A-Za-z_]\w*)\s*:\s*"
+                r"(?P<envelope>[A-Za-z_]\w*)\s*<\s*(?P<page>[A-Za-z_]\w*)\s*<\s*"
+                r"(?P<comic>[A-Za-z_]\w*)\s*>\s*>\s*=\s*"
+                r"(?P<fetch>self\.[A-Za-z_]\w*\(\s*(?P<url>[A-Za-z_]\w*)\s*\)\?)\s*;",
+                function.text,
+            )
+            if response is None:
+                continue
+            mapper = re.search(
+                rf"\b{re.escape(response.group('response'))}\.results\.list\s*"
+                r"\.into_iter\(\)\s*\.map\(\s*"
+                r"(?P<mapper>[A-Za-z_]\w*::[A-Za-z_]\w*)\s*\)",
+                function.text,
+            )
+            if mapper is None:
+                continue
+            indent = response.group("indent")
+            inner = indent + "    "
+            result = response.group("response")
+            branch = (
+                f'{indent}if {response.group("url")}.contains("/ranks") {{\n'
+                f"{inner}let {result}: {response.group('envelope')}<"
+                f"{response.group('page')}<C2aRankItem>> = {response.group('fetch')};\n"
+                f"{inner}let has_next_page = {result}.results.total >= "
+                f"{result}.results.offset + {result}.results.limit;\n"
+                f"{inner}return Ok(MangaPageResult {{\n"
+                f"{inner}    entries: {result}.results.list.into_iter()\n"
+                f"{inner}        .map(|item| {mapper.group('mapper')}(item.comic))\n"
+                f"{inner}        .collect(),\n"
+                f"{inner}    has_next_page,\n"
+                f"{inner}}});\n"
+                f"{indent}}}\n"
+            )
+            begin = function.node.start_byte + response.start()
+            item = (
+                "#[derive(aidoku::serde::Deserialize)]\n"
+                f"struct C2aRankItem {{ comic: {response.group('comic')} }}"
+            )
+            content = content[:begin] + branch + content[begin:]
+            content = content.rstrip() + "\n\n" + item + "\n"
+            projected = True
+            break
+        updated.append(
+            generated.model_copy(update={"content": content})
+            if content != generated.content
+            else generated
+        )
+    return updated
+
+
 def _variant_profile_domains(ir: SourceIR, variant_name: str) -> tuple[str, ...]:
     variant_token = re.sub(r"[^a-z0-9]", "", variant_name.lower())
     domains: list[str] = []
@@ -3177,7 +3413,7 @@ def _project_recovered_chapter_page_variants(
             new_literal = json.dumps(new)
             pattern = re.compile(
                 rf"(?m)^(?P<indent>[ \t]*)let\s+(?P<variable>[A-Za-z_]\w*)\s*=\s*"
-                rf"(?P<base>[A-Za-z_]\w*[\s\S]{{0,700}}?)"
+                rf"(?P<base>[A-Za-z_]\w*[^;]{{0,700}}?)"
                 rf"\.replace\(\s*{re.escape(old_literal)}\s*,\s*"
                 rf"{re.escape(new_literal)}\s*\)\s*;"
             )
@@ -3208,6 +3444,124 @@ def _project_recovered_chapter_page_variants(
                 + helper_content
                 + "\n"
             )
+        updated.append(
+            generated.model_copy(update={"content": content})
+            if content != generated.content
+            else generated
+        )
+    return updated
+
+
+def _project_recovered_chapter_image_resolution(
+    ir: SourceIR,
+    files: list[GeneratedFile],
+    *,
+    setting_defaults: Mapping[str, str],
+    setting_values: Mapping[str, tuple[str, ...]],
+) -> list[GeneratedFile]:
+    policy = ir.image_url_policy
+    if policy is None or policy.chapter_resolution_regex != r"\d+(?=x\.(?:jpg|webp)$)":
+        return files
+    rust_content = "\n".join(
+        generated.content for generated in files if generated.path.endswith(".rs")
+    )
+    if "c2a_translate_chapter_resolution" in rust_content or (
+        "resolution" in rust_content
+        and 'ends_with(".jpg")' in rust_content
+        and 'ends_with(".webp")' in rust_content
+    ):
+        return files
+    resolution_key = next(
+        (
+            key
+            for key, values in setting_values.items()
+            if key.rsplit(".", 1)[-1] == "resolution"
+            and values
+            and all(re.fullmatch(r"resolution\.r[1-9][0-9]*", value) for value in values)
+        ),
+        None,
+    )
+    if resolution_key is None:
+        return files
+    values = setting_values[resolution_key]
+    default = setting_defaults.get(resolution_key, values[-1])
+    arms = "\n".join(
+        f"        Some({json.dumps(value)}) => {json.dumps(value.rsplit('.r', 1)[-1])},"
+        for value in values
+    )
+    helper = (
+        "fn c2a_translate_chapter_resolution(url: aidoku::alloc::String) "
+        "-> aidoku::alloc::String {\n"
+        "    let resolution = match "
+        "aidoku::imports::defaults::defaults_get::<aidoku::alloc::String>"
+        f"({json.dumps(resolution_key)}).as_deref() {{\n"
+        f"{arms}\n"
+        f"        _ => {json.dumps(default.rsplit('.r', 1)[-1])},\n"
+        "    };\n"
+        '    let suffix_start = if url.ends_with(".jpg") {\n'
+        "        Some(url.len() - 4)\n"
+        '    } else if url.ends_with(".webp") {\n'
+        "        Some(url.len() - 5)\n"
+        "    } else {\n"
+        "        None\n"
+        "    };\n"
+        "    if let Some(suffix_start) = suffix_start {\n"
+        "        let before_suffix = &url[..suffix_start];\n"
+        "        if let Some(x_pos) = before_suffix.rfind('x') {\n"
+        "            let before_x = &before_suffix[..x_pos];\n"
+        "            let digits_start = before_x\n"
+        "                .rfind(|character: char| !character.is_ascii_digit())\n"
+        "                .map_or(0, |position| position + 1);\n"
+        "            if digits_start < x_pos {\n"
+        '                return aidoku::alloc::format!("{}{}{}", '
+        "&url[..digits_start], resolution, &url[x_pos..]);\n"
+        "            }\n"
+        "        }\n"
+        "    }\n"
+        "    url\n"
+        "}"
+    )
+
+    updated: list[GeneratedFile] = []
+    helper_added = False
+    for generated in files:
+        content = generated.content
+        if not generated.path.endswith(".rs"):
+            updated.append(generated)
+            continue
+        edits: list[tuple[int, int, bytes]] = []
+        inspection = RustInspection.from_content(content)
+        for function in inspection.functions:
+            if "page" not in function.name.lower():
+                continue
+            for call in RustInspection.from_content(function.text).nodes("call_expression"):
+                callee = call.child_by_field_name("function")
+                arguments = call.child_by_field_name("arguments")
+                if callee is None or arguments is None or not arguments.named_children:
+                    continue
+                if callee.text.decode("utf-8", errors="replace") not in {
+                    "PageContent::url",
+                    "PageContent::url_context",
+                }:
+                    continue
+                url = arguments.named_children[0]
+                url_text = url.text.decode("utf-8", errors="replace")
+                if "c2a_translate_chapter_resolution" in url_text:
+                    continue
+                edits.append(
+                    (
+                        function.node.start_byte + url.start_byte,
+                        function.node.start_byte + url.end_byte,
+                        f"c2a_translate_chapter_resolution({url_text})".encode(),
+                    )
+                )
+        encoded = content.encode("utf-8")
+        for begin, end, replacement in sorted(edits, reverse=True):
+            encoded = encoded[:begin] + replacement + encoded[end:]
+        content = encoded.decode("utf-8")
+        if edits and not helper_added:
+            content = content.rstrip() + "\n\n" + helper + "\n"
+            helper_added = True
         updated.append(
             generated.model_copy(update={"content": content})
             if content != generated.content
@@ -3365,12 +3719,28 @@ def normalize_generation_manifest(
         for before, after in zip(files, envelope_projected, strict=True)
     )
     files = envelope_projected
+    rank_projected = _project_recovered_rank_item_wrapper(ir, files)
+    changed |= any(
+        before.content != after.content for before, after in zip(files, rank_projected, strict=True)
+    )
+    files = rank_projected
     route_projected = _project_recovered_chapter_page_variants(ir, files)
     changed |= any(
         before.content != after.content
         for before, after in zip(files, route_projected, strict=True)
     )
     files = route_projected
+    resolution_projected = _project_recovered_chapter_image_resolution(
+        ir,
+        files,
+        setting_defaults=setting_defaults,
+        setting_values=setting_values,
+    )
+    changed |= any(
+        before.content != after.content
+        for before, after in zip(files, resolution_projected, strict=True)
+    )
+    files = resolution_projected
     filters_projected = _project_recovered_dynamic_filters(
         ir,
         files,

@@ -194,6 +194,20 @@ def decompiled_detail_uses_api_envelope(files: Iterable[SourceFile]) -> bool:
     return any(_DETAIL_API_ENVELOPE.search(source.content) is not None for source in files)
 
 
+def decompiled_rank_list_wraps_comic(files: Iterable[SourceFile]) -> bool:
+    """Return whether JADX proves that each rank list item wraps a comic field."""
+    content = "\n".join(source.content for source in files)
+    rank_list = re.search(
+        r"\bclass\s+RankResult\b[\s\S]{0,2000}?\bList<ListItem>\s+list\b",
+        content,
+    )
+    item_comic = re.search(
+        r"\bclass\s+ListItem\b[\s\S]{0,1200}?\b[A-Za-z_]\w*\s+comic\b",
+        content,
+    )
+    return rank_list is not None and item_comic is not None
+
+
 @dataclass(frozen=True)
 class DecompiledManifest:
     package: str

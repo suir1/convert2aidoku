@@ -8,6 +8,7 @@ from convert2aidoku.decompiled_input import (
     DecompiledManifest,
     decompiled_detail_uses_api_envelope,
     decompiled_dto_shapes,
+    decompiled_rank_list_wraps_comic,
     normalize_decompiled_java,
     project_java_behavior,
 )
@@ -33,6 +34,24 @@ def test_detects_recovered_detail_api_envelope() -> None:
 
     assert decompiled_detail_uses_api_envelope(files)
     assert not decompiled_detail_uses_api_envelope([])
+
+
+def test_detects_recovered_rank_item_comic_wrapper() -> None:
+    files = [
+        SourceFile(
+            path="RankResult.java",
+            sha256="0",
+            content="class RankResult { private final List<ListItem> list; }",
+        ),
+        SourceFile(
+            path="ListItem.java",
+            sha256="0",
+            content="class ListItem { private final ComicSummary comic; }",
+        ),
+    ]
+
+    assert decompiled_rank_list_wraps_comic(files)
+    assert not decompiled_rank_list_wraps_comic(files[:1])
 
 
 def test_manifest_exposes_all_shared_apk_facts() -> None:

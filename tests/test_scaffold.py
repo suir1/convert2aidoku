@@ -1055,6 +1055,78 @@ impl CopyManga {
     assert normalize_generation_manifest(ir, normalized) == normalized
 
 
+def test_normalizer_repairs_generic_json_optional_fields_and_page_context() -> None:
+    content = """
+#[derive(Deserialize)]
+struct PageResult<T> {
+    #[serde(default)]
+    list: Vec<T>,
+    total: i32,
+    limit: i32,
+    offset: i32,
+}
+fn json<T: Deserialize<'static>>(response: Response) -> Result<T> {
+    response.get_json_owned()
+}
+fn chapter(title: String) -> Chapter {
+    Chapter { title, chapter_number: Some(1.0), ..Default::default() }
+}
+fn update(mut manga: Manga, url: String) {
+    manga.url = url;
+}
+fn get_manga_update(
+    &self,
+    mut manga: Manga,
+    needs_details: bool,
+    needs_chapters: bool,
+) -> Result<Manga> {
+    let response: ApiResponse<DetailResult> = self.json(url)?;
+    if needs_details {
+        let comic = response.results.comic;
+        manga.title = comic.name;
+    }
+    if needs_chapters {
+        manga.chapters = Some(self.chapters(&response.results)?);
+    }
+    Ok(manga)
+}
+fn sort(chapters: &mut Vec<Chapter>) {
+    chapters.sort_by(|left, right| right.chapter_number.total_cmp(&left.chapter_number));
+}
+fn pages(context: String, url: String) -> PageContent {
+    PageContent::url_context(url, context.clone())
+}
+fn get_image_request(
+    &self,
+    url: String,
+    context: Option<PageContext>,
+) -> Result<Request> {
+    let referer = context
+        .map(|value| value.referer)
+        .unwrap_or_else(|| WEB_BASE.to_string());
+    Ok(Request::get(url)?.header("Referer", &referer))
+}
+impl PageResult {
+    fn has_next(&self) -> bool { self.total >= self.offset + self.limit }
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert '#[serde(bound(deserialize = "T: aidoku::serde::Deserialize<\'de>"))]' in normalized
+    assert "fn json<T: for<'de> Deserialize<'de>>" in normalized
+    assert "Chapter { title: Some(title), chapter_number: Some(1.0)" in normalized
+    assert "manga.url = Some(url);" in normalized
+    assert "right.chapter_number.partial_cmp(&left.chapter_number)" in normalized
+    assert ".unwrap_or(core::cmp::Ordering::Equal)" in normalized
+    assert 'PageContext::from([("referer".into(), context.clone())])' in normalized
+    assert 'context.as_ref().and_then(|value| value.get("referer")).cloned()' in normalized
+    assert "impl<T> PageResult<T>" in normalized
+    assert normalized.count("fn has_next(&self)") == 1
+    assert normalized.index("if needs_chapters") < normalized.index("if needs_details")
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
 def test_manifest_projects_domain_dependent_chapter_page_variant() -> None:
     ir = minimal_source_ir(
         chapter_page_routes=[
@@ -1094,10 +1166,10 @@ def test_manifest_projects_domain_dependent_chapter_page_variant() -> None:
                 content="""
 fn api_domain() -> String { String::from("api.manga2025.com") }
 fn page_url(&self, key: &str) -> String {
-    let normalized = key
+    let chapter_key = key
         .strip_prefix("/comic/")
-        .unwrap_or(key)
-        .replace("/chapter/", "/chapter2/");
+        .unwrap_or(key);
+    let normalized = chapter_key.replace("/chapter/", "/chapter2/");
     format!("/api/v3/comic/{normalized}")
 }
 """,
@@ -1112,6 +1184,106 @@ fn page_url(&self, key: &str) -> String {
     assert '"api.manga2025.com" | "mapi.hotmangasf.com"' in source
     assert "aidoku::alloc::String::from(c2a_chapter_key)" in source
     assert 'c2a_chapter_key.replace("/chapter/", "/chapter2/")' in source
+    assert source.index("let chapter_key") < source.index("let c2a_chapter_key")
+    assert source.index("let c2a_chapter_key") < source.index("let normalized")
+    assert normalize_generation_manifest(ir, normalized) == normalized
+
+
+def test_manifest_projects_missing_chapter_image_resolution_transform() -> None:
+    ir = minimal_source_ir(
+        image_url_policy=ImageUrlPolicy(
+            preserve_cover_urls=True,
+            chapter_resolution_regex=r"\d+(?=x\.(?:jpg|webp)$)",
+        )
+    )
+    manifest = GenerationManifest(
+        source_struct="CopyManga",
+        files=[
+            GeneratedFile(
+                path="src/lib.rs",
+                content="""
+fn pages(url: String, context: PageContext) -> PageContent {
+    PageContent::url_context(url, context)
+}
+""",
+            ),
+            GeneratedFile(
+                path="res/settings.json",
+                content="""[
+                    {"type":"group","items":[
+                        {"type":"select","key":"v2.pref.resolution",
+                         "values":["resolution.r800","resolution.r1500"],
+                         "titles":["800","1500"],"default":"resolution.r1500"}
+                    ]}
+                ]""",
+            ),
+        ],
+    )
+
+    normalized = normalize_generation_manifest(ir, manifest)
+    source = next(file.content for file in normalized.files if file.path == "src/lib.rs")
+
+    assert "c2a_translate_chapter_resolution(url)" in source
+    assert "defaults_get::<aidoku::alloc::String>" in source
+    assert '"v2.pref.resolution"' in source
+    assert 'Some("resolution.r800") => "800"' in source
+    assert 'Some("resolution.r1500") => "1500"' in source
+    assert 'url.ends_with(".jpg")' in source
+    assert 'url.ends_with(".webp")' in source
+    assert normalize_generation_manifest(ir, normalized) == normalized
+
+
+def test_manifest_projects_recovered_rank_item_wrapper() -> None:
+    ir = minimal_source_ir(
+        source_format="decompiled_apk",
+        files=[
+            SourceFile(
+                path="RankResult.java",
+                sha256="0",
+                content="class RankResult { private final List<ListItem> list; }",
+            ),
+            SourceFile(
+                path="ListItem.java",
+                sha256="0",
+                content="class ListItem { private final ComicSummary comic; }",
+            ),
+        ],
+    )
+    manifest = GenerationManifest(
+        source_struct="CopyManga",
+        files=[
+            GeneratedFile(
+                path="src/lib.rs",
+                content="""
+#[derive(Deserialize)]
+struct ApiResponse<T> { results: T }
+#[derive(Deserialize)]
+struct PageResult<T> { list: Vec<T>, limit: i32, offset: i32, total: i32 }
+#[derive(Deserialize)]
+struct Comic { name: String }
+impl CopyManga {
+    fn get_search_manga_list(&self, rank: bool, url: String) -> Result<MangaPageResult> {
+        if rank { let _url = "/ranks?type=1"; }
+        let response: ApiResponse<PageResult<Comic>> = self.json(url)?;
+        let has_next_page = Self::has_next(&response.results);
+        Ok(MangaPageResult {
+            entries: response.results.list.into_iter().map(Self::manga).collect(),
+            has_next_page,
+        })
+    }
+}
+""",
+            )
+        ],
+    )
+
+    normalized = normalize_generation_manifest(ir, manifest)
+    source = normalized.files[0].content
+
+    assert "struct C2aRankItem" in source
+    assert 'if url.contains("/ranks")' in source
+    assert "ApiResponse<PageResult<C2aRankItem>>" in source
+    assert ".map(|item| Self::manga(item.comic))" in source
     assert normalize_generation_manifest(ir, normalized) == normalized
 
 

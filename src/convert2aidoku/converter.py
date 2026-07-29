@@ -130,7 +130,6 @@ class _ConversionRoundRunner:
         self.checkpoint.ai_rounds.append(ai_round(number, purpose, result))
         self.checkpoint.warnings.extend(result.warnings)
         self.checkpoint.manifest_warnings = list(result.value.warnings)
-        self.checkpoint.unsupported_features.extend(result.value.unsupported_features)
         self.checkpoint.phase = "manifest_saved"
         self.checkpoint.validation = None
         self.store.commit(
