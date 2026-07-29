@@ -209,7 +209,12 @@ class _ConversionRoundRunner:
                     result = repair.request(client)
                 except AIProviderError as exc:
                     self.record_failed_exchange(exc, purpose="repair")
-                    raise
+                    warning = "AI repair failed; checkpoint retained for --resume"
+                    if warning not in self.checkpoint.warnings:
+                        self.checkpoint.warnings.append(warning)
+                        self.store.commit(checkpoint=self.checkpoint)
+                    self.progress(warning)
+                    break
                 self.accept(result, purpose="repair")
 
 

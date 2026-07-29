@@ -416,7 +416,7 @@ def test_repair_preserves_source_ir_required_resources(tmp_path: Path, monkeypat
     assert any("preserved from the prior round" in item for item in outcome.report.warnings)
 
 
-def test_targeted_patch_failure_falls_back_to_full_repair(
+def test_targeted_patch_failure_stops_without_full_repair(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -425,24 +425,19 @@ def test_targeted_patch_failure_falls_back_to_full_repair(
         repair_patch=AIProviderError("synthetic invalid patch"),
         patch_scope="compiler",
     )
-    validations = iter(
-        [
-            ValidationResult(
-                stages=[
-                    ValidationStage(
-                        name="cargo-check",
-                        kind="check",
-                        ok=False,
-                        output="error\n  --> src/lib.rs:1:1",
-                    )
-                ]
-            ),
-            ValidationResult(build_ok=True, package_ok=True, live_ok=True),
+    validation = ValidationResult(
+        stages=[
+            ValidationStage(
+                name="cargo-check",
+                kind="check",
+                ok=False,
+                output="error\n  --> src/lib.rs:1:1",
+            )
         ]
     )
     monkeypatch.setattr(
         "convert2aidoku.converter.validate_project",
-        lambda *_args, **_kwargs: next(validations),
+        lambda *_args, **_kwargs: validation,
     )
     settings = conversion_settings(max_repair_rounds=1)
 
@@ -453,19 +448,20 @@ def test_targeted_patch_failure_falls_back_to_full_repair(
         live=True,
     )
 
-    assert outcome.report.status is ConversionStatus.VERIFIED
+    assert outcome.report.status is ConversionStatus.FAILED
     assert ai_calls.repair_patch == 1
-    assert ai_calls.repair == 1
-    assert len(outcome.report.ai_rounds) == 2
-    assert any("targeted patch fallback" in warning for warning in outcome.report.warnings)
+    assert ai_calls.repair == 0
+    assert len(outcome.report.ai_rounds) == 1
+    assert len(outcome.report.failed_ai_exchanges) == 1
+    assert any("checkpoint retained" in warning for warning in outcome.report.warnings)
     checkpoint = ConversionCheckpoint.model_validate_json(
         (outcome.output / ".c2a" / "checkpoint.json").read_text(encoding="utf-8")
     )
-    assert checkpoint.phase == "complete"
-    assert checkpoint.current_manifest == "manifests/round-02.json"
+    assert checkpoint.phase == "validated"
+    assert checkpoint.current_manifest == "manifests/round-01.json"
 
 
-def test_contract_patch_failure_keeps_warning_and_round_order(
+def test_contract_patch_failure_stops_without_full_repair(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -500,11 +496,12 @@ def test_contract_patch_failure_keeps_warning_and_round_order(
         live=True,
     )
 
-    assert outcome.report.status is ConversionStatus.VERIFIED
+    assert outcome.report.status is ConversionStatus.BUILD_ONLY
     assert ai_calls.repair_patch == 1
-    assert ai_calls.repair == 1
-    assert [round_.purpose for round_ in outcome.report.ai_rounds] == ["generate", "repair"]
-    assert any("contract patch fallback" in warning for warning in outcome.report.warnings)
+    assert ai_calls.repair == 0
+    assert [round_.purpose for round_ in outcome.report.ai_rounds] == ["generate"]
+    assert len(outcome.report.failed_ai_exchanges) == 1
+    assert any("checkpoint retained" in warning for warning in outcome.report.warnings)
 
 
 def test_forced_failed_conversion_preserves_existing_output(tmp_path: Path, monkeypatch) -> None:

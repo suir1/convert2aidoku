@@ -68,9 +68,10 @@ settings use a separate bounded evidence prompt whose response contains real JSO
 than JSON text nested inside a manifest string. Compiler and Clippy repairs first use bounded
 source excerpts and exact `old_text` → `new_text` replacements. Each replacement must come from a
 supplied excerpt, match once, stay inside the generated-file allowlist, and pass the same Rust
-safety checks. Full repair fallback is also Rust-only and inherits tool-owned resources.
-Live-behavior failures retain the full repair context. This keeps repair prompts small without
-weakening path, dependency, or code-execution boundaries.
+safety checks. A rejected compact patch does not escalate into a second full-source request in the
+same run; the checkpoint is retained for explicit resume. Live-behavior failures retain the full
+repair context. This keeps repair prompts small without weakening path, dependency, or
+code-execution boundaries.
 
 Repair is adaptive. Compiler and contract failures are capped at one compact repair even when a
 higher maximum is configured. Non-blocked live-behavior failures honor the explicit maximum.

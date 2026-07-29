@@ -240,7 +240,6 @@ class _PatchRequest:
     scope: Literal["compiler", "contract"]
     excerpts: list[dict[str, object]]
     diagnostics: str
-    fallback_label: str
 
 
 @dataclass(frozen=True)
@@ -272,14 +271,13 @@ class TargetedRepair:
         excerpts = diagnostic_file_excerpts(self.store.project, diagnostics)
         failed_stages = {stage.name for stage in self.validation.stages if not stage.ok}
         if excerpts and failed_stages and failed_stages <= {"cargo-check", "clippy", "clippy-fix"}:
-            return _PatchRequest("compiler", excerpts, diagnostics, "targeted")
+            return _PatchRequest("compiler", excerpts, diagnostics)
         contract_repair = self.contract.repair(self.store.project)
         if contract_repair is not None:
             return _PatchRequest(
                 "contract",
                 contract_repair.excerpts,
                 contract_repair.diagnostics,
-                "contract",
             )
         return None
 
@@ -287,36 +285,29 @@ class TargetedRepair:
         current_files = read_generated_files(self.store.project)
         diagnostics = self.validation.diagnostics[-MAX_AI_DIAGNOSTIC_CHARS:]
         patch_request = self._patch_request(diagnostics)
-        fallback_warning = None
         if patch_request is not None:
-            try:
-                patch_result = client.repair_patch(
-                    self.ir,
-                    current_file_excerpts=patch_request.excerpts,
-                    diagnostics=patch_request.diagnostics,
-                    scope=patch_request.scope,
-                )
-                patched_manifest = apply_repair_patch(
-                    self.manifest,
-                    current_files,
-                    patch_result.value,
-                    patch_request.excerpts,
-                )
-                return patch_result.with_value(patched_manifest)
-            except AIProviderError as exc:
-                fallback_warning = f"{patch_request.fallback_label} patch fallback: {exc}"
+            patch_result = client.repair_patch(
+                self.ir,
+                current_file_excerpts=patch_request.excerpts,
+                diagnostics=patch_request.diagnostics,
+                scope=patch_request.scope,
+            )
+            patched_manifest = apply_repair_patch(
+                self.manifest,
+                current_files,
+                patch_result.value,
+                patch_request.excerpts,
+            )
+            return patch_result.with_value(patched_manifest)
 
         diagnostics = repair_diagnostics(
             self.ir,
             self.validation,
             self.contract.messages,
         )[-MAX_AI_DIAGNOSTIC_CHARS:]
-        repaired = client.repair(
+        return client.repair(
             self.ir,
             current_files=current_files,
             diagnostics=diagnostics,
             manifest_history=self._history(),
         )
-        if fallback_warning:
-            repaired.warnings.append(fallback_warning)
-        return repaired
