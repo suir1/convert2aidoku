@@ -709,7 +709,7 @@ def test_rank_item_comic_wrapper_is_a_contract_gap() -> None:
     manifest = generation_manifest(
         """
 fn get_search_manga_list(&self, url: String) -> Result<MangaPageResult> {
-    let rank_path = "/ranks?type=1";
+    let rank_path = "/api/v3/ranks?type=1";
     let response: ApiResponse<PageResult<Comic>> = self.json(url)?;
     Ok(MangaPageResult {
         entries: response.results.list.into_iter().map(Self::manga).collect(),

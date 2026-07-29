@@ -690,22 +690,26 @@ def _detail_helper_skips_api_envelope(rust: RustInspection) -> bool:
 
 def _rank_helper_skips_item_wrapper(rust: RustInspection) -> bool:
     text = "\n".join(function.text for function in rust.named("get_search_manga_list"))
-    if '"/ranks' not in text:
+    if "/ranks" not in text:
         return False
     if re.search(
         r"contains\(\s*\"/ranks\"\s*\)[\s\S]{0,1800}?"
-        r"ApiResponse\s*<[^>]*<\s*(?:C2a)?RankItem\s*>>"
+        r"ApiResponse\s*<\s*C2aRankResult\s*>"
         r"[\s\S]{0,1800}?\.comic\b",
         text,
     ):
         return False
-    return (
-        re.search(
-            r"ApiResponse\s*<(?:ListResult|[A-Za-z_]\w*\s*<\s*Comic\s*>)>",
-            text,
-        )
-        is not None
-    )
+    for response in re.finditer(
+        r"ApiResponse\s*<\s*(?P<inner>[A-Za-z_]\w*"
+        r"(?:\s*<\s*[A-Za-z_]\w*\s*>)?)\s*>",
+        text,
+    ):
+        inner = response.group("inner")
+        if inner == "ListResult" or re.fullmatch(r"[A-Za-z_]\w*\s*<\s*Comic\s*>", inner):
+            return True
+        if rust.struct_field_type(inner, "list") == "Vec<Comic>":
+            return True
+    return False
 
 
 def _has_idempotent_get_retry(rust: RustInspection) -> bool:

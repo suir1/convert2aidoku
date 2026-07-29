@@ -208,6 +208,19 @@ def decompiled_rank_list_wraps_comic(files: Iterable[SourceFile]) -> bool:
     return rank_list is not None and item_comic is not None
 
 
+def decompiled_dynamic_filter_endpoint(files: Iterable[SourceFile]) -> str | None:
+    """Recover the dedicated dynamic-theme endpoint from compacted JADX behavior."""
+    for source in files:
+        endpoint = re.search(
+            r"\btagList\s*\([^)]*\)\s*\{[\s\S]{0,800}?"
+            r'return\s+getApiUrl\(\)\s*\+\s*"([^"]+)"',
+            source.content,
+        )
+        if endpoint is not None:
+            return endpoint.group(1)
+    return None
+
+
 @dataclass(frozen=True)
 class DecompiledManifest:
     package: str

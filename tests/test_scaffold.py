@@ -6,6 +6,7 @@ import pytest
 from convert2aidoku.errors import SecurityError
 from convert2aidoku.generated_source_metadata import GeneratedSourceMetadata
 from convert2aidoku.models import (
+    Capability,
     ChapterPageRoute,
     ChapterPageRouteVariant,
     DependencyRequest,
@@ -959,9 +960,9 @@ fn deep_link() -> DeepLinkResult {
 
 def test_normalizer_repairs_request_tails_partial_detail_move_and_dynamic_api_base() -> None:
     content = """
-const API_BASE: &str = "https://api.example.com";
+const API: &str = "https://api.example.com";
 fn api_url(path: &str) -> String {
-    let mut url = String::from(API_BASE);
+    let mut url = String::from(API);
     url.push_str(path);
     url
 }
@@ -1083,7 +1084,7 @@ fn get_manga_update(
     let response: ApiResponse<DetailResult> = self.json(url)?;
     if needs_details {
         let comic = response.results.comic;
-        manga.title = comic.name;
+        manga = Self::manga(comic);
     }
     if needs_chapters {
         manga.chapters = Some(self.chapters(&response.results)?);
@@ -1124,6 +1125,8 @@ impl PageResult {
     assert "impl<T> PageResult<T>" in normalized
     assert normalized.count("fn has_next(&self)") == 1
     assert normalized.index("if needs_chapters") < normalized.index("if needs_details")
+    assert "let c2a_chapters = manga.chapters;" in normalized
+    assert "manga.chapters = c2a_chapters;" in normalized
     assert normalize_pinned_aidoku_rust(normalized) == normalized
 
 
@@ -1263,7 +1266,7 @@ struct PageResult<T> { list: Vec<T>, limit: i32, offset: i32, total: i32 }
 struct Comic { name: String }
 impl CopyManga {
     fn get_search_manga_list(&self, rank: bool, url: String) -> Result<MangaPageResult> {
-        if rank { let _url = "/ranks?type=1"; }
+        if rank { let _url = "/api/v3/ranks?type=1"; }
         let response: ApiResponse<PageResult<Comic>> = self.json(url)?;
         let has_next_page = Self::has_next(&response.results);
         Ok(MangaPageResult {
@@ -1281,9 +1284,65 @@ impl CopyManga {
     source = normalized.files[0].content
 
     assert "struct C2aRankItem" in source
+    assert "struct C2aRankResult" in source
     assert 'if url.contains("/ranks")' in source
-    assert "ApiResponse<PageResult<C2aRankItem>>" in source
+    assert "ApiResponse<C2aRankResult>" in source
     assert ".map(|item| Self::manga(item.comic))" in source
+    assert normalize_generation_manifest(ir, normalized) == normalized
+
+
+def test_manifest_projects_recovered_named_rank_list_wrapper() -> None:
+    ir = minimal_source_ir(
+        source_format="decompiled_apk",
+        files=[
+            SourceFile(
+                path="RankResult.java",
+                sha256="0",
+                content="class RankResult { private final List<ListItem> list; }",
+            ),
+            SourceFile(
+                path="ListItem.java",
+                sha256="0",
+                content="class ListItem { private final ComicSummary comic; }",
+            ),
+        ],
+    )
+    manifest = GenerationManifest(
+        source_struct="CopyManga",
+        files=[
+            GeneratedFile(
+                path="src/lib.rs",
+                content="""
+#[derive(Deserialize)]
+struct ApiResponse<T> { results: T }
+#[derive(Deserialize)]
+struct ComicList { list: Vec<Comic>, limit: i32, offset: i32, total: i32 }
+#[derive(Deserialize)]
+struct Comic { name: String }
+impl CopyManga {
+    fn manga_from_comic(comic: Comic) -> Manga { Manga::default() }
+    fn page_result(&self, result: ComicList) -> MangaPageResult {
+        MangaPageResult {
+            entries: result.list.into_iter().map(Self::manga_from_comic).collect(),
+            has_next_page: false,
+        }
+    }
+    fn get_search_manga_list(&self, rank: bool, url: String) -> Result<MangaPageResult> {
+        if rank { let _url = "/api/v3/ranks?type=1"; }
+        let response: ApiResponse<ComicList> = self.get_json(url)?;
+        Ok(self.page_result(response.results))
+    }
+}
+""",
+            )
+        ],
+    )
+
+    normalized = normalize_generation_manifest(ir, manifest)
+    source = normalized.files[0].content
+
+    assert "ApiResponse<C2aRankResult>" in source
+    assert ".map(|item| Self::manga_from_comic(item.comic))" in source
     assert normalize_generation_manifest(ir, normalized) == normalized
 
 
@@ -1382,6 +1441,69 @@ fn get_dynamic_filters(&self) -> Result<Vec<Filter>> {
     assert 'id: "status".into()' in source
     assert 'ids: Some(aidoku::alloc::vec!["".into(), "END".into()])' in source
     assert "let mut c2a_filters" in source
+    assert normalize_generation_manifest(ir, normalized) == normalized
+
+
+def test_manifest_synthesizes_recovered_dynamic_filter_provider(tmp_path: Path) -> None:
+    _project, ir = scaffold_project(tmp_path)
+    ir = ir.model_copy(
+        update={
+            "capabilities": [*ir.capabilities, Capability.DYNAMIC_FILTERS],
+            "files": [
+                SourceFile(
+                    path="ApiRepo.java",
+                    sha256="0",
+                    content="""
+                    public final String tagList() {
+                        return getApiUrl() + "/theme/comic/count?limit=100";
+                    }
+                    """,
+                )
+            ],
+        }
+    )
+    manifest = GenerationManifest(
+        source_struct="Simple",
+        files=[
+            GeneratedFile(path="src/lib.rs", content="#![no_std]\n"),
+            GeneratedFile(
+                path="src/source.rs",
+                content="""
+struct Simple;
+#[derive(Deserialize)]
+struct ApiResponse<T> { results: T }
+impl Simple {
+    fn api_url(path: &str) -> String { path.into() }
+    fn get_json<T: for<'de> Deserialize<'de>>(&self, url: String) -> Result<T> {
+        self.request(url)?.send()?.get_json_owned()
+    }
+    fn route(&self) -> String { Self::api_url("/api/v3/comics") }
+    fn selected_value<'a>(filters: &'a [FilterValue], id: &str) -> Option<&'a str> {
+        None
+    }
+    fn get_search_manga_list(&self, filters: Vec<FilterValue>) -> Result<MangaPageResult> {
+        let region = Self::selected_value(&filters, "region").unwrap_or("");
+        let mut url = Self::api_url("/api/v3/comics?limit=21");
+        if !region.is_empty() { url.push_str(&format!("&top={region}")); }
+        url.push_str("&_update=true");
+        self.list(url)
+    }
+}
+""",
+            ),
+        ],
+    )
+
+    normalized = normalize_generation_manifest(ir, manifest)
+    source = next(item.content for item in normalized.files if item.path == "src/source.rs")
+
+    assert "DynamicFilters" in normalized.implemented_traits
+    assert "impl DynamicFilters for Simple" in source
+    assert 'Self::api_url("/api/v3/theme/comic/count?limit=100")' in source
+    assert "struct C2aDynamicFilterResult" in source
+    assert 'id: "theme".into()' in source
+    assert 'Self::selected_value(&filters, "theme").unwrap_or("")' in source
+    assert 'url.push_str(&format!("&theme={}", c2a_theme))' in source
     assert normalize_generation_manifest(ir, normalized) == normalized
 
 

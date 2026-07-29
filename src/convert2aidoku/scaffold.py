@@ -12,6 +12,7 @@ from jinja2 import Environment, StrictUndefined
 from .constants import MAX_GENERATED_FILE_CHARS
 from .decompiled_input import (
     decompiled_detail_uses_api_envelope,
+    decompiled_dynamic_filter_endpoint,
     decompiled_rank_list_wraps_comic,
 )
 from .dependency_policy import (
@@ -1572,6 +1573,57 @@ def _normalize_detail_partial_move(content: str) -> str:
     return content
 
 
+def _normalize_manga_replacement_chapters(content: str) -> str:
+    replacements: list[tuple[str, str]] = []
+    for function in RustInspection.from_content(content).named("get_manga_update"):
+        if "c2a_chapters" in function.text:
+            continue
+        branches = list(RustInspection.from_content(function.text).nodes("if_expression"))
+        chapters = next(
+            (
+                branch
+                for branch in branches
+                if re.search(
+                    r"\bmanga\.chapters\s*=",
+                    branch.text.decode("utf-8", errors="replace"),
+                )
+            ),
+            None,
+        )
+        details = next(
+            (
+                branch
+                for branch in branches
+                if branch.start_byte > (chapters.start_byte if chapters is not None else -1)
+                and re.search(
+                    r"(?m)^[ \t]*manga\s*=\s*[^;]+;",
+                    branch.text.decode("utf-8", errors="replace"),
+                )
+                and "chapters" not in branch.text.decode("utf-8", errors="replace")
+            ),
+            None,
+        )
+        if chapters is None or details is None:
+            continue
+        details_text = details.text.decode("utf-8", errors="replace")
+        normalized_details = re.sub(
+            r"(?m)^(?P<indent>[ \t]*)manga\s*=\s*(?P<value>[^;]+);",
+            lambda match: (
+                f"{match.group('indent')}let c2a_chapters = manga.chapters;\n"
+                f"{match.group('indent')}manga = {match.group('value')};\n"
+                f"{match.group('indent')}manga.chapters = c2a_chapters;"
+            ),
+            details_text,
+            count=1,
+        )
+        replacements.append(
+            (function.text, function.text.replace(details_text, normalized_details, 1))
+        )
+    for original, normalized in replacements:
+        content = content.replace(original, normalized, 1)
+    return content
+
+
 def _normalize_deep_link_defaults(content: str) -> str:
     replacements: list[tuple[str, str]] = []
     for node in RustInspection.from_content(content).nodes("struct_expression"):
@@ -2501,9 +2553,24 @@ def _normalize_dynamic_api_base(
         (key for key in (setting_defaults or {}) if key.rsplit(".", 1)[-1] == "api_domain"),
         None,
     )
-    if api_key is None or "String::from(API_BASE)" not in content:
+    if api_key is None:
         return content
-    content = content.replace("String::from(API_BASE)", 'format!("https://{}", api_domain())')
+    replacements: list[tuple[str, str]] = []
+    for function in RustInspection.from_content(content).functions:
+        if function.name != "api_url" and not function.name.endswith("_api_url"):
+            continue
+        normalized = re.sub(
+            r"String::from\(\s*[A-Z][A-Z0-9_]*\s*\)",
+            'format!("https://{}", api_domain())',
+            function.text,
+            count=1,
+        )
+        if normalized != function.text:
+            replacements.append((function.text, normalized))
+    if not replacements:
+        return content
+    for original, normalized in replacements:
+        content = content.replace(original, normalized, 1)
     if re.search(r"\bfn\s+api_domain\s*\(", content):
         return content
     default = (setting_defaults or {}).get(api_key, "")
@@ -2724,6 +2791,7 @@ def normalize_pinned_aidoku_rust(
     content = _normalize_image_request_result(content)
     content = _normalize_result_request_tails(content)
     content = _normalize_detail_partial_move(content)
+    content = _normalize_manga_replacement_chapters(content)
     content = _normalize_legacy_request_errors(content)
     content = _normalize_defaults_get_bindings(content)
     content = _normalize_aidoku_result_errors(content)
@@ -3305,6 +3373,9 @@ def _project_recovered_rank_item_wrapper(
     if not decompiled_rank_list_wraps_comic(ir.files) or "struct C2aRankItem" in rust_content:
         return files
 
+    inspection = RustInspection(
+        generated.content for generated in files if generated.path.endswith(".rs")
+    )
     updated: list[GeneratedFile] = []
     projected = False
     for generated in files:
@@ -3313,23 +3384,59 @@ def _project_recovered_rank_item_wrapper(
             updated.append(generated)
             continue
         for function in RustInspection.from_content(content).named("get_search_manga_list"):
-            if '"/ranks' not in function.text:
+            if "/ranks" not in function.text:
                 continue
             response = re.search(
                 r"(?m)^(?P<indent>[ \t]*)let\s+(?P<response>[A-Za-z_]\w*)\s*:\s*"
-                r"(?P<envelope>[A-Za-z_]\w*)\s*<\s*(?P<page>[A-Za-z_]\w*)\s*<\s*"
-                r"(?P<comic>[A-Za-z_]\w*)\s*>\s*>\s*=\s*"
+                r"(?P<envelope>[A-Za-z_]\w*)\s*<\s*"
+                r"(?P<inner>[A-Za-z_]\w*(?:\s*<\s*[A-Za-z_]\w*\s*>)?)\s*>\s*=\s*"
                 r"(?P<fetch>self\.[A-Za-z_]\w*\(\s*(?P<url>[A-Za-z_]\w*)\s*\)\?)\s*;",
                 function.text,
             )
             if response is None:
                 continue
-            mapper = re.search(
+            generic = re.fullmatch(
+                r"[A-Za-z_]\w*\s*<\s*(?P<comic>[A-Za-z_]\w*)\s*>",
+                response.group("inner"),
+            )
+            comic = generic.group("comic") if generic is not None else None
+            if comic is None:
+                list_type = inspection.struct_field_type(response.group("inner"), "list")
+                list_item = (
+                    re.fullmatch(r"Vec\s*<\s*(?P<comic>[A-Za-z_]\w*)\s*>", list_type)
+                    if list_type is not None
+                    else None
+                )
+                comic = list_item.group("comic") if list_item is not None else None
+            if comic is None:
+                continue
+            direct_mapper = re.search(
                 rf"\b{re.escape(response.group('response'))}\.results\.list\s*"
                 r"\.into_iter\(\)\s*\.map\(\s*"
                 r"(?P<mapper>[A-Za-z_]\w*::[A-Za-z_]\w*)\s*\)",
                 function.text,
             )
+            mapper = direct_mapper.group("mapper") if direct_mapper is not None else None
+            if mapper is None:
+                converter = next(
+                    (
+                        candidate
+                        for candidate in inspection.functions
+                        if re.search(
+                            rf"\(\s*(?:(?P<self>&self)\s*,\s*)?[A-Za-z_]\w*\s*:\s*"
+                            rf"{re.escape(comic)}\s*\)\s*->\s*Manga\b",
+                            candidate.text.split("{", 1)[0],
+                        )
+                    ),
+                    None,
+                )
+                if converter is not None:
+                    signature = converter.text.split("{", 1)[0]
+                    mapper = (
+                        f"self.{converter.name}"
+                        if "&self" in signature
+                        else f"Self::{converter.name}"
+                    )
             if mapper is None:
                 continue
             indent = response.group("indent")
@@ -3337,13 +3444,13 @@ def _project_recovered_rank_item_wrapper(
             result = response.group("response")
             branch = (
                 f'{indent}if {response.group("url")}.contains("/ranks") {{\n'
-                f"{inner}let {result}: {response.group('envelope')}<"
-                f"{response.group('page')}<C2aRankItem>> = {response.group('fetch')};\n"
+                f"{inner}let {result}: {response.group('envelope')}<C2aRankResult> = "
+                f"{response.group('fetch')};\n"
                 f"{inner}let has_next_page = {result}.results.total >= "
                 f"{result}.results.offset + {result}.results.limit;\n"
                 f"{inner}return Ok(MangaPageResult {{\n"
                 f"{inner}    entries: {result}.results.list.into_iter()\n"
-                f"{inner}        .map(|item| {mapper.group('mapper')}(item.comic))\n"
+                f"{inner}        .map(|item| {mapper}(item.comic))\n"
                 f"{inner}        .collect(),\n"
                 f"{inner}    has_next_page,\n"
                 f"{inner}}});\n"
@@ -3352,7 +3459,18 @@ def _project_recovered_rank_item_wrapper(
             begin = function.node.start_byte + response.start()
             item = (
                 "#[derive(aidoku::serde::Deserialize)]\n"
-                f"struct C2aRankItem {{ comic: {response.group('comic')} }}"
+                f"struct C2aRankItem {{ comic: {comic} }}\n\n"
+                "#[derive(aidoku::serde::Deserialize)]\n"
+                "struct C2aRankResult {\n"
+                "    #[serde(default)]\n"
+                "    list: aidoku::alloc::Vec<C2aRankItem>,\n"
+                "    #[serde(default)]\n"
+                "    limit: i32,\n"
+                "    #[serde(default)]\n"
+                "    offset: i32,\n"
+                "    #[serde(default)]\n"
+                "    total: i32,\n"
+                "}"
             )
             content = content[:begin] + branch + content[begin:]
             content = content.rstrip() + "\n\n" + item + "\n"
@@ -3598,6 +3716,113 @@ def _rust_filter_expression(spec: SourceFilterSpec) -> str:
     )
 
 
+def _synthesize_recovered_dynamic_filters(
+    ir: SourceIR,
+    files: list[GeneratedFile],
+    *,
+    source_struct: str,
+    implemented_traits: list[str],
+) -> tuple[list[GeneratedFile], list[str]]:
+    endpoint = decompiled_dynamic_filter_endpoint(ir.files)
+    inspection = RustInspection(
+        generated.content for generated in files if generated.path.endswith(".rs")
+    )
+    if (
+        Capability.DYNAMIC_FILTERS not in ir.capabilities
+        or "DynamicFilters" in implemented_traits
+        or endpoint is None
+        or inspection.has_function("get_dynamic_filters")
+    ):
+        return files, implemented_traits
+    envelope = next(
+        (
+            item.name
+            for item in inspection.structs
+            if inspection.struct_field_type(item.name, "results") == "T"
+        ),
+        None,
+    )
+    json_helper = next(
+        (
+            function.name
+            for function in inspection.functions
+            if ".get_json_owned()" in function.text
+            and re.search(r"Result\s*<\s*T\s*>", function.text.split("{", 1)[0])
+        ),
+        None,
+    )
+    api_helper = next(
+        (
+            function.name
+            for function in inspection.functions
+            if function.name == "api_url" or function.name.endswith("_api_url")
+        ),
+        None,
+    )
+    if envelope is None or json_helper is None or api_helper is None:
+        return files, implemented_traits
+    routes = {route for function in inspection.functions for route in function.route_literals}
+    if any(route.startswith("/api/v3/") for route in routes) and not endpoint.startswith(
+        "/api/v3/"
+    ):
+        endpoint = "/api/v3" + endpoint
+    implementation = f"""
+#[derive(aidoku::serde::Deserialize)]
+struct C2aDynamicFilterTheme {{
+    #[serde(default)]
+    name: aidoku::alloc::String,
+    #[serde(default, rename = "path_word")]
+    path_word: aidoku::alloc::String,
+}}
+
+#[derive(aidoku::serde::Deserialize)]
+struct C2aDynamicFilterResult {{
+    #[serde(default, rename = "list")]
+    themes: aidoku::alloc::Vec<C2aDynamicFilterTheme>,
+}}
+
+impl DynamicFilters for {source_struct} {{
+    fn get_dynamic_filters(&self) -> Result<aidoku::alloc::Vec<Filter>> {{
+        let response: {envelope}<C2aDynamicFilterResult> =
+            self.{json_helper}(Self::{api_helper}({json.dumps(endpoint)}))?;
+        let mut options = aidoku::alloc::vec!["全部".into()];
+        let mut ids = aidoku::alloc::vec!["".into()];
+        for theme in response.results.themes {{
+            if !theme.path_word.is_empty() {{
+                options.push(theme.name.into());
+                ids.push(theme.path_word.into());
+            }}
+        }}
+        Ok(aidoku::alloc::vec![aidoku::SelectFilter {{
+            id: "theme".into(),
+            title: Some("題材".into()),
+            options,
+            ids: Some(ids),
+            default: Some("".into()),
+            ..Default::default()
+        }}.into()])
+    }}
+}}
+""".strip()
+
+    updated: list[GeneratedFile] = []
+    projected = False
+    owner_pattern = re.compile(rf"\bimpl\s+{re.escape(source_struct)}\s*\{{")
+    for generated in files:
+        content = generated.content
+        if not projected and generated.path.endswith(".rs") and owner_pattern.search(content):
+            content = content.rstrip() + "\n\n" + implementation + "\n"
+            projected = True
+        updated.append(
+            generated.model_copy(update={"content": content})
+            if content != generated.content
+            else generated
+        )
+    if not projected:
+        return files, implemented_traits
+    return updated, [*implemented_traits, "DynamicFilters"]
+
+
 def _project_recovered_dynamic_filters(
     ir: SourceIR,
     files: list[GeneratedFile],
@@ -3662,6 +3887,63 @@ def _project_recovered_dynamic_filters(
     return updated
 
 
+def _project_recovered_dynamic_filter_queries(
+    ir: SourceIR,
+    files: list[GeneratedFile],
+) -> list[GeneratedFile]:
+    endpoint = decompiled_dynamic_filter_endpoint(ir.files)
+    if endpoint is None or "theme" not in endpoint:
+        return files
+    updated: list[GeneratedFile] = []
+    for generated in files:
+        content = generated.content
+        if not generated.path.endswith(".rs"):
+            updated.append(generated)
+            continue
+        replacements: list[tuple[str, str]] = []
+        for function in RustInspection.from_content(content).named("get_search_manga_list"):
+            if '"theme"' in function.text:
+                continue
+            selector = re.search(
+                r"(?P<selector>(?:Self::|self\.)?[A-Za-z_]\w*)"
+                r"\(\s*&filters\s*,\s*\"[^\"]+\"\s*\)"
+                r"\.unwrap_or\(\s*\"\"\s*\)",
+                function.text,
+            )
+            update = re.search(
+                r"(?m)^(?P<indent>[ \t]*)(?P<url>[A-Za-z_]\w*)\.push_str\("
+                r'"&_update=true"\);',
+                function.text,
+            )
+            opening = function.text.find("{")
+            if selector is None or update is None or opening < 0:
+                continue
+            indent = update.group("indent")
+            selection = (
+                f"\n{indent}let c2a_theme = {selector.group('selector')}"
+                '(&filters, "theme").unwrap_or("");'
+            )
+            normalized = function.text[: opening + 1] + selection + function.text[opening + 1 :]
+            update_statement = update.group(0)
+            query = (
+                f"{indent}if !c2a_theme.is_empty() {{\n"
+                f"{indent}    {update.group('url')}.push_str(&format!("
+                '"&theme={}", c2a_theme));\n'
+                f"{indent}}}\n"
+                f"{update_statement}"
+            )
+            normalized = normalized.replace(update_statement, query, 1)
+            replacements.append((function.text, normalized))
+        for original, normalized in replacements:
+            content = content.replace(original, normalized, 1)
+        updated.append(
+            generated.model_copy(update={"content": content})
+            if content != generated.content
+            else generated
+        )
+    return updated
+
+
 def normalize_generation_manifest(
     ir: SourceIR,
     manifest: GenerationManifest,
@@ -3674,9 +3956,20 @@ def normalize_generation_manifest(
     prequeried_url_helpers = _prequeried_url_helpers(manifest)
     request_builder_helpers = _request_builder_helpers(manifest)
     preserve_cover_urls = bool(ir.image_url_policy and ir.image_url_policy.preserve_cover_urls)
+    implemented_traits = list(manifest.implemented_traits)
+    seeded_files, implemented_traits = _synthesize_recovered_dynamic_filters(
+        ir,
+        list(manifest.files),
+        source_struct=manifest.source_struct,
+        implemented_traits=implemented_traits,
+    )
+    seeded_files = _project_recovered_rank_item_wrapper(ir, seeded_files)
     files = []
-    changed = False
-    for generated in manifest.files:
+    changed = any(
+        before.content != after.content
+        for before, after in zip(manifest.files, seeded_files, strict=True)
+    ) or implemented_traits != list(manifest.implemented_traits)
+    for generated in seeded_files:
         content = generated.content
         if generated.path.endswith(".rs"):
             content = normalize_pinned_aidoku_rust(
@@ -3719,11 +4012,6 @@ def normalize_generation_manifest(
         for before, after in zip(files, envelope_projected, strict=True)
     )
     files = envelope_projected
-    rank_projected = _project_recovered_rank_item_wrapper(ir, files)
-    changed |= any(
-        before.content != after.content for before, after in zip(files, rank_projected, strict=True)
-    )
-    files = rank_projected
     route_projected = _project_recovered_chapter_page_variants(ir, files)
     changed |= any(
         before.content != after.content
@@ -3744,19 +4032,29 @@ def normalize_generation_manifest(
     filters_projected = _project_recovered_dynamic_filters(
         ir,
         files,
-        implemented_traits=list(manifest.implemented_traits),
+        implemented_traits=implemented_traits,
     )
     changed |= any(
         before.content != after.content
         for before, after in zip(files, filters_projected, strict=True)
     )
     files = filters_projected
+    query_projected = _project_recovered_dynamic_filter_queries(ir, files)
+    changed |= any(
+        before.content != after.content
+        for before, after in zip(files, query_projected, strict=True)
+    )
+    files = query_projected
     topologized = _normalize_generated_module_topology(files)
     changed |= any(
         before.content != after.content for before, after in zip(files, topologized, strict=True)
     )
     files = topologized
-    return manifest.model_copy(update={"files": files}) if changed else manifest
+    return (
+        manifest.model_copy(update={"files": files, "implemented_traits": implemented_traits})
+        if changed
+        else manifest
+    )
 
 
 def _environment() -> Environment:

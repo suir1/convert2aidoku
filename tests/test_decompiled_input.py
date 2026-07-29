@@ -8,6 +8,7 @@ from convert2aidoku.decompiled_input import (
     DecompiledManifest,
     decompiled_detail_uses_api_envelope,
     decompiled_dto_shapes,
+    decompiled_dynamic_filter_endpoint,
     decompiled_rank_list_wraps_comic,
     normalize_decompiled_java,
     project_java_behavior,
@@ -52,6 +53,23 @@ def test_detects_recovered_rank_item_comic_wrapper() -> None:
 
     assert decompiled_rank_list_wraps_comic(files)
     assert not decompiled_rank_list_wraps_comic(files[:1])
+
+
+def test_recovers_dynamic_filter_endpoint() -> None:
+    files = [
+        SourceFile(
+            path="ApiRepo.java",
+            sha256="0",
+            content="""
+            public final String tagList() {
+                return getApiUrl() + "/theme/comic/count?limit=100";
+            }
+            """,
+        )
+    ]
+
+    assert decompiled_dynamic_filter_endpoint(files) == "/theme/comic/count?limit=100"
+    assert decompiled_dynamic_filter_endpoint([]) is None
 
 
 def test_manifest_exposes_all_shared_apk_facts() -> None:
