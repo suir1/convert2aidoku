@@ -45,6 +45,87 @@ def _snake_case(value: str) -> str:
     return re.sub(r"(?<!^)(?=[A-Z])", "_", value).lower()
 
 
+def _kotlin_string_constants(kotlin: str) -> dict[str, str]:
+    constants: dict[str, str] = {}
+    for found in re.finditer(
+        rf"\bconst\s+val\s+(?P<name>[A-Za-z_]\w*)\s*=\s*(?P<value>{_KOTLIN_STRING})",
+        kotlin,
+    ):
+        value = _decode_kotlin_string(found.group("value"))
+        if value is not None:
+            constants[found.group("name")] = value
+    return constants
+
+
+def _uri_part_filter_value(expression: str, constants: dict[str, str]) -> str | None:
+    value = expression.strip()
+    if value.startswith('"'):
+        decoded = _decode_kotlin_string(value)
+        if decoded is None:
+            return None
+
+        def expand(match: re.Match[str]) -> str:
+            name = match.group("braced") or match.group("plain")
+            return constants.get(name, match.group(0))
+
+        return re.sub(
+            r"\$\{(?P<braced>[A-Za-z_]\w*)\}|\$(?P<plain>[A-Za-z_]\w*)",
+            expand,
+            decoded,
+        )
+    if value in constants:
+        return constants[value]
+    return _filter_value(value)
+
+
+def _kotlin_uri_part_filter_specs(kotlin: str) -> list[SourceFilterSpec]:
+    constants = _kotlin_string_constants(kotlin)
+    declaration_pattern = re.compile(
+        rf"\bclass\s+(?P<class>[A-Za-z_]\w*Filter)"
+        rf"(?:\s*\([^)]*\))?\s*:\s*UriPartFilter\s*\(\s*"
+        rf"(?P<key>{_KOTLIN_STRING})\s*,\s*(?P<title>{_KOTLIN_STRING})\s*,\s*"
+        r"listOf\((?P<pairs>[\s\S]*?)\)\s*,?",
+    )
+    pair_pattern = re.compile(
+        rf"(?P<title>{_KOTLIN_STRING})\s+to\s+"
+        rf"(?P<value>{_KOTLIN_STRING}|[A-Za-z_]\w*)",
+    )
+    specs: list[SourceFilterSpec] = []
+    for declaration in _kotlin_class_declarations(kotlin):
+        found = declaration_pattern.search(declaration)
+        if found is None:
+            continue
+        key = _decode_kotlin_string(found.group("key"))
+        title = _decode_kotlin_string(found.group("title"))
+        if key is None or title is None:
+            continue
+        options: list[SourceFilterOption] = []
+        for pair in pair_pattern.finditer(found.group("pairs")):
+            option_title = _decode_kotlin_string(pair.group("title"))
+            option_value = _uri_part_filter_value(pair.group("value"), constants)
+            if option_title is None or option_value is None:
+                options = []
+                break
+            options.append(SourceFilterOption(title=option_title, value=option_value))
+        if not options or len({item.value for item in options}) != len(options):
+            continue
+        class_name = found.group("class")
+        # UriPartFilter is a Select wrapper even when a source names one SortFilter.
+        # Its site values can encode rank modes that an Aidoku ascending toggle cannot preserve.
+        kind = "select"
+        specs.append(
+            SourceFilterSpec(
+                source_class=class_name,
+                id=key,
+                title=title,
+                kind=kind,
+                options=options,
+                default_ascending=None,
+            )
+        )
+    return specs
+
+
 def _kotlin_filter_specs(kotlin: str) -> list[SourceFilterSpec]:
     specs: list[SourceFilterSpec] = []
     pattern = re.compile(
@@ -92,6 +173,10 @@ def _kotlin_filter_specs(kotlin: str) -> list[SourceFilterSpec]:
                 default_ascending=False if kind == "sort" else None,
             )
         )
+    existing_ids = {spec.id for spec in specs}
+    specs.extend(
+        spec for spec in _kotlin_uri_part_filter_specs(kotlin) if spec.id not in existing_ids
+    )
     return specs
 
 

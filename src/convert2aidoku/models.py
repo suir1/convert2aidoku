@@ -111,7 +111,7 @@ class SourceFilterSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     source_class: str
-    id: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
+    id: str = Field(pattern=r"^[a-z][a-z0-9_\[\]-]*$")
     title: str
     kind: Literal["select", "sort"]
     options: list[SourceFilterOption] = Field(min_length=1)
@@ -136,7 +136,7 @@ class RequestHeaderProfile(BaseModel):
 
 
 class SourceIR(BaseModel):
-    schema_version: Literal[1, 2, 3, 4, 5] = 5
+    schema_version: Literal[1, 2, 3, 4, 5, 6] = 6
     input_ref: str
     commit: str | None = None
     source_format: Literal["kotlin_module", "decompiled_apk"] = "kotlin_module"

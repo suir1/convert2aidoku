@@ -1098,6 +1098,47 @@ fn get_manga_update(
     assert normalize_pinned_aidoku_rust(normalized) == normalized
 
 
+def test_normalizer_repairs_optional_html_element_text_shapes() -> None:
+    content = """
+fn parse(manga: &mut Manga, detail: Element, link: Element, heading: Element, badge: Element) {
+    let ranked = Manga {
+        title: link.text(),
+        ..Default::default()
+    };
+    manga.title = heading.text();
+    manga.status = match badge.text().as_str() {
+        "ongoing" => MangaStatus::Ongoing,
+        _ => MangaStatus::Unknown,
+    };
+    let mut values = Vec::new();
+    values.push(link.text());
+    manga.authors = Some(alloc::vec!["author".into()]);
+    manga.description = detail
+        .select("meta")
+        .and_then(|items| items.first())
+        .map(|element| element.text())
+        .unwrap_or_default();
+    let date = detail
+        .select("time")
+        .and_then(|items| items.first())
+        .map(|element| element.text())
+        .and_then(|value| parse_date(&value, "yyyy-MM-dd"));
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "title: link.text().unwrap_or_default()" in normalized
+    assert "manga.title = heading.text().unwrap_or_default();" in normalized
+    assert "badge.text().as_deref().unwrap_or_default()" in normalized
+    assert "values.extend(link.text());" in normalized
+    assert "alloc::vec!" not in normalized
+    assert 'Some(vec!["author".into()])' in normalized
+    assert ".and_then(|element| element.text())" in normalized
+    assert "manga.description = Some(detail" in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
 def test_normalizer_repairs_request_tails_partial_detail_move_and_dynamic_api_base() -> None:
     content = """
 const API: &str = "https://api.example.com";

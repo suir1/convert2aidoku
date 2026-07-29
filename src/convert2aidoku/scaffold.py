@@ -449,7 +449,9 @@ def _normalize_pinned_model_fields(content: str) -> str:
             field_name = field_node.text.decode("utf-8", errors="replace")
             value = value_node.text.decode("utf-8", errors="replace")
             replacement_value = value
-            if (
+            if type_name == "Manga" and field_name == "title" and value.endswith(".text()"):
+                replacement_value = f"{value}.unwrap_or_default()"
+            elif (
                 field_name == "url"
                 or (type_name == "Manga" and field_name in {"cover", "description"})
                 or (type_name == "Chapter" and field_name == "title")
@@ -1092,6 +1094,33 @@ def _normalize_mutated_aidoku_models(content: str) -> str:
         wrap_optional,
         content,
     )
+    edits: list[tuple[int, int, bytes]] = []
+    for node in RustInspection.from_content(content).nodes("assignment_expression"):
+        left = node.child_by_field_name("left")
+        right = node.child_by_field_name("right")
+        if left is None or right is None:
+            continue
+        target = re.fullmatch(
+            r"(?P<model>manga|chapter)\.(?P<field>[A-Za-z_]\w*)",
+            left.text.decode("utf-8", errors="replace"),
+        )
+        if target is None:
+            continue
+        optional_fields = (
+            {"url", "cover", "description"}
+            if target.group("model") == "manga"
+            else {"url", "title"}
+        )
+        if target.group("field") not in optional_fields:
+            continue
+        expression = right.text.decode("utf-8", errors="replace")
+        if expression.startswith(("Some(", "None")):
+            continue
+        edits.append((right.start_byte, right.end_byte, f"Some({expression})".encode()))
+    encoded = content.encode("utf-8")
+    for begin, end, replacement in sorted(edits, reverse=True):
+        encoded = encoded[:begin] + replacement + encoded[end:]
+    content = encoded.decode("utf-8")
     manga_sources = re.findall(
         r"\blet\s+(?:mut\s+)?(?P<source>[A-Za-z_]\w*)\s*=\s*"
         r"[^;\n]+\.to_manga\(\)\s*;",
@@ -1944,6 +1973,7 @@ def _normalize_safe_std_paths(content: str, *, remove_extern_std: bool) -> str:
     """Project allocation/core-only std paths into the no_std Aidoku runtime."""
     if remove_extern_std:
         content = re.sub(r"(?m)^\s*extern\s+crate\s+std\s*;\s*\n?", "", content)
+    content = re.sub(r"(?<!aidoku::)\balloc::vec!", "vec!", content)
     collection_aliases = {"HashMap": "BTreeMap", "HashSet": "BTreeSet"}
     for source, target in collection_aliases.items():
         marker = f"std::collections::{source}"
@@ -2001,6 +2031,32 @@ def _normalize_graphql_body_fragment(content: str) -> str:
         r'(?P<prefix>(?:pub\s+)?const\s+COMIC_BODY\s*:\s*&str\s*=\s*r#")'
         r'(?P<body>[\s\S]*?)(?P<suffix>"#\s*;)',
         wrap,
+        content,
+    )
+
+
+def _normalize_html_element_text(content: str) -> str:
+    content = re.sub(
+        r"\.map\(\s*\|(?P<value>[A-Za-z_]\w*)\|\s*"
+        r"(?P=value)\.text\(\)\s*\)",
+        r".and_then(|\g<value>| \g<value>.text())",
+        content,
+    )
+    content = re.sub(
+        r"(?P<element>[A-Za-z_]\w*)\.text\(\)\.as_str\(\)",
+        r"\g<element>.text().as_deref().unwrap_or_default()",
+        content,
+    )
+    content = re.sub(
+        r"(?P<target>\bmanga\.title)\s*=\s*"
+        r"(?P<element>[A-Za-z_]\w*)\.text\(\)\s*;",
+        r"\g<target> = \g<element>.text().unwrap_or_default();",
+        content,
+    )
+    return re.sub(
+        r"(?P<values>\b[A-Za-z_]\w*)\.push\("
+        r"(?P<element>[A-Za-z_]\w*)\.text\(\)\)\s*;",
+        r"\g<values>.extend(\g<element>.text());",
         content,
     )
 
@@ -3195,6 +3251,7 @@ def normalize_pinned_aidoku_rust(
     content = _normalize_aidoku_api_paths(content)
     content = _normalize_generic_deserialize(content)
     content = _normalize_graphql_body_fragment(content)
+    content = _normalize_html_element_text(content)
     content = _normalize_graphql_manga_update_projection(content)
     content = _normalize_image_request_result(content)
     content = _normalize_result_request_tails(content)

@@ -181,6 +181,66 @@ def test_recovers_kotlin_select_filter_site_values(tmp_path: Path) -> None:
     assert [option.value for option in ir.filter_specs[1].options] == ["", "END"]
 
 
+def test_recovers_kotlin_uri_part_filter_pairs_and_constants(tmp_path: Path) -> None:
+    (tmp_path / "build.gradle.kts").write_text(
+        'keiyoushi { name = "Filters"; source { lang = "zh"; '
+        'baseUrl { custom("https://filters.example") } } }'
+    )
+    source = tmp_path / "src" / "Filters.kt"
+    source.parent.mkdir()
+    source.write_text(
+        """
+        class Filters : HttpSource() {
+            override fun getFilterList() = FilterList(SortFilter(0), RegionFilter())
+        }
+
+        open class UriPartFilter(
+            val key: String,
+            name: String,
+            private val pairs: List<Pair<String, String>>,
+            state: Int = 0,
+        ) : Filter.Select<String>(name, pairs.map { it.first }.toTypedArray(), state)
+
+        class SortFilter(state: Int) :
+            UriPartFilter(
+                "sort",
+                "排序",
+                listOf(
+                    "最新" to "",
+                    "日排行" to RANK_PREFIX,
+                    "週排行" to "$RANK_PREFIX-week",
+                ),
+                state,
+            ) {
+            companion object { const val RANK_PREFIX = "rank|" }
+        }
+
+        class RegionFilter :
+            UriPartFilter(
+                "filter[country]",
+                "作品地区",
+                listOf("所有" to "", "日本" to "japan"),
+            )
+        """
+    )
+
+    ir = analyze_path(str(tmp_path))
+
+    assert [(spec.id, spec.kind) for spec in ir.filter_specs] == [
+        ("sort", "select"),
+        ("filter[country]", "select"),
+    ]
+    assert [(item.title, item.value) for item in ir.filter_specs[0].options] == [
+        ("最新", ""),
+        ("日排行", "rank|"),
+        ("週排行", "rank|-week"),
+    ]
+    assert [(item.title, item.value) for item in ir.filter_specs[1].options] == [
+        ("所有", ""),
+        ("日本", "japan"),
+    ]
+
+
 def test_analyzes_decompiled_apk_as_public_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
