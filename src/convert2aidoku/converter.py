@@ -13,6 +13,7 @@ from .conversion_intake import ConversionIntake
 from .errors import AIProviderError, InputError
 from .generated_source_metadata import GeneratedSourceMetadata
 from .kotlin_settings import with_kotlin_settings
+from .listing_renderer import with_deterministic_search_listing
 from .live_validation_evidence import live_validation_evidence
 from .manifest_contract import (
     ContractEvaluation,
@@ -97,6 +98,7 @@ class _ConversionRoundRunner:
             filter_specs=self.ir.filter_specs,
             setting_overrides=setting_overrides,
         )
+        effective = with_deterministic_search_listing(self.ir, effective)
         return normalize_generation_manifest(self.ir, effective)
 
     def evaluate(self, manifest: GenerationManifest) -> None:

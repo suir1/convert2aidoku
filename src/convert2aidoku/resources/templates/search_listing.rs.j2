@@ -1,0 +1,189 @@
+use aidoku::alloc::string::ToString;
+use aidoku::alloc::{format, String, Vec};
+use aidoku::helpers::uri::encode_uri_component;
+use aidoku::imports::defaults::defaults_get;
+use aidoku::imports::net::Request;
+use aidoku::serde::Deserialize;
+use aidoku::{FilterValue, Manga, MangaPageResult, Result};
+
+const SITE_URL: &str = {{ site_url | rust_string }};
+
+#[derive(Deserialize)]
+struct ApiResponse<T> {
+    results: T,
+}
+
+{% for struct in structs %}
+#[derive(Deserialize, Default)]
+struct {{ struct.name }} {
+{% for field in struct.fields %}
+    #[serde(default{% if field.renamed %}, rename = {{ field.serialized_name | rust_string }}{% endif %})]
+    {{ field.name }}: {{ field.rust_type }},
+{% endfor %}
+}
+
+{% endfor %}
+fn api_domain() -> String {
+{% if api_setting_key %}
+    let selected = defaults_get::<String>({{ api_setting_key | rust_string }})
+        .unwrap_or_else(|| String::from({{ api_default_host | rust_string }}));
+{% if api_custom_setting_key %}
+    if selected == "custom" {
+        return defaults_get::<String>({{ api_custom_setting_key | rust_string }})
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| String::from({{ api_default_host | rust_string }}));
+    }
+{% endif %}
+    selected
+{% else %}
+    String::from({{ api_default_host | rust_string }})
+{% endif %}
+}
+
+fn api_url(path: &str) -> String {
+    format!("{{ api_scheme }}://{}{}", api_domain(), path)
+}
+
+fn push_query(url: &mut String, name: &str, value: &str) {
+    url.push(if url.contains('?') { '&' } else { '?' });
+    url.push_str(name);
+    url.push('=');
+    url.push_str(&encode_uri_component(value));
+}
+
+fn selected_value<'a>(filters: &'a [FilterValue], id: &str) -> Option<&'a str> {
+    filters.iter().find_map(|filter| match filter {
+        FilterValue::Select { id: filter_id, value } if filter_id == id => Some(value.as_str()),
+        _ => None,
+    })
+}
+
+fn selected_sort(filters: &[FilterValue], id: &str) -> Option<(i32, bool)> {
+    filters.iter().find_map(|filter| match filter {
+        FilterValue::Sort { id: filter_id, index, ascending } if filter_id == id => {
+            Some((*index, *ascending))
+        }
+        _ => None,
+    })
+}
+
+fn request(url: String) -> Result<Request> {
+{% if conditional_profiles %}
+    let domain = api_domain();
+{% endif %}
+    let mut request = Request::get(url)?;
+{% for name, value in global_headers %}
+    request = request.header({{ name | rust_string }}, {{ value | rust_string }});
+{% endfor %}
+{% if conditional_profiles %}
+    match domain.as_str() {
+{% for profile in conditional_profiles %}
+        {% for domain in profile.domains %}{{ domain | rust_string }}{% if not loop.last %} | {% endif %}{% endfor %} => {
+{% for name, value in profile.headers %}
+            request = request.header({{ name | rust_string }}, {{ value | rust_string }});
+{% endfor %}
+        }
+{% endfor %}
+        _ => {
+{% for name, value in default_profile.headers %}
+            request = request.header({{ name | rust_string }}, {{ value | rust_string }});
+{% endfor %}
+        }
+    }
+{% else %}
+{% for name, value in default_profile.headers %}
+    request = request.header({{ name | rust_string }}, {{ value | rust_string }});
+{% endfor %}
+{% endif %}
+    Ok(request)
+}
+
+fn get_json<T: for<'a> Deserialize<'a>>(url: String) -> Result<T> {
+    let response = match request(url.clone())?.send() {
+        Ok(response) => response,
+        Err(_) => request(url)?.send()?,
+    };
+    response.get_json_owned()
+}
+
+{% for mapping in mappings %}
+fn {{ mapping.function_name }}(item: {{ mapping.type_name }}) -> Manga {
+{% if mapping.authors_field %}
+    let authors: Vec<String> = item.{{ mapping.authors_field }}
+        .into_iter()
+        .map(|value| value.{{ mapping.authors_name_field }})
+        .collect();
+{% endif %}
+{% if mapping.tags_field %}
+    let tags: Vec<String> = item.{{ mapping.tags_field }}
+        .into_iter()
+        .map(|value| value.{{ mapping.tags_name_field }})
+        .collect();
+{% endif %}
+    let key = {{ mapping.key_expression }};
+    Manga {
+        key: key.clone(),
+        url: Some(format!("{SITE_URL}{key}")),
+        title: item.{{ mapping.title_field }},
+{% if mapping.cover_field %}
+        cover: Some(item.{{ mapping.cover_field }}),
+{% endif %}
+{% if mapping.authors_field %}
+        authors: (!authors.is_empty()).then_some(authors),
+{% endif %}
+{% if mapping.tags_field %}
+        tags: (!tags.is_empty()).then_some(tags),
+{% endif %}
+{% if mapping.description_field %}
+        description: Some(item.{{ mapping.description_field }}),
+{% endif %}
+        ..Default::default()
+    }
+}
+
+{% endfor %}
+{% for endpoint in endpoints %}
+fn {{ endpoint.url_function }}(query: &str, page: i32, filters: &[FilterValue]) -> String {
+    let mut url = api_url({{ endpoint.path | rust_string }});
+{% for line in endpoint.query_lines %}
+    {{ line }}
+{% endfor %}
+    url
+}
+
+fn {{ endpoint.fetch_function }}(url: String) -> Result<MangaPageResult> {
+    let response: ApiResponse<{{ endpoint.response_type }}> = get_json(url)?;
+    let result = response.results;
+    let has_next_page = {{ endpoint.has_next_expression }};
+    let entries = result.{{ endpoint.items_field }}
+        .into_iter()
+        .map(|item| {{ endpoint.mapping_function }}({{ endpoint.item_expression }}))
+        .collect();
+    Ok(MangaPageResult { entries, has_next_page })
+}
+
+{% endfor %}
+pub(crate) fn get_search_manga_list(
+    query: Option<String>,
+    page: i32,
+    filters: Vec<FilterValue>,
+) -> Result<MangaPageResult> {
+    let query = query.unwrap_or_default();
+    if !query.is_empty() {
+        return {{ search_endpoint.fetch_function }}({{ search_endpoint.url_function }}(
+            &query,
+            page,
+            &filters,
+        ));
+    }
+{% if rank_endpoint and rank_filter %}
+    if selected_value(&filters, {{ rank_filter | rust_string }}).is_some_and(|value| !value.is_empty()) {
+        return {{ rank_endpoint.fetch_function }}({{ rank_endpoint.url_function }}(
+            &query,
+            page,
+            &filters,
+        ));
+    }
+{% endif %}
+    {{ browse_endpoint.fetch_function }}({{ browse_endpoint.url_function }}(&query, page, &filters))
+}

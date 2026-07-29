@@ -98,6 +98,7 @@ _DTO_SERIALIZED_NAME = re.compile(
     r'^\s*//\s*([A-Za-z_][A-Za-z0-9_]*)\s*->\s*"([^"\\]+)"\s*$',
     re.MULTILINE,
 )
+_MAX_DTO_DEPENDENCY_FILES = 96
 
 
 @dataclass(frozen=True)
@@ -368,7 +369,8 @@ def decompiled_source_paths(
         selected.extend(sorted(by_name.get(name, [])))
     main_text = main.read_text(encoding="utf-8", errors="replace")
     imports = re.findall(
-        r"^import\s+eu\.kanade\.tachiyomi\.extension\.[A-Za-z0-9_.$]+\.([A-Za-z0-9_$]+);",
+        r"^\s*import\s+eu\.kanade\.tachiyomi\.extension\."
+        r"[A-Za-z0-9_.$]+\.([A-Za-z0-9_$]+);",
         main_text,
         re.MULTILINE,
     )
@@ -376,7 +378,64 @@ def decompiled_source_paths(
         if any(marker in imported_class for marker in _OPTIONAL_CLASS_MARKERS):
             continue
         selected.extend(sorted(by_name.get(f"{imported_class}.java", [])))
+    _extend_dto_dependency_closure(selected, by_name)
     return list(dict.fromkeys(selected))
+
+
+def _extend_dto_dependency_closure(
+    selected: list[Path],
+    by_name: dict[str, list[Path]],
+) -> None:
+    """Collect DTO field types transitively so response wrappers never become AI guesses."""
+    known = set(selected)
+    pending = [path for path in selected if "/api/dto/" in f"/{path.as_posix()}"]
+    added = 0
+    while pending:
+        path = pending.pop(0)
+        content = path.read_text(encoding="utf-8", errors="replace")
+        raw = content.encode("utf-8")
+        root = get_parser("java").parse(raw).root_node
+        declaration = next(
+            (node for node in root.named_children if node.type == "class_declaration"),
+            None,
+        )
+        body = declaration.child_by_field_name("body") if declaration is not None else None
+        if body is None:
+            continue
+        referenced: set[str] = set()
+        for member in body.named_children:
+            if member.type != "field_declaration":
+                continue
+            modifiers = next(
+                (child for child in member.named_children if child.type == "modifiers"),
+                None,
+            )
+            if modifiers is not None and "static" in _node_text(raw, modifiers).split():
+                continue
+            type_node = member.child_by_field_name("type")
+            if type_node is None:
+                continue
+            referenced.update(re.findall(r"\b[A-Z][A-Za-z0-9_]*\b", _node_text(raw, type_node)))
+        for type_name in sorted(referenced):
+            if any(marker in type_name for marker in _OPTIONAL_CLASS_MARKERS):
+                continue
+            candidates = [
+                candidate
+                for candidate in by_name.get(f"{type_name}.java", [])
+                if "/api/dto/" in f"/{candidate.as_posix()}"
+            ]
+            for candidate in sorted(candidates):
+                if candidate in known:
+                    continue
+                added += 1
+                if added > _MAX_DTO_DEPENDENCY_FILES:
+                    raise InputError(
+                        "decompiled APK DTO dependency closure exceeds "
+                        f"{_MAX_DTO_DEPENDENCY_FILES} files"
+                    )
+                known.add(candidate)
+                selected.append(candidate)
+                pending.append(candidate)
 
 
 def normalize_decompiled_java(content: str, path: PurePath) -> str:
@@ -390,7 +449,13 @@ def normalize_decompiled_java(content: str, path: PurePath) -> str:
     return content
 
 
-def project_java_behavior(content: str, *, main: bool, public_only: bool) -> str:
+def project_java_behavior(
+    content: str,
+    *,
+    main: bool,
+    public_only: bool,
+    excluded_methods: frozenset[str] = frozenset(),
+) -> str:
     raw = content.encode("utf-8")
     root = get_parser("java").parse(raw).root_node
     declaration = next((node for node in root.named_children if node.type in _JAVA_TYPES), None)
@@ -415,7 +480,7 @@ def project_java_behavior(content: str, *, main: bool, public_only: bool) -> str
             continue
         if node.type == "method_declaration":
             name = _method_name(node)
-            if _generated_method(name):
+            if _generated_method(name) or name in excluded_methods:
                 continue
             if (
                 main

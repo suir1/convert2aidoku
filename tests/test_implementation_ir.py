@@ -5,6 +5,7 @@ import hashlib
 import pytest
 from pydantic import ValidationError
 
+from convert2aidoku.generation_context import build_generation_context
 from convert2aidoku.implementation_ir import (
     ApiBaseIR,
     ImplementationIR,
@@ -13,7 +14,16 @@ from convert2aidoku.implementation_ir import (
     ListingRole,
     project_implementation_ir,
 )
-from convert2aidoku.models import RequestHeaderProfile, SourceFile
+from convert2aidoku.listing_renderer import (
+    render_search_listing,
+    with_deterministic_search_listing,
+)
+from convert2aidoku.models import (
+    GeneratedFile,
+    GenerationManifest,
+    RequestHeaderProfile,
+    SourceFile,
+)
 from tests.scenarios import minimal_source_ir
 
 
@@ -322,3 +332,115 @@ def test_implementation_ir_rejects_duplicate_endpoint_ids() -> None:
                 endpoints=[endpoint, endpoint.model_copy()],
             ),
         )
+
+
+def test_deterministic_search_listing_renderer_uses_only_projected_contract() -> None:
+    ir = minimal_source_ir(
+        source_id="zh.copymanga",
+        language="zh",
+        source_format="decompiled_apk",
+        main_class="CopyManga",
+        files=_copymanga_listing_files(),
+        request_header_profiles=[
+            RequestHeaderProfile(
+                name="API",
+                domains=["api.copy3000.com", "api.manga2025.com", "custom"],
+                headers={
+                    "Accept": "application/json",
+                    "Version": "1",
+                    "X-Test": "<tag>\b",
+                },
+            )
+        ],
+    )
+
+    rendered = render_search_listing(ir)
+
+    assert rendered.path == "src/c2a_listing.rs"
+    assert "fn search_url(" in rendered.content
+    assert 'api_url("/api/v3/search/comic")' in rendered.content
+    assert 'push_query(&mut url, "q", query);' in rendered.content
+    assert "fn comic_rank_url(" in rendered.content
+    assert 'selected_value(&filters, "rank")' in rendered.content
+    assert "fn comic_list_url(" in rendered.content
+    assert "struct SearchResult" in rendered.content
+    assert "struct RankResult" in rendered.content
+    assert "fn manga_from_comic_summary" in rendered.content
+    assert 'request = request.header("Version", "1");' in rendered.content
+    assert 'request = request.header("X-Test", "<tag>\\u{8}");' in rendered.content
+    assert "pub(crate) fn get_search_manga_list(" in rendered.content
+
+
+def test_effective_manifest_owns_listing_module_and_source_delegation() -> None:
+    ir = minimal_source_ir(
+        source_id="zh.copymanga",
+        language="zh",
+        source_format="decompiled_apk",
+        main_class="CopyManga",
+        files=_copymanga_listing_files(),
+    )
+    manifest = GenerationManifest(
+        source_struct="CopyManga",
+        files=[
+            GeneratedFile(path="src/lib.rs", content="mod source;"),
+            GeneratedFile(
+                path="src/source.rs",
+                content="""
+                pub struct CopyManga;
+                impl Source for CopyManga {
+                    fn get_search_manga_list(
+                        &self,
+                        query: Option<String>,
+                        page: i32,
+                        filters: Vec<FilterValue>,
+                    ) -> Result<MangaPageResult> {
+                        panic!("provider-owned listing")
+                    }
+                }
+                """,
+            ),
+            GeneratedFile(
+                path="src/c2a_listing.rs",
+                content='compile_error!("provider must not own this file");',
+            ),
+        ],
+    )
+
+    effective = with_deterministic_search_listing(ir, manifest)
+    files = {generated.path: generated.content for generated in effective.files}
+
+    assert "provider-owned listing" not in files["src/source.rs"]
+    assert (
+        "crate::c2a_listing::get_search_manga_list(query, page, filters)" in files["src/source.rs"]
+    )
+    assert "compile_error!" not in files["src/c2a_listing.rs"]
+    assert "mod c2a_listing;" in files["src/lib.rs"]
+    assert any(
+        dependency.name == "serde" and "derive" in dependency.features
+        for dependency in effective.dependencies
+    )
+
+
+def test_generation_context_omits_tool_owned_listing_evidence() -> None:
+    ir = minimal_source_ir(
+        source_id="zh.copymanga",
+        language="zh",
+        source_format="decompiled_apk",
+        main_class="CopyManga",
+        files=_copymanga_listing_files(),
+    )
+
+    context = build_generation_context(ir).as_payload()
+    evidence = {item["path"]: item["content"] for item in context["source_evidence"]}
+
+    api_repo = evidence["sources/example/api/ApiRepo.java"]
+    assert "comicListUrl" not in api_repo
+    assert "comicRankUrl" not in api_repo
+    assert "searchUrl" not in api_repo
+    assert "recommendPageUrl" in api_repo
+    assert "searchMangaRequest" not in evidence["sources/example/CopyManga.java"]
+    omitted = {item["path"]: item["reason"] for item in context["omitted_source_files"]}
+    assert omitted["sources/example/api/dto/ComicSummary.java"] == (
+        "represented_in_deterministic_search_listing"
+    )
+    assert context["context_stats"]["deterministic_search_listing_dto_shapes"] >= 5

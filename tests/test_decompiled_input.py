@@ -10,6 +10,7 @@ from convert2aidoku.decompiled_input import (
     decompiled_dto_shapes,
     decompiled_dynamic_filter_endpoint,
     decompiled_rank_list_wraps_comic,
+    decompiled_source_paths,
     normalize_decompiled_java,
     project_java_behavior,
 )
@@ -91,6 +92,37 @@ def test_manifest_exposes_all_shared_apk_facts() -> None:
     assert manifest.application_label == "Tachiyomi: Example"
     assert manifest.version_text == "12"
     assert manifest.metadata["tachiyomi.extension.nsfw"] == "1"
+
+
+def test_source_paths_collect_transitive_dto_field_dependencies(tmp_path: Path) -> None:
+    package = tmp_path / "sources" / "eu" / "kanade" / "tachiyomi" / "extension" / "en" / "example"
+    dto = package / "api" / "dto"
+    resources = tmp_path / "resources"
+    dto.mkdir(parents=True)
+    resources.mkdir()
+    (resources / "AndroidManifest.xml").write_text(
+        """<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+        package="eu.kanade.tachiyomi.extension.en.example">
+        <application><meta-data android:name="tachiyomi.extension.class"
+        android:value=".Example" /></application></manifest>"""
+    )
+    (package / "Example.java").write_text(
+        """package eu.kanade.tachiyomi.extension.en.example;
+        import eu.kanade.tachiyomi.extension.en.example.api.dto.Container;
+        public final class Example extends HttpSource { private Container value; }"""
+    )
+    (dto / "Container.java").write_text(
+        "public final class Container { private final java.util.List<Item> list; }"
+    )
+    (dto / "Item.java").write_text("public final class Item { private final Comic comic; }")
+    (dto / "Comic.java").write_text("public final class Comic { private final Author author; }")
+    (dto / "Author.java").write_text("public final class Author { private final String name; }")
+    (dto / "Unused.java").write_text("public final class Unused { private final String value; }")
+
+    names = {path.name for path in decompiled_source_paths(tmp_path)}
+
+    assert {"Container.java", "Item.java", "Comic.java", "Author.java"} <= names
+    assert "Unused.java" not in names
 
 
 def test_manifest_translates_invalid_xml_and_missing_main_class() -> None:

@@ -647,6 +647,31 @@ def test_generate_sends_deterministic_source_evidence_instead_of_raw_files() -> 
     assert result.reasoning_effort == ReasoningEffort.AUTO
 
 
+def test_generate_reserves_tool_owned_search_listing_module(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "convert2aidoku.ai.deterministic_search_listing_available",
+        lambda _ir: True,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        prompt = payload["messages"][1]["content"]
+        assert "deterministically owns src/c2a_listing.rs" in prompt
+        assert "crate::c2a_listing::get_search_manga_list(query, page, filters)" in prompt
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(_manifest())}}]},
+        )
+
+    with OpenAICompatibleClient(
+        provider_settings(),
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        client.generate(minimal_source_ir())
+
+
 def test_generate_structures_settings_and_owns_static_filters() -> None:
     calls = 0
 
@@ -896,6 +921,7 @@ def test_repair_uses_compact_context_without_original_source_bodies() -> None:
             ir,
             current_files=[
                 {"path": "src/lib.rs", "content": "current rust"},
+                {"path": "src/c2a_listing.rs", "content": "tool-owned listing"},
                 {"path": "res/settings.json", "content": "current-resource-marker"},
             ],
             diagnostics="compile error",

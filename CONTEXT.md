@@ -32,6 +32,10 @@ _Avoid_: AI output, generated files
 The strict, provider-independent endpoint, response-shape, field-mapping, filter-binding, and network strategy facts projected from a **SourceIR** for deterministic Rust generation. Its first vertical slice covers manga listings from Decompiled APK inputs.
 _Avoid_: Prompt hints, source-specific normalizer facts
 
+**Deterministic Search Listing**:
+The tool-owned Rust module rendered from a complete **Implementation IR** search/rank/browse slice. It owns its DTOs, request construction, response projection, and `Source::get_search_manga_list` delegation, and is excluded from generation and repair prompts.
+_Avoid_: Generated listing patch, AI listing helper
+
 **Generation Manifest Contract**:
 The structured diagnostics, targeted-repair scope, DTO-shape preservation, and user-readable rendering produced by evaluating one **Generation Manifest** against its **SourceIR**.
 _Avoid_: Capability gap strings, repair keywords
@@ -113,6 +117,7 @@ _Avoid_: Log
 - One **Input Source** passes through exactly one **SourceIR Analysis** Adapter and produces one **SourceIR** per conversion.
 - A decompiled APK **Input Source** yields one shared **Decompiled Inspection** whose facts feed **SourceIR** analysis and whose behavior and DTO-shape projections feed generation evidence.
 - One **SourceIR** may project one versioned **Implementation IR**; unresolved facts remain explicit and are the only business slots eligible for a later typed AI exchange.
+- A complete search/rank/browse **Implementation IR** renders one **Deterministic Search Listing** and removes the behavior and DTO evidence it owns from provider context.
 - One **Input Capability Recognition** classifies the Kotlin or Decompiled Java content of an **Input Source** into **SourceIR** capabilities and unsupported cryptography facts.
 - One **Checkpoint** records one or more **Generation Manifests** and identifies exactly one current manifest.
 - One **Checkpoint Store** persists one **Checkpoint**, its **SourceIR**, and raw **Generation Manifest** history, then mirrors that audit into the **Generated Source** `.c2a` directory.

@@ -7,6 +7,7 @@ from typing import Any
 
 from .decompiled_input import decompiled_dto_shapes, project_java_behavior
 from .errors import InputError
+from .listing_renderer import SearchListingOwnership, search_listing_ownership
 from .models import SourceFile, SourceIR
 
 DEFAULT_GENERATION_EVIDENCE_CHARS = 110_000
@@ -56,7 +57,12 @@ def _evidence_priority(ir: SourceIR, source: SourceFile) -> int:
     return 500
 
 
-def _source_evidence(ir: SourceIR, source: SourceFile) -> dict[str, Any]:
+def _source_evidence(
+    ir: SourceIR,
+    source: SourceFile,
+    *,
+    ownership: SearchListingOwnership | None,
+) -> dict[str, Any]:
     content = source.content
     representation = "complete"
     if source.path.endswith(".java") and "/api/dto/" not in f"/{source.path}":
@@ -65,6 +71,7 @@ def _source_evidence(ir: SourceIR, source: SourceFile) -> dict[str, Any]:
             content,
             main=main,
             public_only=ir.feature_scope == "public_only",
+            excluded_methods=ownership.java_methods if ownership is not None else frozenset(),
         )
         if sliced != content:
             content = sliced
@@ -99,7 +106,13 @@ def build_generation_context(
             },
         )
 
-    dto_shapes = [shape.render() for shape in decompiled_dto_shapes(ir.files)]
+    ownership = search_listing_ownership(ir)
+    owned_dto_types = ownership.dto_types if ownership is not None else frozenset()
+    dto_shapes = [
+        shape.render()
+        for shape in decompiled_dto_shapes(ir.files)
+        if shape.name not in owned_dto_types
+    ]
     candidates: list[tuple[int, int, SourceFile, dict[str, Any]]] = []
     omitted: list[dict[str, Any]] = []
     for index, source in enumerate(ir.files):
@@ -110,6 +123,16 @@ def build_generation_context(
                     "sha256": source.sha256,
                     "chars": len(source.content),
                     "reason": "represented_in_source_ir",
+                }
+            )
+            continue
+        if "/api/dto/" in f"/{source.path}" and PurePosixPath(source.path).stem in owned_dto_types:
+            omitted.append(
+                {
+                    "path": source.path,
+                    "sha256": source.sha256,
+                    "chars": len(source.content),
+                    "reason": "represented_in_deterministic_search_listing",
                 }
             )
             continue
@@ -127,7 +150,7 @@ def build_generation_context(
                 }
             )
             continue
-        evidence = _source_evidence(ir, source)
+        evidence = _source_evidence(ir, source, ownership=ownership)
         candidates.append((_evidence_priority(ir, source), index, source, evidence))
 
     essential = next(
@@ -175,6 +198,7 @@ def build_generation_context(
             "evidence_chars": total,
             "max_evidence_chars": max_chars,
             "dto_shapes": len(dto_shapes),
+            "deterministic_search_listing_dto_shapes": len(owned_dto_types),
         },
     )
 

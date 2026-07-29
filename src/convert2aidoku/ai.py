@@ -33,6 +33,7 @@ from .dependency_policy import evaluate_dependency_policy, render_dependency_pol
 from .errors import AIProviderError, SecurityError
 from .generation_context import build_generation_context, build_settings_context
 from .kotlin_settings import with_kotlin_settings
+from .listing_renderer import deterministic_search_listing_available
 from .models import (
     AIRound,
     AIUsage,
@@ -604,6 +605,15 @@ class OpenAICompatibleClient:
 
     def generate(self, ir: SourceIR) -> AIResult[GenerationManifest]:
         source_payload = build_generation_context(ir).as_payload()
+        deterministic_listing = deterministic_search_listing_available(ir)
+        listing_instruction = (
+            "The tool deterministically owns src/c2a_listing.rs for search, rank, and browse. "
+            "Do not return that file or reimplement its exclusive endpoints and DTOs. Implement "
+            "Source::get_search_manga_list as the single delegation expression "
+            "crate::c2a_listing::get_search_manga_list(query, page, filters). "
+            if deterministic_listing
+            else ""
+        )
         messages = [
             {
                 "role": "system",
@@ -624,7 +634,8 @@ class OpenAICompatibleClient:
                     "Define the public source_struct and Source implementation in src/source.rs; "
                     "the tool reconstructs src/lib.rs deterministically from source_struct, "
                     "implemented_traits, and the returned module paths. "
-                    "Cargo.toml is forbidden because the tool owns all Cargo metadata. Use only "
+                    + listing_instruction
+                    + "Cargo.toml is forbidden because the tool owns all Cargo metadata. Use only "
                     "allowed dependencies and do not omit required core behavior.\n\n"
                     + json.dumps(source_payload, ensure_ascii=False)
                 ),
@@ -719,6 +730,8 @@ class OpenAICompatibleClient:
                     "You repair a generated current Aidoku Rust source. Return a complete "
                     "Rust-only replacement manifest, not a diff and never shell commands. "
                     "Return only src/**/*.rs; filters/settings are tool-owned and preserved. "
+                    "src/c2a_listing.rs is also tool-owned, omitted from this request, and must "
+                    "not be returned or reimplemented. "
                     "Make only the minimum "
                     "changes required by the supplied diagnostics. Preserve working code, "
                     "selectors, endpoints, dependencies, capabilities, and network behavior "
@@ -741,7 +754,9 @@ class OpenAICompatibleClient:
                     {
                         "source_ir": ir.model_dump(mode="json", exclude={"files", "license_text"}),
                         "current_files": [
-                            item for item in current_files if item["path"].endswith(".rs")
+                            item
+                            for item in current_files
+                            if item["path"].endswith(".rs") and item["path"] != "src/c2a_listing.rs"
                         ],
                         "prior_generation_manifests": _compact_manifest_history(manifest_history),
                         "validation_diagnostics": diagnostics,

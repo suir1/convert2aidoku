@@ -3,11 +3,18 @@ from pathlib import Path
 
 import pytest
 
-from convert2aidoku.models import DependencyRequest, GeneratedFile, GenerationManifest
+from convert2aidoku.listing_renderer import render_search_listing
+from convert2aidoku.models import (
+    DependencyRequest,
+    GeneratedFile,
+    GenerationManifest,
+    RequestHeaderProfile,
+)
 from convert2aidoku.scaffold import apply_generation_manifest
 from convert2aidoku.toolchain import find_tool
 from convert2aidoku.validator import validate_project
-from tests.scenarios import scaffold_project
+from tests.scenarios import minimal_source_ir, scaffold_project
+from tests.test_implementation_ir import _copymanga_listing_files
 
 from .test_converter import RUST_SOURCE
 
@@ -49,6 +56,44 @@ TRIPLE_DES_RUST_SOURCE = RUST_SOURCE.replace(
     "        Self\n"
     "    }",
 )
+
+LISTING_RUST_SOURCE = """#![no_std]
+
+use aidoku::{Chapter, FilterValue, Manga, MangaPageResult, Page, Result, Source};
+use aidoku::{prelude::register_source, alloc::{String, Vec}};
+
+mod c2a_listing;
+
+pub struct Example;
+
+impl Source for Example {
+    fn new() -> Self { Self }
+
+    fn get_search_manga_list(
+        &self,
+        query: Option<String>,
+        page: i32,
+        filters: Vec<FilterValue>,
+    ) -> Result<MangaPageResult> {
+        c2a_listing::get_search_manga_list(query, page, filters)
+    }
+
+    fn get_manga_update(
+        &self,
+        manga: Manga,
+        _needs_details: bool,
+        _needs_chapters: bool,
+    ) -> Result<Manga> {
+        Ok(manga)
+    }
+
+    fn get_page_list(&self, _manga: Manga, _chapter: Chapter) -> Result<Vec<Page>> {
+        Ok(Vec::new())
+    }
+}
+
+register_source!(Example);
+"""
 
 pytestmark = pytest.mark.skipif(
     os.getenv("C2A_RUN_RUST_INTEGRATION") != "1",
@@ -113,6 +158,43 @@ def test_pinned_triple_des_dependencies_compile_for_wasm(tmp_path: Path) -> None
                 DependencyRequest(name="cbc"),
                 DependencyRequest(name="base64"),
             ],
+        ),
+        query=None,
+    )
+
+    validation = validate_project(project, live=False)
+    assert validation.build_ok, validation.diagnostics
+    assert validation.package_ok, validation.diagnostics
+
+
+def test_deterministic_search_listing_module_compiles_for_wasm(tmp_path: Path) -> None:
+    assert find_tool("cargo")
+    listing_ir = minimal_source_ir(
+        source_id="zh.copymanga",
+        language="zh",
+        source_format="decompiled_apk",
+        main_class="CopyManga",
+        files=_copymanga_listing_files(),
+        request_header_profiles=[
+            RequestHeaderProfile(
+                name="API",
+                domains=["api.copy3000.com", "api.manga2025.com"],
+                headers={"Accept": "application/json"},
+            )
+        ],
+    )
+    rendered = render_search_listing(listing_ir)
+    project, scaffold_ir = scaffold_project(tmp_path, name="listing-project")
+    apply_generation_manifest(
+        project,
+        scaffold_ir,
+        GenerationManifest(
+            source_struct="Example",
+            files=[
+                GeneratedFile(path="src/lib.rs", content=LISTING_RUST_SOURCE),
+                rendered,
+            ],
+            dependencies=[DependencyRequest(name="serde", features=["derive"])],
         ),
         query=None,
     )
