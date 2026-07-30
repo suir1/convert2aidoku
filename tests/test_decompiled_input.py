@@ -126,6 +126,105 @@ def test_source_paths_collect_transitive_dto_field_dependencies(tmp_path: Path) 
     assert "Unused.java" not in names
 
 
+def test_source_paths_accept_parsed_http_source_as_standard_http_source(tmp_path: Path) -> None:
+    package = tmp_path / "sources" / "eu" / "kanade" / "tachiyomi" / "extension" / "zh" / "baozi"
+    resources = tmp_path / "resources"
+    package.mkdir(parents=True)
+    resources.mkdir()
+    (resources / "AndroidManifest.xml").write_text(
+        """<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+        package="eu.kanade.tachiyomi.extension.zh.baozi">
+        <application><meta-data android:name="tachiyomi.extension.class"
+        android:value=".Baozi" /></application></manifest>"""
+    )
+    (package / "Baozi.java").write_text(
+        """package eu.kanade.tachiyomi.extension.zh.baozi;
+        public final class Baozi extends ParsedHttpSource implements ConfigurableSource {
+            private final String baseUrl = "https://example.com";
+        }"""
+    )
+
+    files = collect_source_files(
+        ResolvedSource(
+            input_ref="baozi.apk",
+            module_path=tmp_path,
+            repository_root=tmp_path,
+            commit=None,
+            license_path=None,
+            source_format="decompiled_apk",
+        )
+    )
+    inspection = DecompiledInputInspection.from_files(files)
+
+    assert any(item.path.endswith("Baozi.java") for item in files)
+    assert inspection.main_class == "Baozi"
+    assert inspection.parents == ("HttpSource", "ConfigurableSource")
+
+
+def test_source_paths_exclude_optional_anti_watermark_image_processing(tmp_path: Path) -> None:
+    package = tmp_path / "sources" / "eu" / "kanade" / "tachiyomi" / "extension" / "zh" / "baozi"
+    interceptor = package / "interceptor"
+    resources = tmp_path / "resources"
+    interceptor.mkdir(parents=True)
+    resources.mkdir()
+    (resources / "AndroidManifest.xml").write_text(
+        """<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+        package="eu.kanade.tachiyomi.extension.zh.baozi">
+        <application><meta-data android:name="tachiyomi.extension.class"
+        android:value=".Baozi" /></application></manifest>"""
+    )
+    (package / "Baozi.java").write_text(
+        """package eu.kanade.tachiyomi.extension.zh.baozi;
+        import eu.kanade.tachiyomi.extension.zh.baozi.interceptor.AntiWatermarkInterceptor;
+        public final class Baozi extends ParsedHttpSource {
+            private final AntiWatermarkInterceptor optionalCleanup;
+        }"""
+    )
+    (interceptor / "AntiWatermarkInterceptor.java").write_text(
+        "public final class AntiWatermarkInterceptor { android.graphics.Bitmap bitmap; }"
+    )
+
+    names = {path.name for path in decompiled_source_paths(tmp_path)}
+
+    assert "Baozi.java" in names
+    assert "AntiWatermarkInterceptor.java" not in names
+
+
+def test_source_paths_collect_same_package_helper_dependency_closure(tmp_path: Path) -> None:
+    package = tmp_path / "sources" / "eu" / "kanade" / "tachiyomi" / "extension" / "zh" / "baozi"
+    resources = tmp_path / "resources"
+    package.mkdir(parents=True)
+    resources.mkdir()
+    (resources / "AndroidManifest.xml").write_text(
+        """<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+        package="eu.kanade.tachiyomi.extension.zh.baozi">
+        <application><meta-data android:name="tachiyomi.extension.class"
+        android:value=".Baozi" /></application></manifest>"""
+    )
+    (package / "Baozi.java").write_text(
+        "public final class Baozi extends HttpSource { private HttpSourceRepo repo; }"
+    )
+    (package / "HttpSourceRepo.java").write_text(
+        "public final class HttpSourceRepo { private Preferences preferences; }"
+    )
+    (package / "Preferences.java").write_text(
+        "public final class Preferences { private String apiDomain; }"
+    )
+    (package / "Unreferenced.java").write_text("public final class Unreferenced {}")
+    unrelated_package = tmp_path / "sources" / "unrelated"
+    unrelated_package.mkdir()
+    (unrelated_package / "Preferences.java").write_text(
+        "public final class Preferences { private String unrelated; }"
+    )
+
+    selected = decompiled_source_paths(tmp_path)
+    names = {path.name for path in selected}
+
+    assert {"Baozi.java", "HttpSourceRepo.java", "Preferences.java"} <= names
+    assert "Unreferenced.java" not in names
+    assert unrelated_package / "Preferences.java" not in selected
+
+
 def test_manifest_translates_invalid_xml_and_missing_main_class() -> None:
     with pytest.raises(InputError, match="unable to parse decompiled AndroidManifest"):
         DecompiledManifest.from_content("<manifest>")
@@ -164,12 +263,12 @@ def test_java_request_header_policy_recovers_profiles_domains_and_shared_headers
             "Accept", "application/json", "Origin", "https://copy.example"
         });
         private static final Headers HOT_HEADER = Headers.Companion.of(new String[]{
-            "Accept", "application/json", "Webp", "1"
+            "Accept", "application/json", "Webp", "1", "Accept-Encoding", "gzip"
         });
         COPY("api.copy.example", "api.copy.example", "Copy", ApiRepo.INSTANCE.getCOPY_HEADER()),
         HOT("api.hot.example", "api.hot.example", "Hot", ApiRepo.INSTANCE.getHOT_HEADER());
         this.insertHeader = Headers.Companion.of(new String[]{
-            "sec-fetch-mode", "navigate"
+            "sec-fetch-mode", "navigate", "accept-encoding", "gzip"
         });
         """
     )
@@ -178,6 +277,7 @@ def test_java_request_header_policy_recovers_profiles_domains_and_shared_headers
     assert profiles[0].domains == ["api.copy.example"]
     assert profiles[0].headers["Origin"] == "https://copy.example"
     assert profiles[1].domains == ["api.hot.example"]
+    assert "Accept-Encoding" not in profiles[1].headers
     assert shared == {"sec-fetch-mode": "navigate"}
 
 

@@ -458,6 +458,14 @@ def test_analyzes_decompiled_apk_as_public_only(
     assert any("chapter comments" in item for item in ir.unsupported_features)
 
 
+def test_decompiled_apk_reports_optional_anti_watermark_cleanup() -> None:
+    from convert2aidoku.decompiled_analysis import _apk_optional_features
+
+    assert _apk_optional_features("new AntiWatermarkInterceptor(preferences)") == [
+        "anti-watermark image cleanup (excluded by public-reading APK scope)"
+    ]
+
+
 def test_analyzes_supported_triple_des_in_decompiled_apk(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

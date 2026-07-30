@@ -4,6 +4,7 @@ import json
 import re
 
 from .analysis_common import input_license, match
+from .constants import AIDOKU_RUNTIME_MANAGED_REQUEST_HEADERS
 from .decompiled_input import DecompiledInputInspection
 from .errors import InputError, UnsupportedSourceError
 from .ingest import ResolvedSource, collect_source_files
@@ -43,7 +44,11 @@ def _java_request_header_policy(
     ):
         values = _java_string_array(header_match.group("values"))
         if values and len(values) % 2 == 0:
-            profiles[header_match.group("name")] = dict(zip(values[::2], values[1::2], strict=True))
+            profiles[header_match.group("name")] = {
+                name: value
+                for name, value in zip(values[::2], values[1::2], strict=True)
+                if name.casefold() not in AIDOKU_RUNTIME_MANAGED_REQUEST_HEADERS
+            }
 
     domains: dict[str, list[str]] = {name: [] for name in profiles}
     for domain_match in re.finditer(
@@ -62,7 +67,13 @@ def _java_request_header_policy(
     ):
         values = _java_string_array(shared_match.group("values"))
         if values and len(values) % 2 == 0:
-            shared.update(dict(zip(values[::2], values[1::2], strict=True)))
+            shared.update(
+                {
+                    name: value
+                    for name, value in zip(values[::2], values[1::2], strict=True)
+                    if name.casefold() not in AIDOKU_RUNTIME_MANAGED_REQUEST_HEADERS
+                }
+            )
 
     return (
         [
@@ -228,6 +239,8 @@ def _java_filter_specs(java: str) -> list[SourceFilterSpec]:
 
 def _apk_optional_features(java: str) -> list[str]:
     optional: list[str] = []
+    if "AntiWatermarkInterceptor" in java:
+        optional.append("anti-watermark image cleanup (excluded by public-reading APK scope)")
     if any(marker in java for marker in ("TokenProvider", '"/login"', "loginURL")):
         optional.append("login/authentication (excluded by public-only APK scope)")
     if any(marker in java for marker in ("memberCollect", "CollectResult", "CollectInfo")):

@@ -4,7 +4,7 @@ import json
 import re
 
 from .analysis_common import input_license, match
-from .constants import DEFAULT_BROWSER_USER_AGENT
+from .constants import AIDOKU_RUNTIME_MANAGED_REQUEST_HEADERS, DEFAULT_BROWSER_USER_AGENT
 from .errors import InputError, UnsupportedSourceError
 from .ingest import ResolvedSource, collect_source_files
 from .input_capabilities import InputCapabilityRecognition, recognize_input_capabilities
@@ -513,7 +513,7 @@ def analyze_kotlin_source(resolved: ResolvedSource) -> SourceIR:
             r"(?:\.|\b)(?:add|set)\(\s*\"([^\"]+)\"\s*,\s*\"([^\"]*)\"\s*\)",
             kotlin,
         )
-        if "$" not in value
+        if "$" not in value and name.casefold() not in AIDOKU_RUNTIME_MANAGED_REQUEST_HEADERS
     }
     if "KeiSource" in parents or "super.headersBuilder()" in kotlin:
         shared_request_headers.setdefault("User-Agent", DEFAULT_BROWSER_USER_AGENT)

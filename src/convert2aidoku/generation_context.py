@@ -21,6 +21,10 @@ _SETTING_USAGE = re.compile(
     r"setupPreferenceScreen|initPreferences|settings\.json",
     re.IGNORECASE,
 )
+_SETTING_ACCESS = re.compile(
+    r"\.(?:getBoolean|getString|setKey|setTitle|setSummary|setEntries|"
+    r"setEntryValues|setDefaultValue)\s*\("
+)
 
 
 @dataclass(frozen=True)
@@ -237,7 +241,11 @@ def _settings_declaration_slice(content: str) -> str:
             selected.append(stripped)
             saw_class = True
             continue
-        if saw_class and not in_option_constants and re.match(r"[A-Z][A-Z0-9_]*\s*\(", stripped):
+        if (
+            saw_class
+            and not in_option_constants
+            and re.match(r"[A-Za-z_][A-Za-z0-9_]*\s*\(", stripped)
+        ):
             in_option_constants = True
         if in_option_constants:
             selected.append(stripped)
@@ -246,12 +254,52 @@ def _settings_declaration_slice(content: str) -> str:
             continue
         if re.search(
             r"\bpublic\s+static\s+final\s+String\s+[A-Z][A-Z0-9_]*\b|"
+            r"\bpublic\s+static\s+final\s+[A-Za-z_]\w*\s+[A-Z][A-Z0-9_]*\s*=\s*"
+            r"new\s+[A-Za-z_]\w*\s*\(|"
             r"\b(?:public|private|protected)\s+static\s+final\b[^;=\n]*\b"
             r"(?:KEY|DEFAULT|SUMMARY|SUMMERY|ENTRIES|ENTRY_KEYS|[A-Z0-9_]+_KEY)\b",
             line,
         ):
             selected.append(stripped)
     return "\n".join(dict.fromkeys(line for line in selected if line))
+
+
+def _settings_accessor_slice(content: str) -> str:
+    """Keep complete decompiled preference accessors and builders, not adjacent business code."""
+    lines = content.splitlines()
+    ranges: list[tuple[int, int]] = []
+    declaration = re.compile(
+        r"\b(?:public|protected|private)\s+(?:static\s+)?(?:final\s+)?"
+        r"[A-Za-z0-9_.$<>?, \[\]]+\s+[A-Za-z_]\w*\s*\([^;]*\)\s*\{"
+    )
+    for index, line in enumerate(lines):
+        if _SETTING_ACCESS.search(line) is None:
+            continue
+        start = next(
+            (
+                candidate
+                for candidate in range(index, -1, -1)
+                if declaration.search(lines[candidate])
+            ),
+            index,
+        )
+        depth = 0
+        saw_opening = False
+        end = start + 1
+        for candidate in range(start, len(lines)):
+            depth += lines[candidate].count("{") - lines[candidate].count("}")
+            saw_opening |= "{" in lines[candidate]
+            end = candidate + 1
+            if saw_opening and depth <= 0:
+                break
+        ranges.append((start, end))
+    merged: list[list[int]] = []
+    for start, end in sorted(set(ranges)):
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return "\n\n".join("\n".join(lines[start:end]) for start, end in merged)
 
 
 def _settings_usage_slice(content: str) -> str:
@@ -293,11 +341,17 @@ def build_settings_context(
         path_relevant = any(marker in stem for marker in ("Option", "Preference", "Setting"))
         if not path_relevant and _SETTING_USAGE.search(source.content) is None:
             continue
-        excerpt = (
-            _settings_declaration_slice(source.content)
-            if path_relevant
-            else _settings_usage_slice(source.content)
-        )
+        if path_relevant:
+            excerpt = "\n\n".join(
+                part
+                for part in (
+                    _settings_declaration_slice(source.content),
+                    _settings_accessor_slice(source.content),
+                )
+                if part
+            )
+        else:
+            excerpt = _settings_usage_slice(source.content)
         if not excerpt:
             continue
         candidates.append(

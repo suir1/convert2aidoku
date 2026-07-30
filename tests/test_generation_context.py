@@ -194,3 +194,38 @@ def test_settings_context_compacts_option_methods_and_generic_preference_usage()
     assert evidence[main.path].count("setupPreferenceScreen") == 1
     assert 'getString("noise"' not in evidence[main.path]
     assert 'USER_AGENT = "ua"' in evidence[keys.path]
+
+
+def test_settings_context_keeps_decompiled_preference_keys_defaults_and_enum_values() -> None:
+    preferences = _file(
+        "sources/example/Preferences.java",
+        """
+        public final class Preferences {
+            public enum LanguageOption {
+                Simplified("简体中文", "zh-cn"),
+                Traditional("繁體中文", "zh-tw");
+            }
+            public static final ApiOption MAIN = new ApiOption("www.example.com", "主站");
+            public String getDomain(SharedPreferences preferences) {
+                return preferences.getString("v1.key.api", "www.example.com");
+            }
+            public Preference[] initPreferences(Context context) {
+                ListPreference preference = new ListPreference(context);
+                preference.setKey("v1.key.api");
+                preference.setTitle("API 域名");
+                preference.setDefaultValue("www.example.com");
+                return new Preference[]{preference};
+            }
+            public String unrelatedBusinessMethod() { return "must-not-be-sent"; }
+        }
+        """,
+    )
+
+    payload = build_settings_context(_ir(preferences))
+    content = payload["settings_evidence"][0]["content"]
+
+    assert 'Simplified("简体中文", "zh-cn")' in content
+    assert 'new ApiOption("www.example.com", "主站")' in content
+    assert 'getString("v1.key.api", "www.example.com")' in content
+    assert 'setTitle("API 域名")' in content
+    assert "must-not-be-sent" not in content

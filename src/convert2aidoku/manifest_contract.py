@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from .constants import MAX_AI_DIAGNOSTIC_CHARS
+from .constants import AIDOKU_RUNTIME_MANAGED_REQUEST_HEADERS, MAX_AI_DIAGNOSTIC_CHARS
 from .decompiled_input import (
     DecompiledDtoField,
     DecompiledDtoShape,
@@ -18,7 +18,13 @@ from .dependency_policy import evaluate_dependency_policy
 from .models import Capability, GeneratedResources, GenerationManifest, SourceIR
 from .rust_inspection import RustInspection
 
-RepairKind = Literal["retry", "chapter_regex", "dto_shape", "image_resolution"]
+RepairKind = Literal[
+    "retry",
+    "chapter_regex",
+    "dto_shape",
+    "image_resolution",
+    "transport_header",
+]
 
 
 @dataclass(frozen=True)
@@ -181,6 +187,19 @@ def evaluate_manifest_contract(
     )
     if missing_shared_headers:
         add("generated requests omit source-wide headers: " + ", ".join(missing_shared_headers))
+    manual_runtime_headers = sorted(
+        name
+        for name in AIDOKU_RUNTIME_MANAGED_REQUEST_HEADERS
+        if any(rust.function_has_header(function.name, name) for function in rust.functions)
+    )
+    if manual_runtime_headers:
+        display = ", ".join(name.title() for name in manual_runtime_headers)
+        add(
+            f"generated requests set {display} manually; omit it because the Aidoku runtime "
+            "owns response decompression and may otherwise expose compressed bytes to "
+            "HTML/JSON parsers",
+            "transport_header",
+        )
     if (
         Capability.IMAGE_HEADERS in ir.capabilities
         and rust.function_contains("get_image_request", "context")
@@ -600,6 +619,13 @@ def _repair_excerpts(
                     and "Regex::new" in function.text
                 )
                 or ("image_resolution" in repair_kinds and "resolution" in function.name.lower())
+                or (
+                    "transport_header" in repair_kinds
+                    and any(
+                        inspection.function_has_header(function.name, name)
+                        for name in AIDOKU_RUNTIME_MANAGED_REQUEST_HEADERS
+                    )
+                )
             )
             if not include:
                 continue

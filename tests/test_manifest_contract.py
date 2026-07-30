@@ -37,6 +37,10 @@ CHAPTER_REGEX_MESSAGE = (
     "delimiters or numeric chapter labels, use bounded string scanning so each update does "
     "not compile a regex and pull regex runtime cost into the WASM hot path"
 )
+TRANSPORT_HEADER_MESSAGE = (
+    "generated requests set Accept-Encoding manually; omit it because the Aidoku runtime "
+    "owns response decompression and may otherwise expose compressed bytes to HTML/JSON parsers"
+)
 
 
 def _manifest(content: str) -> GenerationManifest:
@@ -153,6 +157,29 @@ def test_targeted_repair_selects_only_functions_for_declared_kinds(tmp_path: Pat
     assert "Regex::new" in combined
     assert "preserve_everything_here" not in combined
     assert repair.diagnostics == "retry required\nchapter scan required"
+
+
+def test_manual_accept_encoding_is_a_targeted_contract_gap(tmp_path: Path) -> None:
+    content = (
+        'fn fetch(&self) { Request::get("https://example.test")'
+        '.header("Accept-Encoding", "gzip"); }\n'
+        "fn unrelated(&self) { preserve(); }\n"
+    )
+    evaluation = evaluate_manifest_contract(minimal_source_ir(), _manifest(content))
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "lib.rs").write_text(content, encoding="utf-8")
+
+    repair = evaluation.repair(tmp_path)
+
+    assert evaluation.diagnostics == (
+        ContractDiagnostic(TRANSPORT_HEADER_MESSAGE, "transport_header"),
+    )
+    assert repair is not None
+    assert [item["content"] for item in repair.excerpts] == [
+        'fn fetch(&self) { Request::get("https://example.test")'
+        '.header("Accept-Encoding", "gzip"); }'
+    ]
 
 
 def test_image_resolution_contract_gap_selects_only_resolution_function(

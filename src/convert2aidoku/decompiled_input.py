@@ -14,6 +14,7 @@ from .models import SourceFile
 
 _ANDROID_XML_NAMESPACE = "http://schemas.android.com/apk/res/android"
 _OPTIONAL_CLASS_MARKERS = (
+    "AntiWatermarkInterceptor",
     "AuthorizationInterceptor",
     "ChapterComment",
     "CollectInfo",
@@ -90,6 +91,7 @@ _HTTP_SOURCE_DECLARATION = re.compile(
     r"\bclass\s+([A-Za-z_][A-Za-z0-9_]*)\s+extends\s+([A-Za-z0-9_.$]+)"
     r"(?:\s+implements\s+([^\{]+))?\s*\{"
 )
+_HTTP_SOURCE_PARENT_NAMES = frozenset({"HttpSource", "ParsedHttpSource"})
 _DETAIL_API_ENVELOPE = re.compile(
     r"ApiResponse\.class[\s\S]{0,300}?"
     r"Reflection\.typeOf\((?:Comic)?DetailResult\.class\)"
@@ -99,6 +101,7 @@ _DTO_SERIALIZED_NAME = re.compile(
     re.MULTILINE,
 )
 _MAX_DTO_DEPENDENCY_FILES = 96
+_MAX_LOCAL_DEPENDENCY_FILES = 64
 
 
 @dataclass(frozen=True)
@@ -416,8 +419,38 @@ def decompiled_source_paths(
         if any(marker in imported_class for marker in _OPTIONAL_CLASS_MARKERS):
             continue
         selected.extend(sorted(by_name.get(f"{imported_class}.java", [])))
+    _extend_local_dependency_closure(selected, by_name)
     _extend_dto_dependency_closure(selected, by_name)
     return list(dict.fromkeys(selected))
+
+
+def _extend_local_dependency_closure(
+    selected: list[Path],
+    by_name: dict[str, list[Path]],
+) -> None:
+    """Collect same-package helpers referenced without Java import statements."""
+    known = set(selected)
+    pending = [path for path in selected if path.suffix == ".java"]
+    added = 0
+    while pending:
+        path = pending.pop(0)
+        content = path.read_text(encoding="utf-8", errors="replace")
+        referenced = set(re.findall(r"\b[A-Z][A-Za-z0-9_]*\b", content))
+        for type_name in sorted(referenced):
+            if any(marker in type_name for marker in _OPTIONAL_CLASS_MARKERS):
+                continue
+            for candidate in sorted(by_name.get(f"{type_name}.java", [])):
+                if candidate.parent != path.parent or candidate in known:
+                    continue
+                added += 1
+                if added > _MAX_LOCAL_DEPENDENCY_FILES:
+                    raise InputError(
+                        "decompiled APK local dependency closure exceeds "
+                        f"{_MAX_LOCAL_DEPENDENCY_FILES} files"
+                    )
+                known.add(candidate)
+                selected.append(candidate)
+                pending.append(candidate)
 
 
 def _extend_dto_dependency_closure(
@@ -552,8 +585,11 @@ def project_java_behavior(
 
 def _http_source_declaration(content: str) -> tuple[str, tuple[str, ...]] | None:
     match = _HTTP_SOURCE_DECLARATION.search(content)
-    if match is None or match.group(2).rsplit(".", 1)[-1] != "HttpSource":
+    if match is None or match.group(2).rsplit(".", 1)[-1] not in _HTTP_SOURCE_PARENT_NAMES:
         return None
+    # ParsedHttpSource is Tachiyomi's selector-oriented HttpSource subclass. Its
+    # inherited request/parse behavior maps to the same Aidoku source contract,
+    # so keep the downstream parent policy canonical and source-agnostic.
     parents = ["HttpSource"]
     if match.group(3):
         parents.extend(

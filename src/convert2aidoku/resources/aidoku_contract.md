@@ -113,6 +113,9 @@ Mapping rules:
 - Keiyoushi `KeiSource` requests likewise inherit the shared browser-like client User-Agent even
   when `configureHeaders` only lists source-specific headers. Treat every entry in
   `source_ir.shared_request_headers` as mandatory on all normal and image requests.
+- Do not copy `Accept-Encoding` into generated requests, even when it appears in the Input Source.
+  Aidoku's networking runtime owns compression negotiation and response decoding; setting it
+  manually can expose compressed bytes to `get_html()` or `get_json_owned()` as invalid strings.
 - When `source_ir.source_format` is `decompiled_apk`, treat the selected JADX Java as a lossy but
   behavior-bearing representation of the original Kotlin. When `feature_scope` is `public_only`,
   implement every detected public search/list/details/chapters/pages capability, but do not
