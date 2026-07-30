@@ -9,7 +9,7 @@ from typing import Any
 
 from jinja2 import Environment, StrictUndefined
 
-from .constants import MAX_GENERATED_FILE_CHARS
+from .constants import DEFAULT_BROWSER_USER_AGENT, MAX_GENERATED_FILE_CHARS
 from .decompiled_input import (
     decompiled_detail_uses_api_envelope,
     decompiled_dto_shapes,
@@ -424,6 +424,23 @@ def _normalize_pinned_model_fields(content: str) -> str:
         }
         for function in inspection.functions
     }
+    local_option_bindings = {
+        function.node.start_byte: {
+            match.group("name")
+            for match in re.finditer(
+                r"\blet\s+(?:mut\s+)?(?P<name>[A-Za-z_]\w*)"
+                r"(?P<annotation>\s*:\s*(?:core::option::)?Option\s*<[^;=]+>)?\s*=\s*"
+                r"(?P<expression>[^;]{1,1200});",
+                function.text,
+            )
+            if match.group("annotation")
+            or (
+                any(marker in match.group("expression") for marker in (".map(", ".and_then("))
+                and ".unwrap_or" not in match.group("expression")
+            )
+        }
+        for function in inspection.functions
+    }
     for node in inspection.nodes("struct_expression"):
         name_node = node.child_by_field_name("name")
         body = node.child_by_field_name("body")
@@ -449,8 +466,28 @@ def _normalize_pinned_model_fields(content: str) -> str:
             field_name = field_node.text.decode("utf-8", errors="replace")
             value = value_node.text.decode("utf-8", errors="replace")
             replacement_value = value
+            owner = node
+            while owner.parent is not None and owner.type != "function_item":
+                owner = owner.parent
+            local_options = local_option_bindings.get(owner.start_byte, set())
+            nested_local_option = re.fullmatch(r"Some\((?P<name>[A-Za-z_]\w*)\)", value)
             if type_name == "Manga" and field_name == "title" and value.endswith(".text()"):
                 replacement_value = f"{value}.unwrap_or_default()"
+            elif (
+                field_name == "url"
+                or (type_name == "Manga" and field_name in {"cover", "description"})
+                or (type_name == "Chapter" and field_name == "title")
+            ) and value in local_options:
+                replacement_value = value
+            elif (
+                field_name == "url"
+                or (type_name == "Manga" and field_name in {"cover", "description"})
+                or (type_name == "Chapter" and field_name == "title")
+            ) and (
+                nested_local_option is not None
+                and nested_local_option.group("name") in local_options
+            ):
+                replacement_value = nested_local_option.group("name")
             elif (
                 field_name == "url"
                 or (type_name == "Manga" and field_name in {"cover", "description"})
@@ -460,14 +497,11 @@ def _normalize_pinned_model_fields(content: str) -> str:
             elif type_name == "Manga" and field_name == "status" and value.startswith("Some("):
                 replacement_value = value[5:-1]
             elif type_name == "Chapter" and field_name in {"chapter_number", "volume_number"}:
-                owner = node
-                while owner.parent is not None and owner.type != "function_item":
-                    owner = owner.parent
                 local_option_f32_bindings = option_f32_bindings.get(owner.start_byte, set())
                 if value in local_option_f32_bindings:
                     continue
                 direct_option_call = re.fullmatch(
-                    r"(?:Self::)?(?P<name>[A-Za-z_]\w*)\([\s\S]*\)",
+                    r"(?:(?:Self::|self\.)?)(?P<name>[A-Za-z_]\w*)\([\s\S]*\)",
                     value,
                 )
                 if (
@@ -490,7 +524,7 @@ def _normalize_pinned_model_fields(content: str) -> str:
                     replacement_value = invalid_option_cast.group("value")
                 else:
                     invalid_option_call = re.fullmatch(
-                        r"Some\(\((?P<value>(?:Self::)?(?P<name>[A-Za-z_]\w*)"
+                        r"Some\(\((?P<value>(?:(?:Self::|self\.)?)(?P<name>[A-Za-z_]\w*)"
                         r"\([\s\S]*\))\)\s+as\s+f32\)",
                         value,
                     )
@@ -1019,6 +1053,39 @@ def _normalize_defaults_get_bindings(content: str) -> str:
         )
 
     return pattern.sub(replace, content)
+
+
+def _normalize_owned_setting_routes(content: str) -> str:
+    """Keep a selected setting-owned route alive after its branch closes."""
+    replacements: list[tuple[str, str]] = []
+    for function in RustInspection.from_content(content).functions:
+        saved = re.search(
+            r"\blet\s+(?P<name>[A-Za-z_]\w*)\s*=\s*"
+            r"(?:aidoku::imports::defaults::)?defaults_get\s*::\s*<\s*String\s*>",
+            function.text,
+        )
+        if saved is None or f"=> {saved.group('name')}.as_str()," not in function.text:
+            continue
+        normalized = function.text.replace(
+            f"=> {saved.group('name')}.as_str(),",
+            f"=> {saved.group('name')}.clone(),",
+        )
+        normalized = re.sub(
+            r"(?P<prefix>\blet\s+[A-Za-z_]\w*\s*=\s*if\s+[^\{]{1,300}\{\s*)"
+            r"(?P<literal>\"(?:\\.|[^\"\\])*\")(?P<suffix>\s*\}\s*else\s*\{)",
+            r"\g<prefix>String::from(\g<literal>)\g<suffix>",
+            normalized,
+            count=1,
+        )
+        normalized = re.sub(
+            r"(?P<prefix>=>\s*)(?P<literal>\"(?:\\.|[^\"\\])*\")(?P<suffix>\s*,)",
+            r"\g<prefix>String::from(\g<literal>)\g<suffix>",
+            normalized,
+        )
+        replacements.append((function.text, normalized))
+    for original, normalized in replacements:
+        content = content.replace(original, normalized, 1)
+    return content
 
 
 def _normalize_aidoku_result_errors(content: str) -> str:
@@ -2175,15 +2242,81 @@ def _normalize_html_element_text(content: str) -> str:
         content,
     )
     content = re.sub(
+        r"(?P<element>[A-Za-z_]\w*)\s*\.text\(\)(?P<space>\s*)(?P<method>\."
+        r"(?:chars|find|is_empty|len|parse|split|trim|contains|starts_with|ends_with))"
+        r"(?P<generic>::\s*<[^>]+>)?\(",
+        r"\g<element>.text().unwrap_or_default()\g<space>\g<method>\g<generic>(",
+        content,
+    )
+    content = re.sub(
+        r"&(?P<element>[A-Za-z_]\w*)\.text\(\)(?!\.unwrap_or_default\(\))",
+        r"&\g<element>.text().unwrap_or_default()",
+        content,
+    )
+    content = re.sub(
+        r"(?P<element>[A-Za-z_]\w*)\.text\(\)\s*(?P<operator>==|!=)\s*"
+        r"(?P<literal>\"(?:\\.|[^\"\\])*\")",
+        r"\g<element>.text().as_deref() \g<operator> Some(\g<literal>)",
+        content,
+    )
+    content = re.sub(
+        r"(?P<callee>(?:self\.)?normalized_text|(?:aidoku::)?AidokuError::message)"
+        r"\(\s*(?P<element>[A-Za-z_]\w*)\.text\(\)(?!\.unwrap_or_default\(\))",
+        r"\g<callee>(\g<element>.text().unwrap_or_default()",
+        content,
+    )
+    content = re.sub(
         r"(?P<target>\bmanga\.title)\s*=\s*"
         r"(?P<element>[A-Za-z_]\w*)\.text\(\)\s*;",
         r"\g<target> = \g<element>.text().unwrap_or_default();",
         content,
     )
-    return re.sub(
+    content = re.sub(
         r"(?P<values>\b[A-Za-z_]\w*)\.push\("
         r"(?P<element>[A-Za-z_]\w*)\.text\(\)\)\s*;",
         r"\g<values>.extend(\g<element>.text());",
+        content,
+    )
+    replacements: list[tuple[str, str]] = []
+    binding_pattern = re.compile(
+        r"\blet\s+(?:mut\s+)?(?P<name>[A-Za-z_]\w*)\s*=\s*"
+        r"(?P<element>[A-Za-z_]\w*)\.text\(\)\s*;"
+    )
+    for function in RustInspection.from_content(content).functions:
+        normalized = function.text
+        for binding in binding_pattern.finditer(function.text):
+            name = binding.group("name")
+            remaining = function.text[binding.end() :]
+            preserves_option = re.search(
+                rf"\b{re.escape(name)}\.(?:as_deref|as_ref|and_then|map|is_some|is_none|"
+                r"unwrap|unwrap_or|unwrap_or_default|take)\b"
+                rf"|\b(?:if|while)\s+let\s+Some\([^)]*\)\s*=\s*{re.escape(name)}\b"
+                r"(?!\s*\.)"
+                rf"|\bmatch\s+{re.escape(name)}\b",
+                remaining,
+            )
+            if preserves_option is not None:
+                continue
+            normalized = normalized.replace(
+                binding.group(0),
+                binding.group(0).replace(".text()", ".text().unwrap_or_default()"),
+                1,
+            )
+        if normalized != function.text:
+            replacements.append((function.text, normalized))
+    for original, normalized in replacements:
+        content = content.replace(original, normalized, 1)
+    return content
+
+
+def _normalize_utf8_slice_loops(content: str) -> str:
+    """Iterate valid UTF-8 boundaries before slicing a string by an index."""
+    return re.sub(
+        r"(?m)^(?P<indent>[ \t]*)let\s+(?P<bytes>[A-Za-z_]\w*)\s*=\s*"
+        r"(?P<text>[A-Za-z_]\w*)\.as_bytes\(\);\s*\n"
+        r"(?P=indent)for\s+(?P<index>[A-Za-z_]\w*)\s+in\s+0\.\."
+        r"(?P=bytes)\.len\(\)\s*\{",
+        r"\g<indent>for (\g<index>, _) in \g<text>.char_indices() {",
         content,
     )
 
@@ -3379,6 +3512,7 @@ def normalize_pinned_aidoku_rust(
     content = _normalize_generic_deserialize(content)
     content = _normalize_graphql_body_fragment(content)
     content = _normalize_html_element_text(content)
+    content = _normalize_utf8_slice_loops(content)
     content = _normalize_graphql_manga_update_projection(content)
     content = _normalize_image_request_result(content)
     content = _normalize_result_request_tails(content)
@@ -3386,6 +3520,7 @@ def normalize_pinned_aidoku_rust(
     content = _normalize_manga_replacement_chapters(content)
     content = _normalize_legacy_request_errors(content)
     content = _normalize_defaults_get_bindings(content)
+    content = _normalize_owned_setting_routes(content)
     content = _normalize_defaults_set_string_values(content)
     content = _normalize_rsa_bootstrap_diagnostics(content)
     content = _normalize_aidoku_result_errors(content)
@@ -3987,8 +4122,7 @@ def _recovered_request_builder(
                 '        if user_agent.is_empty() || user_agent == "desktop" '
                 '|| user_agent == "mobile" || user_agent == "app" {',
                 '            request = request.header("User-Agent", '
-                '"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) '
-                'Gecko/20100101 Firefox/114.0");',
+                f"{json.dumps(DEFAULT_BROWSER_USER_AGENT)});",
                 "        } else {",
                 '            request = request.header("User-Agent", &user_agent);',
                 "        }",
@@ -4006,6 +4140,7 @@ def _project_recovered_request_headers(
     setting_defaults: Mapping[str, str],
     setting_values: Mapping[str, tuple[str, ...]],
 ) -> list[GeneratedFile]:
+    files = _project_shared_request_headers(ir.shared_request_headers, files)
     builder = _recovered_request_builder(
         ir,
         setting_defaults=setting_defaults,
@@ -4047,6 +4182,86 @@ def _project_recovered_request_headers(
         updated.append(
             generated.model_copy(update={"content": content})
             if replacement is not None
+            else generated
+        )
+    return updated
+
+
+def _project_shared_request_headers(
+    headers: Mapping[str, str],
+    files: list[GeneratedFile],
+) -> list[GeneratedFile]:
+    if not headers:
+        return files
+    updated: list[GeneratedFile] = []
+    for generated in files:
+        content = generated.content
+        if not generated.path.endswith(".rs"):
+            updated.append(generated)
+            continue
+        replacements: list[tuple[str, str]] = []
+        for function in RustInspection.from_content(content).functions:
+            if "Request::get" not in function.text:
+                continue
+            missing = [
+                (name, value)
+                for name, value in headers.items()
+                if re.search(
+                    rf"\.header\(\s*{re.escape(json.dumps(name))}\s*,",
+                    function.text,
+                    re.IGNORECASE,
+                )
+                is None
+            ]
+            if not missing:
+                continue
+            local = RustInspection.from_content(function.text)
+            projected_function = None
+            for call in local.nodes("call_expression"):
+                callee = call.child_by_field_name("function")
+                if callee is None or callee.type != "field_expression":
+                    continue
+                field = callee.child_by_field_name("field")
+                receiver = callee.child_by_field_name("value")
+                if (
+                    field is None
+                    or field.text != b"send"
+                    or receiver is None
+                    or "Request::get" not in receiver.text.decode("utf-8", errors="replace")
+                ):
+                    continue
+                request = receiver.text.decode("utf-8", errors="replace")
+                projected_request = request + "".join(
+                    f".header({json.dumps(name)}, {json.dumps(value)})" for name, value in missing
+                )
+                projected_function = function.text.replace(request, projected_request, 1)
+                break
+            if projected_function is not None:
+                replacements.append((function.text, projected_function))
+                continue
+            for call in local.nodes("call_expression"):
+                callee = call.child_by_field_name("function")
+                arguments = call.child_by_field_name("arguments")
+                if (
+                    callee is None
+                    or callee.text != b"Ok"
+                    or arguments is None
+                    or len(arguments.named_children) != 1
+                ):
+                    continue
+                argument = arguments.named_children[0].text.decode("utf-8", errors="replace")
+                if "Request::get" not in argument and not re.fullmatch(r"[A-Za-z_]\w*", argument):
+                    continue
+                projected = argument + "".join(
+                    f".header({json.dumps(name)}, {json.dumps(value)})" for name, value in missing
+                )
+                replacements.append((function.text, function.text.replace(argument, projected, 1)))
+                break
+        for original, normalized in replacements:
+            content = content.replace(original, normalized, 1)
+        updated.append(
+            generated.model_copy(update={"content": content})
+            if content != generated.content
             else generated
         )
     return updated

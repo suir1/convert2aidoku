@@ -81,6 +81,33 @@ def test_static_filter_resource_is_built_from_source_ir_specs() -> None:
     ]
 
 
+def test_static_filter_smoke_samples_middle_of_descending_year_options() -> None:
+    manifest = GenerationManifest(
+        source_struct="Source",
+        files=[
+            GeneratedFile(path="src/lib.rs", content="#![no_std]"),
+            GeneratedFile(
+                path="res/filters.json",
+                content=json.dumps(
+                    [
+                        {
+                            "type": "select",
+                            "id": "award",
+                            "options": ["All", "2027", "2026", "2025", "2024", "2023"],
+                            "ids": ["0", "2027", "2026", "2025", "2024", "2023"],
+                            "default": "0",
+                        }
+                    ]
+                ),
+            ),
+        ],
+    )
+
+    cases = GeneratedResources(manifest).static_filter_cases()
+
+    assert cases == [{"kind": "select", "id": "award", "value": "2025"}]
+
+
 def test_check_and_text_filter_resources_are_built_from_source_ir_specs() -> None:
     manifest = GenerationManifest(
         source_struct="Source",

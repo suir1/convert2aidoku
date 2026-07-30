@@ -32,6 +32,69 @@ def test_analyzes_standard_http_source() -> None:
     assert ir.license_text and ir.license_text.strip() == "Synthetic fixture license."
 
 
+def test_analyzes_standalone_coroutine_kei_source(tmp_path: Path) -> None:
+    (tmp_path / "build.gradle.kts").write_text(
+        'keiyoushi { name = "Modern"; versionCode = 2; source { name = "現代源"; '
+        'lang = "zh"; baseUrl = "https://modern.example" } }'
+    )
+    source = tmp_path / "src" / "Modern.kt"
+    source.parent.mkdir()
+    source.write_text(
+        """
+        abstract class Modern : KeiSource(), ConfigurableSource {
+            override suspend fun getPopularManga(page: Int): MangasPage = TODO()
+            override suspend fun getLatestUpdates(page: Int): MangasPage = TODO()
+            override suspend fun getSearchMangaList(
+                page: Int, query: String, filters: FilterList,
+            ): MangasPage = TODO()
+            override suspend fun fetchMangaUpdate(
+                manga: SManga, chapters: List<SChapter>,
+                fetchDetails: Boolean, fetchChapters: Boolean,
+            ): SMangaUpdate = TODO()
+            override suspend fun getPageList(chapter: SChapter): List<Page> = TODO()
+        }
+        """
+    )
+
+    ir = analyze_path(str(tmp_path))
+
+    assert ir.metadata.name == "現代源"
+    assert ir.parent_classes == ["KeiSource", "ConfigurableSource"]
+    assert {
+        Capability.SEARCH,
+        Capability.POPULAR,
+        Capability.LATEST,
+        Capability.DETAILS,
+        Capability.CHAPTERS,
+        Capability.PAGES,
+    } <= set(ir.capabilities)
+    assert ir.shared_request_headers["User-Agent"].startswith("Mozilla/5.0")
+    assert not ir.unsupported_features
+
+
+def test_detects_contextual_placeholder_chapter_urls(tmp_path: Path) -> None:
+    (tmp_path / "build.gradle.kts").write_text(
+        'keiyoushi { name = "Context"; source { lang = "zh"; '
+        'baseUrl = "https://context.example" } }'
+    )
+    source = tmp_path / "src" / "Context.kt"
+    source.parent.mkdir()
+    source.write_text(
+        """
+        abstract class Context : KeiSource() {
+            fun chapter(href: String, index: Int) =
+                href.takeUnless("javascript:cid(1)"::equals)
+                    ?: if (index == 0) "/read/1/2.html#prev" else "/read/1/2.html#next"
+            fun resolve(body: String) = listOf("url_previous:'", "url_next:'")
+        }
+        """
+    )
+
+    ir = analyze_path(str(tmp_path))
+
+    assert Capability.CONTEXTUAL_CHAPTER_URLS in ir.capabilities
+
+
 def test_rejects_crypto_source(tmp_path: Path) -> None:
     (tmp_path / "build.gradle.kts").write_text(
         'keiyoushi { name = "X"; versionCode = 1; source { lang = "en"; baseUrl = "https://x" } }'

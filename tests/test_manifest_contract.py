@@ -305,6 +305,85 @@ def test_dynamic_filter_contract_rejects_deserializing_filter_itself() -> None:
     )
 
 
+def test_settings_contract_lists_keys_not_consumed_by_generated_rust() -> None:
+    ir = minimal_source_ir(capabilities=[Capability.SETTINGS])
+    manifest = _manifest(
+        """
+        const POPULAR_KEY: &str = "POPULAR_MANGA_DISPLAY";
+        fn popular() { defaults_get::<String>(POPULAR_KEY); }
+        """
+    )
+    manifest.files.append(
+        GeneratedFile(
+            path="res/settings.json",
+            content="""[
+                {"type":"group","title":"Source","items":[
+                    {"type":"select","key":"POPULAR_MANGA_DISPLAY","title":"Popular",
+                     "titles":["Weekly"],"values":["week"],"default":"week"},
+                    {"type":"text","key":"RATE_LIMIT","title":"Rate","default":"10/10"}
+                ]}
+            ]""",
+        )
+    )
+
+    messages = evaluate_manifest_contract(ir, manifest).messages
+
+    gap = next(message for message in messages if "does not consume source settings" in message)
+    assert "RATE_LIMIT" in gap
+    assert "POPULAR_MANGA_DISPLAY" not in gap
+
+
+def test_contextual_chapter_url_contract_requires_complete_resolution() -> None:
+    ir = minimal_source_ir(capabilities=[Capability.CONTEXTUAL_CHAPTER_URLS])
+    incomplete = _manifest(
+        """
+        fn chapters(href: &str) {
+            if href == "javascript:cid(1)" { return; }
+        }
+        """
+    )
+    complete = _manifest(
+        """
+        fn contextual_chapter(direction: &str, body: &str) {
+            let placeholder = "javascript:cid(1)";
+            let prev = "#prev";
+            let next = "#next";
+            let previous_marker = "url_previous:'";
+            let next_marker = "url_next:'";
+            let fallback = "/read/1/2.html";
+            let resolved = fallback.replace(".", "_2.");
+        }
+        """
+    )
+
+    assert any(
+        "placeholder chapter URLs" in message
+        for message in evaluate_manifest_contract(ir, incomplete).messages
+    )
+    assert not any(
+        "placeholder chapter URLs" in message
+        for message in evaluate_manifest_contract(ir, complete).messages
+    )
+
+
+def test_shared_request_headers_are_required_by_contract() -> None:
+    ir = minimal_source_ir(shared_request_headers={"User-Agent": "Mozilla/5.0 Test Browser"})
+    incomplete = _manifest("fn request(url: String) { Request::get(url); }")
+    complete = _manifest(
+        'fn request(url: String) { Request::get(url).header("User-Agent", '
+        '"Mozilla/5.0 Test Browser"); }'
+    )
+
+    assert any(
+        "source-wide headers: User-Agent" in message
+        for message in evaluate_manifest_contract(ir, incomplete).messages
+    )
+    assert not any(
+        "source-wide headers" in message
+        for message in evaluate_manifest_contract(ir, complete).messages
+    )
+
+
 def test_manual_terminal_image_resolution_scope_satisfies_contract() -> None:
     ir = minimal_source_ir(
         image_url_policy=ImageUrlPolicy(

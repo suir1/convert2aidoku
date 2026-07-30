@@ -23,7 +23,7 @@ _DIALECT_MARKERS: dict[InputDialect, _Markers] = {
         (Capability.POPULAR, ("popularManga", "getPopularManga")),
         (Capability.LATEST, ("latestUpdates", "getLatestUpdates")),
         (Capability.DETAILS, ("mangaDetails", "getMangaDetails", "fetchMangaUpdate")),
-        (Capability.CHAPTERS, ("chapterList", "fetchAllChapters")),
+        (Capability.CHAPTERS, ("chapterList", "fetchAllChapters", "fetchMangaUpdate")),
         (Capability.PAGES, ("pageList", "getPageList")),
         (Capability.DYNAMIC_FILTERS, ("theme/comic/count",)),
         (Capability.JSON_API, ("parseAs<", "get_json_owned")),
@@ -119,6 +119,14 @@ def _crypto_capabilities(content: str) -> tuple[set[Capability], bool]:
     return capabilities, unsupported
 
 
+def _uses_contextual_chapter_urls(content: str) -> bool:
+    """Detect placeholder chapters resolved through adjacent chapter responses."""
+    has_placeholder = "javascript:cid(1)" in content
+    has_directional_keys = all(marker in content for marker in ("#prev", "#next"))
+    has_response_routes = all(marker in content for marker in ("url_previous", "url_next"))
+    return has_placeholder and has_directional_keys and has_response_routes
+
+
 def recognize_input_capabilities(
     content: str,
     *,
@@ -138,6 +146,8 @@ def recognize_input_capabilities(
             and "getFilterList" in content
         ):
             detected.add(Capability.DYNAMIC_FILTERS)
+        if _uses_contextual_chapter_urls(content):
+            detected.add(Capability.CONTEXTUAL_CHAPTER_URLS)
 
     crypto_capabilities, unsupported_crypto = _crypto_capabilities(content)
     detected.update(crypto_capabilities)

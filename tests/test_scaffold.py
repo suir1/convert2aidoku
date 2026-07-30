@@ -1220,6 +1220,111 @@ fn parse(manga: &mut Manga, detail: Element, link: Element, heading: Element, ba
     assert normalize_pinned_aidoku_rust(normalized) == normalized
 
 
+def test_normalizer_repairs_consumed_html_text_and_local_option_model_fields() -> None:
+    content = """
+fn normalized_text(&self, value: String, _separator: &str) -> String { value }
+fn parse(&self, item: Element, document: Element) -> Result<Manga> {
+    let text = item.text();
+    let _letters = text.chars();
+    let value = item.text();
+    if value == "ongoing" { preserve(); }
+    let direct = item
+        .text()
+        .chars();
+    let selected = item.text() == "selected";
+    let normalized = self.normalized_text(item.text(), "\\n");
+    let cover = document
+        .select("img")
+        .and_then(|items| items.first())
+        .and_then(|image| image.attr("src"))
+        .map(|url| absolute_url(&url));
+    if selected { return Err(AidokuError::message(item.text())); }
+    Ok(Manga {
+        cover: Some(cover),
+        ..Default::default()
+    })
+}
+fn chapter_number(&self, title: &str) -> Option<f32> { title.parse().ok() }
+fn chapter(&self, title: String) -> Chapter {
+    Chapter {
+        chapter_number: Some((self.chapter_number(&title)) as f32),
+        ..Default::default()
+    }
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "let text = item.text().unwrap_or_default();" in normalized
+    assert "let value = item.text().unwrap_or_default();" in normalized
+    assert re.search(r"item\.text\(\)\.unwrap_or_default\(\)\s*\.chars\(\)", normalized)
+    assert 'item.text().as_deref() == Some("selected")' in normalized
+    assert 'self.normalized_text(item.text().unwrap_or_default(), "\\n")' in normalized
+    assert "AidokuError::message(item.text().unwrap_or_default())" in normalized
+    assert "cover: cover" in normalized
+    assert "chapter_number: self.chapter_number(&title)" in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
+def test_normalizer_repairs_text_parse_borrowed_text_and_owned_setting_route() -> None:
+    content = """
+fn page(element: Element, notice: Element, link: Element) -> Manga {
+    let number = element.text().parse::<i32>().ok();
+    let mut description = String::new();
+    description.push_str(&notice.text());
+    let title = half_width_digits(&link.text());
+    let cover = link
+        .attr("src")
+        .map(|value| absolute_url(&value))
+        .unwrap_or_default();
+    Manga { cover: cover, ..Default::default() }
+}
+fn listing(listing: Listing) -> String {
+    let route = if listing.id == "latest" {
+        "/top/lastupdate/%d.html"
+    } else {
+        let saved = defaults_get::<String>("POPULAR_MANGA_DISPLAY")
+            .unwrap_or_else(|| String::from("/top/weekvisit/%d.html"));
+        match saved.as_str() {
+            "/top/monthvisit/%d.html" | "/top/weekvisit/%d.html" => saved.as_str(),
+            _ => "/top/weekvisit/%d.html",
+        }
+    };
+    route
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "element.text().unwrap_or_default().parse::<i32>()" in normalized
+    assert "push_str(&notice.text().unwrap_or_default())" in normalized
+    assert "half_width_digits(&link.text().unwrap_or_default())" in normalized
+    assert "cover: Some(cover)" in normalized
+    assert 'String::from("/top/lastupdate/%d.html")' in normalized
+    assert "=> saved.clone()," in normalized
+    assert '_ => String::from("/top/weekvisit/%d.html"),' in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
+def test_normalizer_slices_strings_only_at_utf8_boundaries() -> None:
+    content = """
+fn date_from_text(text: &str) -> Option<&str> {
+    let bytes = text.as_bytes();
+    for start in 0..bytes.len() {
+        let candidate = &text[start..];
+        if candidate.starts_with("2026-") { return Some(candidate); }
+    }
+    None
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "let bytes = text.as_bytes();" not in normalized
+    assert "for (start, _) in text.char_indices()" in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
 def test_normalizer_repairs_request_tails_partial_detail_move_and_dynamic_api_base() -> None:
     content = """
 const API: &str = "https://api.example.com";
@@ -2107,6 +2212,39 @@ def test_manifest_projects_recovered_request_header_profiles(tmp_path: Path) -> 
     assert 'request.header("platform", &platform)' in source
     assert 'defaults_get::<aidoku::alloc::String>("v2.key.user_agent")' in source
     assert source.count("c2a_request(url)?.send()") == 2
+    assert normalize_generation_manifest(ir, normalized) == normalized
+
+
+def test_manifest_projects_shared_headers_into_existing_request_builder() -> None:
+    ir = minimal_source_ir(
+        shared_request_headers={
+            "Accept-Language": "zh",
+            "User-Agent": "Mozilla/5.0 Test Browser",
+        }
+    )
+    manifest = GenerationManifest(
+        source_struct="Simple",
+        files=[
+            GeneratedFile(path="src/lib.rs", content="#![no_std]\n"),
+            GeneratedFile(
+                path="src/source.rs",
+                content=(
+                    "fn request(url: String) -> Result<Request> {\n"
+                    '    Ok(Request::get(url)?.header("Accept-Language", "zh"))\n'
+                    "}\n"
+                    "fn fetch(url: String) -> Result<Response> {\n"
+                    "    Request::get(url)?.send()\n"
+                    "}\n"
+                ),
+            ),
+        ],
+    )
+
+    normalized = normalize_generation_manifest(ir, manifest)
+    source = next(item.content for item in normalized.files if item.path == "src/source.rs")
+
+    assert source.count('.header("Accept-Language", "zh")') == 2
+    assert source.count('.header("User-Agent", "Mozilla/5.0 Test Browser")') == 2
     assert normalize_generation_manifest(ir, normalized) == normalized
 
 

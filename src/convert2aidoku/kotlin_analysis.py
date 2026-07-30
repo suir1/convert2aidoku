@@ -4,6 +4,7 @@ import json
 import re
 
 from .analysis_common import input_license, match
+from .constants import DEFAULT_BROWSER_USER_AGENT
 from .errors import InputError, UnsupportedSourceError
 from .ingest import ResolvedSource, collect_source_files
 from .input_capabilities import InputCapabilityRecognition, recognize_input_capabilities
@@ -386,12 +387,15 @@ def _parse_main_class(kotlin: str) -> tuple[str, list[str]]:
         (
             item
             for item in declarations
-            if re.search(r"\bHttpSource\s*(?:\([^)]*\))?\s*(?:,|$)", item.split("{", 1)[0])
+            if re.search(
+                r"\b(?:HttpSource|KeiSource)\s*(?:\([^)]*\))?\s*(?:,|$)",
+                item.split("{", 1)[0],
+            )
         ),
         "",
     )
     if not candidate:
-        raise UnsupportedSourceError("MVP supports only standalone HttpSource modules")
+        raise UnsupportedSourceError("MVP supports only standalone HttpSource or KeiSource modules")
     name = match(r"(?:abstract\s+)?class\s+([A-Za-z_][A-Za-z0-9_]*)", candidate)
     if not name:
         raise InputError("unable to identify the main HttpSource class")
@@ -404,10 +408,13 @@ def _parse_main_class(kotlin: str) -> tuple[str, list[str]]:
         parent = re.sub(r"\([^)]*\)", "", item).strip()
         if parent:
             parents.append(parent.split("<", 1)[0].strip())
-    allowed_parents = {"HttpSource", "ConfigurableSource"}
-    if "HttpSource" not in parents or any(parent not in allowed_parents for parent in parents):
+    allowed_parents = {"HttpSource", "KeiSource", "ConfigurableSource"}
+    if not {"HttpSource", "KeiSource"}.intersection(parents) or any(
+        parent not in allowed_parents for parent in parents
+    ):
         raise UnsupportedSourceError(
-            "MVP supports only standalone HttpSource modules without custom source bases"
+            "MVP supports only standalone HttpSource or KeiSource modules without custom "
+            "source bases"
         )
     return name, parents
 
@@ -437,7 +444,6 @@ def _unsupported_features(
 ) -> list[str]:
     checks = {
         "multisrc/theme source": ("themePkg", "SourceFactory", "MultiSource"),
-        "coroutine KeiSource": ("KeiSource",),
         "login/authentication": ("LoginSource", "Authenticator", "WebView", "login("),
         "image decoding or scrambling": (
             "android.graphics",
@@ -501,9 +507,18 @@ def analyze_kotlin_source(resolved: ResolvedSource) -> SourceIR:
     version_text = match(r"\b(?:extVersionCode|versionCode)\s*=\s*(\d+)", build_file.content, "1")
 
     method_names = sorted(set(re.findall(r"override\s+(?:suspend\s+)?fun\s+(\w+)", kotlin)))
+    shared_request_headers = {
+        name: value
+        for name, value in re.findall(
+            r"(?:\.|\b)(?:add|set)\(\s*\"([^\"]+)\"\s*,\s*\"([^\"]*)\"\s*\)",
+            kotlin,
+        )
+        if "$" not in value
+    }
+    if "KeiSource" in parents or "super.headersBuilder()" in kotlin:
+        shared_request_headers.setdefault("User-Agent", DEFAULT_BROWSER_USER_AGENT)
     header_names_set = set(re.findall(r"(?:\.|\b)(?:add|set)\(\s*\"([^\"]+)\"\s*,", kotlin))
-    if "super.headersBuilder()" in kotlin:
-        header_names_set.add("User-Agent")
+    header_names_set.update(shared_request_headers)
     header_names = sorted(header_names_set)
     warnings: list[str] = []
     if "addInterceptor" in kotlin or "addNetworkInterceptor" in kotlin:
@@ -530,6 +545,7 @@ def analyze_kotlin_source(resolved: ResolvedSource) -> SourceIR:
         capabilities=list(recognition.capabilities),
         method_names=method_names,
         header_names=header_names,
+        shared_request_headers=shared_request_headers,
         filter_specs=_kotlin_filter_specs(kotlin),
         relative_url_keys=_uses_relative_url_keys(kotlin),
         files=files,

@@ -98,3 +98,40 @@ def test_restored_setting_keys_are_projected_into_generated_rust() -> None:
 
     assert 'defaults_get::<String>("CHAPTER_FILTER")' in rust
     assert 'defaults_get::<bool>("CHECK_API_LIMIT")' in rust
+
+
+def test_recovers_multiselect_defaults_from_kotlin_set_constant() -> None:
+    preferences = """
+const val DESCRIPTION_PREF = "DESCRIPTION"
+val DEFAULT_SET = setOf("A", "B", "C")
+fun preferencesInternal(context: Context) = arrayOf(
+    MultiSelectListPreference(context).apply {
+        key = DESCRIPTION_PREF
+        title = "作品信息顯示偏好"
+        entries = arrayOf("作品公告", "作品别名", "跳轉連結")
+        entryValues = arrayOf("A", "B", "C")
+        setDefaultValue(DEFAULT_SET)
+    },
+)
+"""
+    ir = minimal_source_ir(
+        capabilities=[Capability.SETTINGS],
+        files=[SourceFile(path="src/Preferences.kt", content=preferences, sha256="0")],
+    )
+    manifest = GenerationManifest(
+        source_struct="Example",
+        files=[
+            GeneratedFile(path="src/lib.rs", content="fn source() {}"),
+            GeneratedFile(path="res/settings.json", content="[]"),
+        ],
+    )
+
+    restored = with_kotlin_settings(ir, manifest)
+    item = json.loads(
+        next(file.content for file in restored.files if file.path == "res/settings.json")
+    )[0]["items"][0]
+
+    assert item["type"] == "multi-select"
+    assert item["titles"] == ["作品公告", "作品别名", "跳轉連結"]
+    assert item["values"] == ["A", "B", "C"]
+    assert item["default"] == ["A", "B", "C"]

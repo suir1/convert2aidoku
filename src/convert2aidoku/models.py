@@ -19,6 +19,7 @@ class Capability(StrEnum):
     LATEST = "latest"
     DETAILS = "details"
     CHAPTERS = "chapters"
+    CONTEXTUAL_CHAPTER_URLS = "contextual_chapter_urls"
     PAGES = "pages"
     FILTERS = "filters"
     DYNAMIC_FILTERS = "dynamic_filters"
@@ -761,16 +762,22 @@ class GeneratedResources:
                 if not isinstance(ids, list) or not all(isinstance(value, str) for value in ids):
                     continue
                 default = raw_filter.get("default")
-                if isinstance(default, str) and default in ids:
-                    value = next(
-                        (candidate for candidate in ids if candidate and candidate != default),
-                        default,
-                    )
+                candidates = [
+                    candidate
+                    for candidate in ids
+                    if candidate and (not isinstance(default, str) or candidate != default)
+                ]
+                year_candidates = [
+                    candidate
+                    for candidate in candidates
+                    if re.fullmatch(r"(?:19|20)\d{2}", candidate)
+                ]
+                if len(year_candidates) == len(candidates) and len(year_candidates) >= 3:
+                    value = year_candidates[2]
+                elif candidates:
+                    value = candidates[0]
                 else:
-                    value = next(
-                        (candidate for candidate in ids if candidate),
-                        ids[0] if ids else None,
-                    )
+                    value = default if isinstance(default, str) else ids[0] if ids else None
                 if value is not None:
                     cases.append({"kind": "select", "id": filter_id, "value": value})
             elif filter_type == "sort":

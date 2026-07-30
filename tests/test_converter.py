@@ -389,7 +389,9 @@ def test_repair_preserves_source_ir_required_resources(tmp_path: Path, monkeypat
                 ),
             },
         ),
-        repair=generation_manifest(RUST_SOURCE),
+        repair=generation_manifest(
+            RUST_SOURCE + '\nfn setting() { defaults_get::<String>("example"); }\n'
+        ),
     )
     validations = iter(
         [

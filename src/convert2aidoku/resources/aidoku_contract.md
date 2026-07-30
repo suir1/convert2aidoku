@@ -42,6 +42,15 @@ Mapping rules:
   instead of discarding them. For date-only values, normalize to a full midnight datetime (for
   example `2025-01-01 00:00:00` with `yyyy-MM-dd HH:mm:ss`) so both Aidoku and the Rust test runner
   can parse it. Do not invent metadata when the input has no corresponding value.
+- When `source_ir.capabilities` contains `contextual_chapter_urls`, preserve placeholder chapter
+  entries instead of dropping them. The recovered Kotlin assigns the first placeholder the next
+  concrete chapter URL plus `#prev`, and later placeholders the previous concrete URL plus
+  `#next`. Before fetching pages, request that adjacent chapter URL, scan its response for the
+  exact `url_previous:'...'` or `url_next:'...'` value selected by the fragment, and use that
+  path. If the response omits it, decrement or increment the numeric chapter segment in
+  `/read/<manga>/<chapter>.html`. Finally replace the terminal `.` with `_2.` in the resolved
+  reading path and fetch that URL. The fragment is local routing context and must not be sent as
+  the final page request fragment.
 - If the source exposes a reliable reading direction or country/type signal, populate
   `Manga.viewer` with `Viewer::RightToLeft`, `Viewer::LeftToRight`, `Viewer::Vertical`, or
   `Viewer::Webtoon`; otherwise leave it `Viewer::Unknown`.
@@ -101,6 +110,9 @@ Mapping rules:
 - A Kotlin override that starts from `super.headersBuilder()` inherits Tachi `HttpSource`'s
   default browser-like `User-Agent`. Preserve that inherited header in addition to every explicit
   `.add(...)`/`.set(...)` header; do not treat only the locally visible header calls as complete.
+- Keiyoushi `KeiSource` requests likewise inherit the shared browser-like client User-Agent even
+  when `configureHeaders` only lists source-specific headers. Treat every entry in
+  `source_ir.shared_request_headers` as mandatory on all normal and image requests.
 - When `source_ir.source_format` is `decompiled_apk`, treat the selected JADX Java as a lossy but
   behavior-bearing representation of the original Kotlin. When `feature_scope` is `public_only`,
   implement every detected public search/list/details/chapters/pages capability, but do not
@@ -190,6 +202,17 @@ Mapping rules:
   objects. Preserve the Tachi preference key and ensure its default is one of `values`.
 - Read source settings with `aidoku::imports::defaults::defaults_get::<T>(key)`; never call the
   private FFI function `defaults::get`.
+- Every key emitted in `res/settings.json` must be read with `defaults_get` and applied where the
+  input reads that preference. A setting resource with no corresponding Rust behavior is not a
+  completed conversion. Preserve bounded validation and fallbacks from the input; if the pinned
+  Aidoku runtime cannot reproduce a preference (for example transport-wide rate limiting), do
+  not silently expose a no-op setting—report that limitation explicitly.
+- The pinned runtime supports transport-wide rate limiting through
+  `aidoku::imports::net::set_rate_limit(permits, period, TimeUnit::Seconds)`. When the Kotlin
+  client reads a `permits/seconds` preference before calling `rateLimit`, parse the same bounded
+  positive integers in `Source::new`, fall back to the recovered default on malformed input, and
+  call `set_rate_limit`. Multi-select preferences are read as
+  `defaults_get::<Vec<String>>(key)` and should fall back to the recovered selected-value array.
 - Preserve compatibility branches for legacy preference values found in the Tachi source. It is
   acceptable to normalize them while reading the setting when Aidoku has no reason to persist the
   obsolete value back to defaults.

@@ -160,8 +160,27 @@ def evaluate_manifest_contract(
             add("source declares settings but generated no res/settings.json")
         elif resources.is_empty(GeneratedResources.SETTINGS):
             add("source declares settings but generated an empty res/settings.json")
+        else:
+            unread_settings = _settings_not_read(resources, rust_content)
+            if unread_settings:
+                add(
+                    "generated Rust does not consume source settings with defaults_get: "
+                    + ", ".join(unread_settings)
+                    + "; read every setting key and apply its recovered behavior"
+                )
     if Capability.IMAGE_HEADERS in ir.capabilities and "ImageRequestProvider" not in traits:
         add("source declares image headers but generated no ImageRequestProvider")
+    missing_shared_headers = (
+        [
+            name
+            for name, value in ir.shared_request_headers.items()
+            if json.dumps(name) not in rust_content or json.dumps(value) not in rust_content
+        ]
+        if "Request::" in rust_content
+        else []
+    )
+    if missing_shared_headers:
+        add("generated requests omit source-wide headers: " + ", ".join(missing_shared_headers))
     if (
         Capability.IMAGE_HEADERS in ir.capabilities
         and rust.function_contains("get_image_request", "context")
@@ -265,6 +284,15 @@ def evaluate_manifest_contract(
             "does not compile a regex and pull regex runtime cost into the WASM hot path",
             "chapter_regex",
         )
+    if (
+        Capability.CONTEXTUAL_CHAPTER_URLS in ir.capabilities
+        and not _preserves_contextual_chapter_urls(rust_content)
+    ):
+        add(
+            "source resolves placeholder chapter URLs from adjacent chapter context, but the "
+            "generated Rust does not preserve the placeholder chapters and complete the "
+            "prev/next response lookup, numeric fallback, and terminal '_2.' path rewrite"
+        )
     if Capability.TRIPLE_DES_CBC in ir.capabilities and (
         "current_date" not in rust_content or re.search(r"\blet\s+time\s*=\s*\"0\"", rust_content)
     ):
@@ -345,6 +373,55 @@ def evaluate_manifest_contract(
             + ", ".join(missing_legacy_settings)
         )
     return ContractEvaluation(tuple(diagnostics))
+
+
+def _settings_not_read(resources: GeneratedResources, rust_content: str) -> list[str]:
+    keys = resources.setting_keys()
+    if not keys:
+        return []
+    constants = {
+        match.group("name"): json.loads(match.group("value"))
+        for match in re.finditer(
+            r"\b(?:const|static)\s+(?P<name>[A-Za-z_]\w*)\s*"
+            r"(?::\s*[^=;]+)?=\s*(?P<value>\"(?:\\.|[^\"\\])*\")\s*;",
+            rust_content,
+        )
+    }
+    arguments = re.findall(
+        r"(?:aidoku::imports::defaults::)?defaults_get\s*"
+        r"(?:::\s*<[^;{}()]+>)?\s*\(\s*"
+        r"(?P<argument>\"(?:\\.|[^\"\\])*\"|[A-Za-z_]\w*)\s*\)",
+        rust_content,
+    )
+    consumed: set[str] = set()
+    for argument in arguments:
+        if argument.startswith('"'):
+            consumed.add(json.loads(argument))
+        elif argument in constants:
+            consumed.add(constants[argument])
+    return [key for key in keys if key not in consumed]
+
+
+def _preserves_contextual_chapter_urls(rust_content: str) -> bool:
+    has_placeholder = "javascript:cid(1)" in rust_content
+    has_directions = all(
+        any(marker in rust_content for marker in (f'"#{direction}"', f'"{direction}"'))
+        for direction in ("prev", "next")
+    )
+    has_response_routes = all(marker in rust_content for marker in ("url_previous", "url_next"))
+    has_fallback_route = "/read/" in rust_content and ".html" in rust_content
+    has_terminal_rewrite = "_2." in rust_content or (
+        '"_2"' in rust_content and "rfind('.')" in rust_content
+    )
+    return all(
+        (
+            has_placeholder,
+            has_directions,
+            has_response_routes,
+            has_fallback_route,
+            has_terminal_rewrite,
+        )
+    )
 
 
 def normalize_decompiled_dto_manifest(
