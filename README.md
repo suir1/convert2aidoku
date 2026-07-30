@@ -13,16 +13,37 @@ login, bookcase, and comment features are reported but excluded.
 
 ## Install
 
-Python 3.13 and [uv](https://docs.astral.sh/uv/) are recommended:
+On macOS or Linux, the bootstrap installer detects the environment and installs only missing
+layers: system Git/JADX/Java prerequisites, `uv`, a managed Python 3.13, C2A, Rust stable,
+`wasm32-unknown-unknown`, rustfmt, Clippy, and Aidoku's CLI/test runner pinned to a known
+`aidoku-rs` revision. Linux JADX 1.5.3 is checksum-pinned; macOS uses Homebrew. System package
+installation may request the user's sudo password.
 
 ```bash
-uv sync
-uv run c2a doctor
-uv run c2a setup
+curl -fsSL https://raw.githubusercontent.com/suir1/convert2aidoku/main/install.sh | sh
 ```
 
-`setup` asks before installing Rust stable, `wasm32-unknown-unknown`, rustfmt, Clippy, and Aidoku's
-CLI/test runner pinned to a known `aidoku-rs` revision.
+Open a new terminal after installation, then confirm the environment:
+
+```bash
+c2a doctor
+```
+
+The installer is safe to run again to update C2A. Existing prerequisites and a complete core
+toolchain are reused. Windows is not yet supported by this shell installer.
+
+For development from a checkout instead:
+
+```bash
+git clone https://github.com/suir1/convert2aidoku.git
+cd convert2aidoku
+uv sync
+uv run c2a doctor
+```
+
+Running `./install.sh` inside a checkout installs that local checkout, which is useful for testing
+unreleased changes. `c2a setup` remains available as a standalone repair command for the pinned
+Rust/WASM/Aidoku layer.
 
 `c2a templates` reports source-agnostic patterns compatible with that pinned revision. These
 patterns describe slots such as selectors, URL construction, filter mapping, and image headers;
