@@ -49,6 +49,15 @@ def _read_config(path: Path | None) -> dict[str, object]:
     return ai
 
 
+def ai_config_defaults(config_path: Path | None = None) -> dict[str, str]:
+    """Return non-secret provider defaults for interactive clients such as the local Web UI."""
+    config = _read_config(config_path)
+    return {
+        "base_url": str(os.getenv("C2A_BASE_URL") or config.get("base_url") or ""),
+        "model": str(os.getenv("C2A_MODEL") or config.get("model") or ""),
+    }
+
+
 def load_ai_settings(
     *,
     base_url: str | None = None,

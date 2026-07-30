@@ -45,6 +45,31 @@ Running `./install.sh` inside a checkout installs that local checkout, which is 
 unreleased changes. `c2a setup` remains available as a standalone repair command for the pinned
 Rust/WASM/Aidoku layer.
 
+## Local Web UI
+
+Start the browser interface after exporting the API key:
+
+```bash
+export C2A_API_KEY='...'
+c2a ui
+```
+
+The UI opens at `http://127.0.0.1:51821`, keeps all static assets local, and reuses the same
+analyzer, converter, checkpoint, validator, and reports as the CLI. It supports APK upload or a
+local/GitHub module reference, no-token analysis preview, AI connectivity checks, live conversion
+progress, failed-job resume, and controlled AIX/report downloads. Provider keys are read only from
+the process environment and are never accepted by Web forms.
+
+On WSL2, C2A opens the URL with Windows PowerShell when available; otherwise open the same
+`localhost` URL in the Windows browser. Headless Linux users can suppress browser launch:
+
+```bash
+c2a ui --no-open
+```
+
+The server binds only to loopback by default. Non-loopback binding requires both an explicit host
+and `--allow-network`; keep the default for normal desktop and WSL use.
+
 `c2a templates` reports source-agnostic patterns compatible with that pinned revision. These
 patterns describe slots such as selectors, URL construction, filter mapping, and image headers;
 they do not copy an existing Aidoku source into an AI prompt. Source-specific licenses and

@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="c2a-csrf" content="{{ csrf_token }}">
+  <title>C2A · Tachi 转 Aidoku</title>
+  <meta name="description" content="在本机分析、生成并验证 Aidoku 源。">
+  <link rel="stylesheet" href="{{ url_for('static', path='/app.css') }}">
+  <script src="{{ url_for('static', path='/app.js') }}" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="C2A 首页">
+      <span class="brand-mark">C2A</span>
+      <span class="brand-name">Convert to Aidoku</span>
+    </a>
+    <div class="local-badge"><span></span>仅在本机运行</div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow">Tachi / Mihon → Aidoku</p>
+        <h1>把源代码变成<br><span>经过验证的 Aidoku 包</span></h1>
+        <p class="hero-lead">选择 APK、模块目录或 GitHub 地址。C2A 会分析行为、调用你的 AI、编译 WASM，并完成实站阅读验证。</p>
+      </div>
+      <div class="hero-flow" aria-label="转换过程">
+        <div><b>01</b><span>分析输入</span></div>
+        <i></i>
+        <div><b>02</b><span>生成修复</span></div>
+        <i></i>
+        <div><b>03</b><span>打包验证</span></div>
+      </div>
+    </section>
+
+    <section class="readiness panel" aria-labelledby="readiness-title">
+      <div class="section-heading compact">
+        <div>
+          <p class="section-kicker">Environment</p>
+          <h2 id="readiness-title">环境状态</h2>
+        </div>
+        <button class="button ghost small" id="refresh-doctor" type="button">重新检查</button>
+      </div>
+      <div class="status-grid" id="doctor-grid">
+        {% for item in doctor %}
+        <div class="status-item {{ 'ready' if item.available else 'missing' }}">
+          <span class="status-dot"></span>
+          <div><strong>{{ item.name }}</strong><small>{{ item.detail or ('已就绪' if item.available else '缺失') }}</small></div>
+        </div>
+        {% endfor %}
+      </div>
+    </section>
+
+    <div class="workspace-grid">
+      <section class="panel source-panel" aria-labelledby="source-title">
+        <div class="section-heading">
+          <div>
+            <p class="section-kicker">New conversion</p>
+            <h2 id="source-title">新建转换</h2>
+          </div>
+          <span class="step-pill">步骤 1–2</span>
+        </div>
+
+        <form id="conversion-form">
+          <fieldset>
+            <legend>AI 服务</legend>
+            <div class="field-row">
+              <label>API 地址
+                <input id="base-url" name="base_url" type="url" value="{{ ai.base_url }}" placeholder="https://provider.example/v1" required>
+              </label>
+              <label>模型
+                <input id="model" name="model" value="{{ ai.model }}" placeholder="model-name" required>
+              </label>
+            </div>
+            <div class="inline-status {{ 'ok' if api_key_configured else 'warn' }}" id="key-status">
+              <span></span>
+              {% if api_key_configured %}C2A_API_KEY 已从环境变量读取{% else %}尚未设置 C2A_API_KEY；请在启动 UI 前配置{% endif %}
+            </div>
+            <button class="text-button" id="ai-check" type="button">测试 AI 连接</button>
+          </fieldset>
+
+          <fieldset>
+            <legend>输入源</legend>
+            <label class="drop-zone" for="source-file" id="drop-zone">
+              <input id="source-file" name="source_file" type="file" accept=".apk,application/vnd.android.package-archive">
+              <span class="drop-icon">＋</span>
+              <strong id="drop-title">选择或拖入 Tachi APK</strong>
+              <small>最大 512 MiB，文件只保存在本机缓存</small>
+            </label>
+            <div class="or"><span>或者</span></div>
+            <label>本地模块目录或 GitHub 模块地址
+              <input id="input-ref" name="input_ref" placeholder="https://github.com/.../tree/main/src/zh/example">
+            </label>
+            <button class="button secondary full" id="analyze" type="button">分析输入，不消耗 AI tokens</button>
+          </fieldset>
+
+          <section class="analysis-card hidden" id="analysis-card" aria-live="polite">
+            <div class="analysis-title">
+              <div><p id="source-id"></p><h3 id="source-name"></h3></div>
+              <span id="source-format"></span>
+            </div>
+            <p class="source-url" id="source-url"></p>
+            <div class="capabilities" id="capabilities"></div>
+            <dl class="facts">
+              <div><dt>证据文件</dt><dd id="source-files">–</dd></div>
+              <div><dt>筛选器</dt><dd id="source-filters">–</dd></div>
+              <div><dt>许可证</dt><dd id="source-license">–</dd></div>
+            </dl>
+            <div class="notice hidden" id="source-notice"></div>
+          </section>
+
+          <fieldset class="conversion-options hidden" id="conversion-options">
+            <legend>输出与验证</legend>
+            <label>输出目录
+              <input id="output" name="output" required>
+            </label>
+            <div class="field-row">
+              <label>实测搜索词
+                <input id="query" name="query" placeholder="例如：海贼王">
+              </label>
+              <label>代理（可选）
+                <input id="proxy" name="proxy" placeholder="http://127.0.0.1:7890">
+              </label>
+            </div>
+            <details>
+              <summary>高级选项</summary>
+              <div class="option-grid">
+                <label>首轮推理
+                  <select id="generation-reasoning">
+                    <option value="auto">自动</option><option value="off">关闭</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option>
+                  </select>
+                </label>
+                <label>修复推理
+                  <select id="repair-reasoning">
+                    <option value="low">低</option><option value="off">关闭</option><option value="auto">自动</option><option value="medium">中</option><option value="high">高</option>
+                  </select>
+                </label>
+                <label class="check"><input id="live" type="checkbox" checked><span>执行实站验证</span></label>
+                <label class="check"><input id="force" type="checkbox"><span>覆盖已有输出</span></label>
+              </div>
+            </details>
+            <label class="consent"><input id="consent" type="checkbox"><span>我确认选中的源码证据会发送给上述 AI 服务；API Key 不会被写入报告。</span></label>
+            <button class="button primary full" id="convert" type="submit" disabled>开始生成 Aidoku 源</button>
+          </fieldset>
+        </form>
+      </section>
+
+      <aside class="panel progress-panel" aria-labelledby="progress-title">
+        <div class="section-heading">
+          <div>
+            <p class="section-kicker">Live progress</p>
+            <h2 id="progress-title">转换进度</h2>
+          </div>
+          <span class="job-state idle" id="job-state">待开始</span>
+        </div>
+
+        <div class="empty-state" id="empty-state">
+          <div class="empty-orbit"><span></span></div>
+          <h3>等待一个源</h3>
+          <p>完成左侧分析并确认后，这里会实时显示 AI、编译、修复和实站测试进度。</p>
+        </div>
+
+        <div class="job-view hidden" id="job-view">
+          <div class="progress-track"><span id="progress-bar"></span></div>
+          <p class="current-message" id="current-message">准备转换环境</p>
+          <div class="job-metrics">
+            <div><span>AI 轮次</span><strong id="metric-rounds">0</strong></div>
+            <div><span>Tokens</span><strong id="metric-tokens">0</strong></div>
+            <div><span>输出状态</span><strong id="metric-status">运行中</strong></div>
+          </div>
+          <ol class="timeline" id="job-log"></ol>
+          <div class="error-box hidden" id="job-error"></div>
+          <div class="artifacts hidden" id="artifacts">
+            <h3>转换产物</h3>
+            <div id="artifact-links"></div>
+          </div>
+          <button class="button secondary full hidden" id="resume" type="button">从检查点继续</button>
+        </div>
+      </aside>
+    </div>
+  </main>
+
+  <div class="toast hidden" id="toast" role="status" aria-live="polite"></div>
+  <footer><span>C2A 本地工作台</span><span>工作目录：{{ working_directory }}</span></footer>
+</body>
+</html>

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from convert2aidoku.config import ReasoningEffort, load_ai_settings
+from convert2aidoku.config import ReasoningEffort, ai_config_defaults, load_ai_settings
 from convert2aidoku.errors import ConfigurationError
 
 
@@ -14,6 +14,24 @@ def test_loads_env_key_without_exposing_it(monkeypatch: pytest.MonkeyPatch) -> N
     assert settings.generation_reasoning_effort == ReasoningEffort.AUTO
     assert settings.repair_reasoning_effort == ReasoningEffort.LOW
     assert settings.max_repair_rounds == 1
+
+
+def test_non_secret_defaults_are_available_to_interactive_clients(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "c2a.toml"
+    config.write_text('[ai]\nbase_url="http://config/v1"\nmodel="config-model"\n')
+    monkeypatch.setenv("C2A_MODEL", "environment-model")
+    monkeypatch.setenv("C2A_API_KEY", "must-not-be-returned")
+
+    defaults = ai_config_defaults(config)
+
+    assert defaults == {
+        "base_url": "http://config/v1",
+        "model": "environment-model",
+    }
+    assert "must-not-be-returned" not in repr(defaults)
 
 
 def test_rejects_key_in_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

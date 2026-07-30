@@ -90,6 +90,43 @@ def ai_check(
 
 
 @app.command()
+def ui(
+    host: Annotated[
+        str,
+        typer.Option(
+            help="Web UI listen host; loopback is required unless network access is allowed."
+        ),
+    ] = "127.0.0.1",
+    port: Annotated[
+        int,
+        typer.Option(min=1, max=65_535, help="Web UI listen port."),
+    ] = 51_821,
+    open_browser: Annotated[
+        bool,
+        typer.Option("--open/--no-open", help="Open the local UI in a browser."),
+    ] = True,
+    allow_network: Annotated[
+        bool,
+        typer.Option(help="Allow binding beyond this machine's loopback interface."),
+    ] = False,
+) -> None:
+    """Open the local browser interface for analysis, conversion, and reports."""
+    from .web_runtime import start_web_ui
+
+    display_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    console.print(f"C2A Web UI: [bold]http://{display_host}:{port}[/bold]")
+    try:
+        start_web_ui(
+            host=host,
+            port=port,
+            open_browser=open_browser,
+            allow_network=allow_network,
+        )
+    except C2AError as exc:
+        _abort(exc)
+
+
+@app.command()
 def analyze(
     input_ref: Annotated[str, typer.Argument(help="Local module/APK path or GitHub module URL.")],
     output: Annotated[
