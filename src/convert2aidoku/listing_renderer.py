@@ -70,6 +70,8 @@ class _EndpointView:
     url_function: str
     fetch_function: str
     response_type: str
+    envelope_type: str | None
+    envelope_path: str | None
     items_field: str
     item_expression: str
     mapping_function: str
@@ -161,6 +163,10 @@ def _quoted(value: str) -> str:
 def _snake_case(value: str) -> str:
     value = re.sub(r"(?<!^)(?=[A-Z])", "_", value)
     return re.sub(r"[^a-zA-Z0-9_]", "_", value).lower().strip("_") or "value"
+
+
+def _pascal_case(value: str) -> str:
+    return "".join(part.capitalize() for part in re.split(r"[^A-Za-z0-9]+", value) if part)
 
 
 def _rust_identifier(value: str) -> str:
@@ -260,6 +266,8 @@ def _query_lines(
             raise ValueError(f"endpoint {endpoint.id} has an invalid filter binding")
         filter_id = binding.group(1)
         spec = filter_specs.get(filter_id)
+        if spec is None and parameter.required:
+            raise ValueError(f"endpoint {endpoint.id} requires unresolved filter {filter_id}")
         variable = f"query_{_snake_case(parameter.name)}"
         if spec is not None and spec.kind == "sort":
             options = ", ".join(_quoted(option.value) for option in spec.options)
@@ -460,6 +468,8 @@ def _endpoint_view(
         url_function=f"{endpoint.id}_url",
         fetch_function=f"fetch_{endpoint.id}",
         response_type=endpoint.response_type,
+        envelope_type=(f"{_pascal_case(endpoint.id)}Envelope" if container.envelope_path else None),
+        envelope_path=container.envelope_path,
         items_field=_rust_identifier(container.items_path),
         item_expression=item_expression,
         mapping_function=f"manga_from_{_snake_case(mapping.item_type)}",

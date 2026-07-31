@@ -15,7 +15,11 @@ from convert2aidoku.scaffold import apply_generation_manifest
 from convert2aidoku.toolchain import find_tool
 from convert2aidoku.validator import validate_project
 from tests.scenarios import minimal_source_ir, scaffold_project
-from tests.test_implementation_ir import _copymanga_listing_files, _serializable_listing_files
+from tests.test_implementation_ir import (
+    _copymanga_filter_specs,
+    _copymanga_listing_files,
+    _serializable_listing_files,
+)
 
 from .test_converter import RUST_SOURCE
 
@@ -246,6 +250,7 @@ def test_deterministic_listing_module_and_provider_compile_for_wasm(tmp_path: Pa
         source_format="decompiled_apk",
         main_class="CopyManga",
         capabilities=[Capability.POPULAR, Capability.LATEST],
+        filter_specs=_copymanga_filter_specs(),
         files=_copymanga_listing_files(),
         request_header_profiles=[
             RequestHeaderProfile(

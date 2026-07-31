@@ -974,10 +974,36 @@ def _list_item_type(source_type: str) -> str | None:
     return found.group(1).strip() if found else None
 
 
+def _response_envelope_paths(
+    java: str,
+    shapes: tuple[DecompiledDtoShape, ...],
+) -> dict[str, str]:
+    generic_fields = {
+        shape.name: field.serialized_name
+        for shape in shapes
+        for field in shape.fields
+        if field.java_type == "T"
+    }
+    candidates: dict[str, set[str]] = {}
+    for found in re.finditer(
+        r"Reflection\.typeOf\(\s*([A-Za-z_][A-Za-z0-9_]*)\.class"
+        r"[\s\S]{0,500}?Reflection\.typeOf\(\s*([A-Za-z_][A-Za-z0-9_]*)\.class",
+        java,
+    ):
+        envelope_path = generic_fields.get(found.group(1))
+        if envelope_path is not None:
+            candidates.setdefault(found.group(2), set()).add(envelope_path)
+    return {
+        response_type: next(iter(paths))
+        for response_type, paths in candidates.items()
+        if len(paths) == 1
+    }
+
+
 def _listing_containers(
     shapes: tuple[DecompiledDtoShape, ...],
     *,
-    envelope_path: str | None,
+    envelope_paths: dict[str, str],
 ) -> list[ListingContainerIR]:
     by_name = {shape.name: shape for shape in shapes}
     containers: list[ListingContainerIR] = []
@@ -997,6 +1023,10 @@ def _listing_containers(
             continue
         field, item_type = list_field
         names = {item.serialized_name for item in shape.fields}
+        next_field = next(
+            (item for item in shape.fields if item.serialized_name == "next"),
+            None,
+        )
         looks_like_container = bool(names & {"limit", "offset", "total"}) or shape.name.endswith(
             ("Result", "List", "Page")
         )
@@ -1020,12 +1050,17 @@ def _listing_containers(
         containers.append(
             ListingContainerIR(
                 type_name=shape.name,
-                envelope_path=envelope_path,
+                envelope_path=envelope_paths.get(shape.name),
                 items_path=field.serialized_name,
                 item_type=item_type,
                 item_wrapper_path=wrapper,
                 manga_item_type=manga_item_type,
-                next_path="next" if "next" in names else None,
+                next_path=(
+                    next_field.serialized_name
+                    if next_field is not None
+                    and next_field.java_type in {"String", "java.lang.String"}
+                    else None
+                ),
                 limit_path="limit" if "limit" in names else None,
                 offset_path="offset" if "offset" in names else None,
                 total_path="total" if "total" in names else None,
@@ -1177,16 +1212,15 @@ def project_implementation_ir(ir: SourceIR) -> ImplementationIR:
     shapes = decompiled_dto_shapes(ir.files)
     base = _api_base(ir, java)
     endpoints = _listing_endpoints(java, base, tuple(ir.filter_specs))
-    envelope_path = (
-        "results"
-        if re.search(r"\bclass\s+ApiResponse\b[\s\S]{0,4000}?\bT\s+results\b", java)
-        else None
+    containers = _listing_containers(
+        shapes,
+        envelope_paths=_response_envelope_paths(java, shapes),
     )
-    containers = _listing_containers(shapes, envelope_path=envelope_path)
     endpoints = _associate_listing_responses(endpoints, containers, java)
     manga_item_types = {container.manga_item_type for container in containers}
     mappings = _manga_mappings(ir.files, shapes, allowed_types=manga_item_types)
     unresolved: list[str] = []
+    filter_ids = {spec.id for spec in ir.filter_specs}
     if not endpoints:
         unresolved.append("no deterministic listing endpoint template was recovered")
     if not containers:
@@ -1201,6 +1235,16 @@ def project_implementation_ir(ir: SourceIR) -> ImplementationIR:
                 unresolved.append(
                     f"listing query binding is unresolved for {endpoint.id}.{parameter.name}"
                 )
+            elif parameter.source == "filter" and parameter.required:
+                binding = re.fullmatch(
+                    r"\{filter:([a-z][a-z0-9_]*)\}",
+                    parameter.value_template,
+                )
+                if binding is None or binding.group(1) not in filter_ids:
+                    unresolved.append(
+                        "required listing filter contract is unresolved for "
+                        f"{endpoint.id}.{parameter.name}"
+                    )
     if not mappings:
         unresolved.append("no deterministic manga field mapping was recovered")
     mapped_types = {mapping.item_type for mapping in mappings}

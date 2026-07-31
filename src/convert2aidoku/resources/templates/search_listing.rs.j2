@@ -8,11 +8,6 @@ use aidoku::{FilterValue, Manga, MangaPageResult, Result{% if popular_endpoint o
 
 const SITE_URL: &str = {{ site_url | rust_string }};
 
-#[derive(Deserialize)]
-struct ApiResponse<T> {
-    results: T,
-}
-
 {% for struct in structs %}
 #[derive(Deserialize, Default)]
 struct {{ struct.name }} {
@@ -167,6 +162,14 @@ fn {{ mapping.function_name }}(item: {{ mapping.type_name }}) -> Manga {
 
 {% endfor %}
 {% for endpoint in endpoints %}
+{% if endpoint.envelope_path %}
+#[derive(Deserialize)]
+struct {{ endpoint.envelope_type }} {
+    #[serde(rename = {{ endpoint.envelope_path | rust_string }})]
+    value: {{ endpoint.response_type }},
+}
+
+{% endif %}
 fn {{ endpoint.url_function }}(query: &str, page: i32, filters: &[FilterValue]) -> String {
     let mut url = api_url({{ endpoint.path | rust_string }});
 {% for line in endpoint.query_lines %}
@@ -176,8 +179,12 @@ fn {{ endpoint.url_function }}(query: &str, page: i32, filters: &[FilterValue]) 
 }
 
 fn {{ endpoint.fetch_function }}(url: String) -> Result<MangaPageResult> {
-    let response: ApiResponse<{{ endpoint.response_type }}> = get_json(url)?;
-    let result = response.results;
+{% if endpoint.envelope_path %}
+    let response: {{ endpoint.envelope_type }} = get_json(url)?;
+    let result = response.value;
+{% else %}
+    let result: {{ endpoint.response_type }} = get_json(url)?;
+{% endif %}
     let has_next_page = {{ endpoint.has_next_expression }};
     let entries = result.{{ endpoint.items_field }}
         .into_iter()

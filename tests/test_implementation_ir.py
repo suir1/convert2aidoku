@@ -115,12 +115,15 @@ def _copymanga_listing_files() -> list[SourceFile]:
                 }
                 protected MangasPage searchMangaParse(Response response) {
                     if (contains(response.url(), "/api/v3/search/comic")) {
-                        Reflection.typeOf(SearchResult.class);
+                        Reflection.typeOf(ApiResponse.class, Reflection.typeOf(SearchResult.class));
                     }
                     if (contains(response.url(), "/api/v3/ranks")) {
-                        Reflection.typeOf(RankResult.class);
+                        Reflection.typeOf(ApiResponse.class, Reflection.typeOf(RankResult.class));
                     }
-                    Reflection.typeOf(ComicsListResult.class);
+                    Reflection.typeOf(
+                        ApiResponse.class,
+                        Reflection.typeOf(ComicsListResult.class)
+                    );
                     return page;
                 }
                 protected Request searchMangaRequest(int page, String query, FilterList filters) {
@@ -180,7 +183,11 @@ def _copymanga_listing_files() -> list[SourceFile]:
         ),
         _file(
             "sources/example/api/ApiResponse.java",
-            "public final class ApiResponse<T> { private final T results; }",
+            """
+            import kotlinx.serialization.Serializable;
+            @Serializable
+            public final class ApiResponse<T> { private final T results; }
+            """,
         ),
         _file(
             "sources/example/api/dto/ComicSummary.java",
@@ -368,6 +375,27 @@ def _serializable_listing_files() -> list[SourceFile]:
     ]
 
 
+def _copymanga_filter_specs() -> list[SourceFilterSpec]:
+    return [
+        SourceFilterSpec(
+            source_class=f"{source_name}Filter",
+            id=filter_id,
+            title=filter_id,
+            kind="sort" if filter_id == "sort" else "select",
+            options=[SourceFilterOption(title="Default", value=value)],
+            default_ascending=True if filter_id == "sort" else None,
+        )
+        for source_name, filter_id, value in (
+            ("Type", "type", "name"),
+            ("Rank", "rank", "day"),
+            ("Audience", "audience", "male"),
+            ("Region", "region", "japan"),
+            ("FreeType", "free_type", "1"),
+            ("Sort", "sort", "datetime_updated"),
+        )
+    ]
+
+
 def test_projects_copymanga_listing_contract_without_provider() -> None:
     ir = minimal_source_ir(
         source_id="zh.copymanga",
@@ -375,6 +403,7 @@ def test_projects_copymanga_listing_contract_without_provider() -> None:
         source_format="decompiled_apk",
         main_class="CopyManga",
         capabilities=[Capability.POPULAR, Capability.LATEST],
+        filter_specs=_copymanga_filter_specs(),
         files=_copymanga_listing_files(),
         request_header_profiles=[
             RequestHeaderProfile(
@@ -540,6 +569,24 @@ def test_query_bindings_follow_filter_and_control_flow_evidence() -> None:
     assert not browse["area_code"].required
 
 
+def test_required_filter_without_contract_prevents_deterministic_ownership() -> None:
+    ir = minimal_source_ir(
+        source_id="zh.copymanga",
+        source_format="decompiled_apk",
+        main_class="CopyManga",
+        files=_copymanga_listing_files(),
+        filter_specs=[spec for spec in _copymanga_filter_specs() if spec.id != "sort"],
+    )
+
+    implementation = project_implementation_ir(ir)
+
+    assert "required listing filter contract is unresolved for comic_list.ordering" in (
+        implementation.unresolved_facts
+    )
+    with pytest.raises(ValueError, match="requires unresolved filter sort"):
+        render_search_listing(ir, implementation)
+
+
 def test_projects_serializable_dtos_and_string_mappings_without_directory_assumptions() -> None:
     ir = minimal_source_ir(
         source_id="en.example",
@@ -566,6 +613,8 @@ def test_projects_serializable_dtos_and_string_mappings_without_directory_assump
     assert "Vec::from([item.author])" in rendered.content
     assert "let tags: Vec<String> = item.type_names;" in rendered.content
     assert "let has_next_page = !result.next.is_empty();" in rendered.content
+    assert "let result: ComicList = get_json(url)?;" in rendered.content
+    assert "ApiResponse" not in rendered.content
 
     without_cursor = implementation.model_copy(
         update={
@@ -582,6 +631,67 @@ def test_projects_serializable_dtos_and_string_mappings_without_directory_assump
     page_sized = render_search_listing(ir, without_cursor)
 
     assert "let has_next_page = result.items.len() >= 20;" in page_sized.content
+
+
+def test_non_string_next_field_does_not_emit_string_cursor_logic() -> None:
+    files = _serializable_listing_files()
+    container = next(file for file in files if file.path.endswith("ComicList.java"))
+    container.content = container.content.replace("String next", "int next")
+    container.sha256 = hashlib.sha256(container.content.encode()).hexdigest()
+    ir = minimal_source_ir(
+        source_id="en.example",
+        source_format="decompiled_apk",
+        main_class="Example",
+        files=files,
+    )
+
+    implementation = project_implementation_ir(ir)
+    rendered = render_search_listing(ir, implementation)
+
+    assert implementation.listing is not None
+    comic_list = next(
+        item for item in implementation.listing.containers if item.type_name == "ComicList"
+    )
+    assert comic_list.next_path is None
+    assert "result.next.is_empty()" not in rendered.content
+    assert "let has_next_page = result.items.len() >= 20;" in rendered.content
+
+
+def test_response_envelope_is_projected_from_generic_decode_evidence() -> None:
+    files = _serializable_listing_files()
+    source = next(file for file in files if file.path.endswith("Example.java"))
+    source.content = source.content.replace(
+        "Reflection.typeOf(ComicList.class)",
+        "Reflection.typeOf(Envelope.class, Reflection.typeOf(ComicList.class))",
+    )
+    source.sha256 = hashlib.sha256(source.content.encode()).hexdigest()
+    files.append(
+        _file(
+            "sources/example/Envelope.java",
+            """
+            import kotlinx.serialization.Serializable;
+            @Serializable
+            public final class Envelope<T> { private final T payload; }
+            """,
+        )
+    )
+    ir = minimal_source_ir(
+        source_id="en.example",
+        source_format="decompiled_apk",
+        main_class="Example",
+        files=files,
+    )
+
+    implementation = project_implementation_ir(ir)
+    rendered = render_search_listing(ir, implementation)
+
+    assert implementation.listing is not None
+    comic_list = next(
+        item for item in implementation.listing.containers if item.type_name == "ComicList"
+    )
+    assert comic_list.envelope_path == "payload"
+    assert '#[serde(rename = "payload")]' in rendered.content
+    assert "let response: SearchEnvelope = get_json(url)?;" in rendered.content
 
 
 def test_kotlin_projection_keeps_unresolved_slot_explicit() -> None:
@@ -618,6 +728,7 @@ def test_deterministic_search_listing_renderer_uses_only_projected_contract() ->
         source_format="decompiled_apk",
         main_class="CopyManga",
         capabilities=[Capability.POPULAR, Capability.LATEST],
+        filter_specs=_copymanga_filter_specs(),
         files=_copymanga_listing_files(),
         request_header_profiles=[
             RequestHeaderProfile(
@@ -643,6 +754,10 @@ def test_deterministic_search_listing_renderer_uses_only_projected_contract() ->
     assert "fn comic_list_url(" in rendered.content
     assert "struct SearchResult" in rendered.content
     assert "struct RankResult" in rendered.content
+    assert "struct SearchEnvelope" in rendered.content
+    assert '#[serde(rename = "results")]' in rendered.content
+    assert "let response: SearchEnvelope = get_json(url)?;" in rendered.content
+    assert "let result = response.value;" in rendered.content
     assert "fn manga_from_comic_summary" in rendered.content
     assert "let has_next_page = result.offset + result.limit < result.total;" in rendered.content
     assert 'request = request.header("Version", "1");' in rendered.content
@@ -662,6 +777,7 @@ def test_effective_manifest_owns_listing_module_and_source_delegation() -> None:
         source_format="decompiled_apk",
         main_class="CopyManga",
         capabilities=[Capability.POPULAR, Capability.LATEST],
+        filter_specs=_copymanga_filter_specs(),
         files=_copymanga_listing_files(),
     )
     manifest = GenerationManifest(
@@ -728,6 +844,7 @@ def test_generation_context_omits_tool_owned_listing_evidence() -> None:
         source_format="decompiled_apk",
         main_class="CopyManga",
         capabilities=[Capability.POPULAR, Capability.LATEST],
+        filter_specs=_copymanga_filter_specs(),
         files=_copymanga_listing_files(),
     )
 
