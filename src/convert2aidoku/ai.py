@@ -63,11 +63,7 @@ from .scaffold import (
 )
 
 _ResponseMode = Literal["json_schema", "json_object", "plain"]
-_REASONING_CONTROL_ERROR = re.compile(
-    r"reasoning_effort|\bthinking\b|(?:unknown|unsupported|unrecognized|unexpected)"
-    r".{0,40}(?:parameter|field)",
-    re.IGNORECASE,
-)
+_COMPATIBILITY_HTTP_ERROR = re.compile(r"HTTP (?:400|404|415|422)\b", re.IGNORECASE)
 
 _PATCH_SCOPES = {
     "compiler": (
@@ -380,6 +376,37 @@ def _fallback_json_document(content: str) -> str:
     return stripped
 
 
+def _provider_rejected_parameter(diagnostic: str, *markers: str) -> bool:
+    if _COMPATIBILITY_HTTP_ERROR.search(diagnostic) is None:
+        return False
+    lowered = diagnostic.casefold()
+    return any(marker in lowered for marker in markers)
+
+
+def _reasoning_control_rejected(
+    diagnostic: str,
+    reasoning_effort: ReasoningEffort,
+) -> bool:
+    markers = (
+        ("thinking",)
+        if reasoning_effort is ReasoningEffort.OFF
+        else (
+            "reasoning_effort",
+            "reasoning effort",
+        )
+    )
+    return _provider_rejected_parameter(diagnostic, *markers)
+
+
+def _response_format_rejected(diagnostic: str, response_mode: _ResponseMode) -> bool:
+    markers = ["response_format"]
+    if response_mode == "json_schema":
+        markers.extend(("json_schema", "json schema", "structured output"))
+    elif response_mode == "json_object":
+        markers.extend(("json_object", "json object"))
+    return _provider_rejected_parameter(diagnostic, *markers)
+
+
 def _strict_model_schema(model: type[BaseModel]) -> dict[str, Any]:
     schema = deepcopy(model.model_json_schema())
 
@@ -675,15 +702,16 @@ class OpenAICompatibleClient:
                 if active_reasoning not in {
                     None,
                     ReasoningEffort.AUTO,
-                } and _REASONING_CONTROL_ERROR.search(diagnostic):
+                } and _reasoning_control_rejected(diagnostic, active_reasoning):
                     if active_reasoning == ReasoningEffort.OFF:
                         self._thinking_control_supported = False
                     else:
                         self._reasoning_effort_supported = False
                     active_reasoning = None
                     continue
-                if response_mode != "plain" and re.search(
-                    r"HTTP (?:400|404|415|422)\b", diagnostic
+                if response_mode != "plain" and _response_format_rejected(
+                    diagnostic,
+                    response_mode,
                 ):
                     response_mode = "json_object" if response_mode == "json_schema" else "plain"
                     self._response_mode = response_mode

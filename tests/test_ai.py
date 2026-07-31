@@ -374,6 +374,59 @@ def test_reasoning_effort_rejection_is_remembered_without_consuming_retry() -> N
     assert second.reasoning_effort is None
 
 
+def test_response_format_rejection_does_not_disable_reasoning_first() -> None:
+    calls = 0
+    request_controls: list[tuple[str | None, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        payload = json.loads(request.content)
+        response_format = payload.get("response_format", {}).get("type")
+        reasoning = payload.get("reasoning_effort")
+        request_controls.append((response_format, reasoning))
+        if response_format == "json_schema":
+            return httpx.Response(400, text="unsupported parameter response_format")
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(_manifest())}}]},
+        )
+
+    with OpenAICompatibleClient(
+        provider_settings(),
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        result = client._request_model(
+            [{"role": "user", "content": "test"}],
+            GenerationManifest,
+            reasoning_effort=ReasoningEffort.LOW,
+        )
+
+    assert calls == 2
+    assert request_controls == [("json_schema", "low"), ("json_object", "low")]
+    assert result.reasoning_effort is ReasoningEffort.LOW
+
+
+def test_unrelated_http_400_does_not_spend_format_fallback_calls() -> None:
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(400, text="invalid request payload")
+
+    with (
+        OpenAICompatibleClient(
+            provider_settings(),
+            transport=httpx.MockTransport(handler),
+        ) as client,
+        pytest.raises(AIProviderError, match="invalid request payload"),
+    ):
+        client._request_manifest([{"role": "user", "content": "test"}])
+
+    assert calls == 1
+
+
 def test_ai_check_disables_thinking() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
