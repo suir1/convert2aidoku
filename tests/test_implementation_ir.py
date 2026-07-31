@@ -278,6 +278,72 @@ def _copymanga_listing_files() -> list[SourceFile]:
     ]
 
 
+def _serializable_listing_files() -> list[SourceFile]:
+    return [
+        _file(
+            "sources/example/ApiRepo.java",
+            """
+            public final class ApiRepo {
+                private static final String DEFAULT = "api.example.com";
+                private static final int pageSize = 20;
+                private final String getApiUrl() { return "/api"; }
+                public final String searchUrl(int page, String query) {
+                    return getApiUrl() + "/search?page=" + page + "&q=" + query;
+                }
+                public final String comicListUrl(int page) {
+                    return getApiUrl() + "/comics?page=" + page;
+                }
+            }
+            """,
+        ),
+        _file(
+            "sources/example/Example.java",
+            """
+            public final class Example extends HttpSource {
+                protected MangasPage searchMangaParse(Response response) {
+                    Reflection.typeOf(ComicList.class);
+                    return page;
+                }
+            }
+            """,
+        ),
+        _file(
+            "sources/example/ComicList.java",
+            """
+            import kotlinx.serialization.Serializable;
+            @Serializable
+            public final class ComicList {
+                private final List<ComicItem> items;
+                private final String next;
+            }
+            """,
+        ),
+        _file(
+            "sources/example/ComicItem.java",
+            """
+            import kotlinx.serialization.Serializable;
+            @Serializable
+            public final class ComicItem {
+                private final String comicId;
+                private final String name;
+                private final String cover;
+                private final String author;
+                private final List<String> typeNames;
+                public final SManga toSManga() {
+                    SManga manga = SManga.create();
+                    manga.setUrl("/comic/" + this.comicId);
+                    manga.setTitle(this.name);
+                    manga.setThumbnail_url(this.cover);
+                    manga.setAuthor(translate(this.author));
+                    manga.setGenre(join(this.typeNames));
+                    return manga;
+                }
+            }
+            """,
+        ),
+    ]
+
+
 def test_projects_copymanga_listing_contract_without_provider() -> None:
     ir = minimal_source_ir(
         source_id="zh.copymanga",
@@ -375,6 +441,50 @@ def test_projects_copymanga_listing_contract_without_provider() -> None:
     }
 
 
+def test_projects_serializable_dtos_and_string_mappings_without_directory_assumptions() -> None:
+    ir = minimal_source_ir(
+        source_id="en.example",
+        source_format="decompiled_apk",
+        main_class="Example",
+        files=_serializable_listing_files(),
+    )
+
+    implementation = project_implementation_ir(ir)
+
+    assert implementation.unresolved_facts == []
+    assert implementation.listing is not None
+    listing = implementation.listing
+    containers = {container.type_name: container for container in listing.containers}
+    assert containers["ComicList"].items_path == "items"
+    assert containers["ComicList"].next_path == "next"
+    mapping = next(item for item in listing.manga_mappings if item.item_type == "ComicItem")
+    assert mapping.authors_path == "author"
+    assert mapping.tags_path == "typeNames[]"
+
+    rendered = render_search_listing(ir, implementation)
+
+    assert "let authors: Vec<String> = if item.author.is_empty()" in rendered.content
+    assert "Vec::from([item.author])" in rendered.content
+    assert "let tags: Vec<String> = item.type_names;" in rendered.content
+    assert "let has_next_page = !result.next.is_empty();" in rendered.content
+
+    without_cursor = implementation.model_copy(
+        update={
+            "listing": listing.model_copy(
+                update={
+                    "containers": [
+                        container.model_copy(update={"next_path": None})
+                        for container in listing.containers
+                    ]
+                }
+            )
+        }
+    )
+    page_sized = render_search_listing(ir, without_cursor)
+
+    assert "let has_next_page = result.items.len() >= 20;" in page_sized.content
+
+
 def test_kotlin_projection_keeps_unresolved_slot_explicit() -> None:
     implementation = project_implementation_ir(minimal_source_ir())
 
@@ -435,6 +545,7 @@ def test_deterministic_search_listing_renderer_uses_only_projected_contract() ->
     assert "struct SearchResult" in rendered.content
     assert "struct RankResult" in rendered.content
     assert "fn manga_from_comic_summary" in rendered.content
+    assert "let has_next_page = result.offset + result.limit < result.total;" in rendered.content
     assert 'request = request.header("Version", "1");' in rendered.content
     assert 'request = request.header("X-Test", "<tag>\\u{8}");' in rendered.content
     assert "pub(crate) fn get_search_manga_list(" in rendered.content

@@ -144,6 +144,31 @@ def test_prompt_context_excludes_local_only_source_audit_data() -> None:
     assert "analysis_rule_ids" not in settings["source"]
 
 
+def test_compacted_dto_outside_api_directory_is_represented_once() -> None:
+    main = _file("sources/example/Example.java", "public final class Example {}")
+    dto = _file(
+        "sources/example/ComicList.java",
+        """
+        // C2A compacted JADX DTO: generated constructors and value methods removed.
+        public final class ComicList {
+            private final List<ComicItem> items;
+            private final String next;
+        }
+        """,
+    )
+
+    payload = build_generation_context(_ir(main, dto)).as_payload()
+
+    assert payload["decompiled_dto_shapes"] == [
+        "ComicList { items: List<ComicItem>, next: String }"
+    ]
+    assert dto.path not in {item["path"] for item in payload["source_evidence"]}
+    assert any(
+        item["path"] == dto.path and item["reason"] == "represented_in_decompiled_dto_shapes"
+        for item in payload["omitted_source_files"]
+    )
+
+
 def test_settings_context_keeps_only_bounded_preference_evidence() -> None:
     option = _file(
         "sources/example/PlatformOption.java",

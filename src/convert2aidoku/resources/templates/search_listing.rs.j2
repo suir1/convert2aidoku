@@ -109,16 +109,40 @@ fn get_json<T: for<'a> Deserialize<'a>>(url: String) -> Result<T> {
 {% for mapping in mappings %}
 fn {{ mapping.function_name }}(item: {{ mapping.type_name }}) -> Manga {
 {% if mapping.authors_field %}
+{% if mapping.authors_is_collection %}
+{% if mapping.authors_name_field %}
     let authors: Vec<String> = item.{{ mapping.authors_field }}
         .into_iter()
         .map(|value| value.{{ mapping.authors_name_field }})
         .collect();
+{% else %}
+    let authors: Vec<String> = item.{{ mapping.authors_field }};
+{% endif %}
+{% else %}
+    let authors: Vec<String> = if item.{{ mapping.authors_field }}.is_empty() {
+        Vec::new()
+    } else {
+        Vec::from([item.{{ mapping.authors_field }}])
+    };
+{% endif %}
 {% endif %}
 {% if mapping.tags_field %}
+{% if mapping.tags_is_collection %}
+{% if mapping.tags_name_field %}
     let tags: Vec<String> = item.{{ mapping.tags_field }}
         .into_iter()
         .map(|value| value.{{ mapping.tags_name_field }})
         .collect();
+{% else %}
+    let tags: Vec<String> = item.{{ mapping.tags_field }};
+{% endif %}
+{% else %}
+    let tags: Vec<String> = if item.{{ mapping.tags_field }}.is_empty() {
+        Vec::new()
+    } else {
+        Vec::from([item.{{ mapping.tags_field }}])
+    };
+{% endif %}
 {% endif %}
     let key = {{ mapping.key_expression }};
     Manga {

@@ -60,7 +60,7 @@ def _evidence_priority(ir: SourceIR, source: SourceFile) -> int:
         return 1_000
     if "/api/" in f"/{path}" and "/dto/" not in f"/{path}":
         return 900
-    if "/api/dto/" in f"/{path}":
+    if "/api/dto/" in f"/{path}" or "C2A compacted JADX DTO" in source.content:
         return 850
     if "/interceptor/" in f"/{path}":
         return 800
@@ -138,7 +138,10 @@ def build_generation_context(
                 }
             )
             continue
-        if "/api/dto/" in f"/{source.path}" and PurePosixPath(source.path).stem in owned_dto_types:
+        if (
+            "C2A compacted JADX DTO" in source.content
+            and PurePosixPath(source.path).stem in owned_dto_types
+        ):
             omitted.append(
                 {
                     "path": source.path,
@@ -149,8 +152,7 @@ def build_generation_context(
             )
             continue
         if (
-            "/api/dto/" in f"/{source.path}"
-            and "// C2A compacted JADX DTO:" in source.content
+            "// C2A compacted JADX DTO:" in source.content
             and "// Source-specific behavior:" not in source.content
         ):
             omitted.append(

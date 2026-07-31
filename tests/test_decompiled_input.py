@@ -317,6 +317,41 @@ public final class Comic {
     assert "toString(" not in compacted
 
 
+def test_kotlin_serializable_dto_is_recognized_outside_api_dto_directory() -> None:
+    source = """
+package example;
+import kotlinx.serialization.Serializable;
+
+@Serializable
+public final class ComicItem {
+    private final String comicId;
+    private final String name;
+    public final String getComicId() { return this.comicId; }
+    public final ComicItem copy(String comicId, String name) {
+        return new ComicItem(comicId, name);
+    }
+    public final SManga toSManga() {
+        SManga manga = SManga.create();
+        manga.setUrl("/comic/" + this.comicId);
+        manga.setTitle(this.name);
+        return manga;
+    }
+}
+"""
+
+    compacted = normalize_decompiled_java(source, Path("sources/example/ComicItem.java"))
+    shapes = decompiled_dto_shapes(
+        [SourceFile(path="sources/example/ComicItem.java", sha256="0", content=compacted)]
+    )
+
+    assert len(compacted) < len(source)
+    assert "C2A compacted JADX DTO" in compacted
+    assert "toSManga" in compacted
+    assert " copy(" not in compacted
+    assert [shape.name for shape in shapes] == ["ComicItem"]
+    assert [field.name for field in shapes[0].fields] == ["comicId", "name"]
+
+
 def test_dto_shapes_preserve_generic_field_types_and_serialized_names() -> None:
     detail = SourceFile(
         path="sources/example/api/dto/ComicDetailResult.java",

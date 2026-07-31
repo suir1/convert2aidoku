@@ -56,8 +56,10 @@ class _MappingView:
     cover_field: str | None
     authors_field: str | None
     authors_name_field: str | None
+    authors_is_collection: bool
     tags_field: str | None
     tags_name_field: str | None
+    tags_is_collection: bool
     description_field: str | None
 
 
@@ -304,16 +306,28 @@ def _mapping_view(mapping: MangaMappingIR, shapes: dict[str, DataShapeIR]) -> _M
         f"item.{_rust_identifier(_field(shape, name).serialized_name)}" for name in placeholders
     )
 
-    def nested(path: str | None) -> tuple[str | None, str | None]:
+    def nested(path: str | None) -> tuple[str | None, str | None, bool]:
         if path is None:
-            return None, None
-        root, _, child = path.partition("[].")
-        return _rust_identifier(_field(shape, root).serialized_name), (
-            _rust_identifier(child) if child else None
+            return None, None, False
+        if "[]." in path:
+            root, child = path.split("[].", 1)
+            is_collection = True
+        elif path.endswith("[]"):
+            root = path.removesuffix("[]")
+            child = ""
+            is_collection = True
+        else:
+            root = path
+            child = ""
+            is_collection = False
+        return (
+            _rust_identifier(_field(shape, root).serialized_name),
+            (_rust_identifier(child) if child else None),
+            is_collection,
         )
 
-    authors_field, authors_name = nested(mapping.authors_path)
-    tags_field, tags_name = nested(mapping.tags_path)
+    authors_field, authors_name, authors_is_collection = nested(mapping.authors_path)
+    tags_field, tags_name, tags_is_collection = nested(mapping.tags_path)
     return _MappingView(
         type_name=mapping.item_type,
         function_name=f"manga_from_{_snake_case(mapping.item_type)}",
@@ -326,8 +340,10 @@ def _mapping_view(mapping: MangaMappingIR, shapes: dict[str, DataShapeIR]) -> _M
         ),
         authors_field=authors_field,
         authors_name_field=authors_name,
+        authors_is_collection=authors_is_collection,
         tags_field=tags_field,
         tags_name_field=tags_name,
+        tags_is_collection=tags_is_collection,
         description_field=(
             _rust_identifier(_field(shape, mapping.description_path).serialized_name)
             if mapping.description_path
@@ -360,6 +376,7 @@ def _required_structs(
         add(
             container.type_name,
             container.items_path,
+            container.next_path,
             container.limit_path,
             container.offset_path,
             container.total_path,
@@ -422,11 +439,18 @@ def _endpoint_view(
     item_expression = "item"
     if container.item_wrapper_path:
         item_expression += f".{_rust_identifier(container.item_wrapper_path)}"
-    if container.limit_path and container.offset_path and container.total_path:
+    if container.next_path:
+        has_next = f"!result.{_rust_identifier(container.next_path)}.is_empty()"
+    elif container.limit_path and container.offset_path and container.total_path:
         has_next = (
-            f"result.{_rust_identifier(container.total_path)} >= "
             f"result.{_rust_identifier(container.offset_path)} + "
-            f"result.{_rust_identifier(container.limit_path)}"
+            f"result.{_rust_identifier(container.limit_path)} < "
+            f"result.{_rust_identifier(container.total_path)}"
+        )
+    elif endpoint.pagination is not None and endpoint.pagination.page_size is not None:
+        has_next = (
+            f"result.{_rust_identifier(container.items_path)}.len() >= "
+            f"{endpoint.pagination.page_size}"
         )
     else:
         has_next = "!result." + _rust_identifier(container.items_path) + ".is_empty()"

@@ -126,13 +126,24 @@ class DecompiledDtoShape:
         return f"{self.name} {{ {', '.join(fields)} }}"
 
 
+def _is_dto_source(path: PurePath, content: str) -> bool:
+    normalized_path = f"/{path.as_posix()}"
+    return (
+        "/api/dto/" in normalized_path
+        or "C2A compacted JADX DTO" in content
+        or (
+            "import kotlinx.serialization.Serializable;" in content
+            and re.search(r"^\s*@Serializable\s*$", content, re.MULTILINE) is not None
+        )
+    )
+
+
 def decompiled_dto_shapes(files: Iterable[SourceFile]) -> tuple[DecompiledDtoShape, ...]:
     """Recover concise DTO field types without asking the provider to infer Java syntax."""
     shapes: list[DecompiledDtoShape] = []
     for source in files:
-        path = f"/{source.path}"
-        if not source.path.endswith(".java") or (
-            "/api/dto/" not in path and "C2A compacted JADX DTO" not in source.content
+        if not source.path.endswith(".java") or not _is_dto_source(
+            PurePath(source.path), source.content
         ):
             continue
         raw = source.content.encode("utf-8")
@@ -462,7 +473,11 @@ def _extend_dto_dependency_closure(
 ) -> None:
     """Collect DTO field types transitively so response wrappers never become AI guesses."""
     known = set(selected)
-    pending = [path for path in selected if "/api/dto/" in f"/{path.as_posix()}"]
+    pending = [
+        path
+        for path in selected
+        if _is_dto_source(path, path.read_text(encoding="utf-8", errors="replace"))
+    ]
     added = 0
     while pending:
         path = pending.pop(0)
@@ -493,11 +508,11 @@ def _extend_dto_dependency_closure(
         for type_name in sorted(referenced):
             if any(marker in type_name for marker in _OPTIONAL_CLASS_MARKERS):
                 continue
-            candidates = [
-                candidate
-                for candidate in by_name.get(f"{type_name}.java", [])
-                if "/api/dto/" in f"/{candidate.as_posix()}"
-            ]
+            candidates = []
+            for candidate in by_name.get(f"{type_name}.java", []):
+                candidate_content = candidate.read_text(encoding="utf-8", errors="replace")
+                if _is_dto_source(candidate, candidate_content):
+                    candidates.append(candidate)
             for candidate in sorted(candidates):
                 if candidate in known:
                     continue
@@ -516,7 +531,7 @@ def normalize_decompiled_java(content: str, path: PurePath) -> str:
     content = re.sub(r"^\s*@Metadata\([^\n]*\)\s*$", "", content, flags=re.MULTILINE)
     content = re.sub(r"^\s*/\* JADX INFO:.*?\*/\s*$", "", content, flags=re.MULTILINE)
     content = content.strip() + "\n"
-    if "/api/dto/" in f"/{path.as_posix()}":
+    if _is_dto_source(path, content):
         if "// C2A compacted JADX DTO:" in content:
             return content
         return _compact_dto(content)

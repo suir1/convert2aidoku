@@ -15,7 +15,7 @@ from convert2aidoku.scaffold import apply_generation_manifest
 from convert2aidoku.toolchain import find_tool
 from convert2aidoku.validator import validate_project
 from tests.scenarios import minimal_source_ir, scaffold_project
-from tests.test_implementation_ir import _copymanga_listing_files
+from tests.test_implementation_ir import _copymanga_listing_files, _serializable_listing_files
 
 from .test_converter import RUST_SOURCE
 
@@ -265,6 +265,34 @@ def test_deterministic_listing_module_and_provider_compile_for_wasm(tmp_path: Pa
             implemented_traits=["ListingProvider"],
             files=[
                 GeneratedFile(path="src/lib.rs", content=LISTING_PROVIDER_RUST_SOURCE),
+                rendered,
+            ],
+            dependencies=[DependencyRequest(name="serde", features=["derive"])],
+        ),
+        query=None,
+    )
+
+    validation = validate_project(project, live=False)
+    assert validation.build_ok, validation.diagnostics
+    assert validation.package_ok, validation.diagnostics
+
+
+def test_serializable_string_mappings_compile_for_wasm(tmp_path: Path) -> None:
+    assert find_tool("cargo")
+    listing_ir = minimal_source_ir(
+        source_format="decompiled_apk",
+        main_class="Example",
+        files=_serializable_listing_files(),
+    )
+    rendered = render_search_listing(listing_ir)
+    project, scaffold_ir = scaffold_project(tmp_path, name="serializable-listing-project")
+    apply_generation_manifest(
+        project,
+        scaffold_ir,
+        GenerationManifest(
+            source_struct="Example",
+            files=[
+                GeneratedFile(path="src/lib.rs", content=LISTING_RUST_SOURCE),
                 rendered,
             ],
             dependencies=[DependencyRequest(name="serde", features=["derive"])],

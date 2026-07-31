@@ -108,6 +108,7 @@ class ListingContainerIR(BaseModel):
     item_type: str
     item_wrapper_path: str | None = None
     manga_item_type: str
+    next_path: str | None = None
     limit_path: str | None = None
     offset_path: str | None = None
     total_path: str | None = None
@@ -938,6 +939,7 @@ def _listing_containers(
                 item_type=item_type,
                 item_wrapper_path=wrapper,
                 manga_item_type=manga_item_type,
+                next_path="next" if "next" in names else None,
                 limit_path="limit" if "limit" in names else None,
                 offset_path="offset" if "offset" in names else None,
                 total_path="total" if "total" in names else None,
@@ -987,6 +989,24 @@ def _setter_path(block: str, shape: DecompiledDtoShape, setter: str) -> str | No
     return _serialized_field(shape, field) if field else None
 
 
+def _setter_collection_path(
+    block: str,
+    shape: DecompiledDtoShape,
+    setter: str,
+) -> str | None:
+    java_name = _setter_field(block, setter)
+    if java_name is None:
+        return None
+    serialized = _serialized_field(shape, java_name)
+    field = next((item for item in shape.fields if item.name == java_name), None)
+    item_type = _list_item_type(field.java_type) if field is not None else None
+    if item_type is None:
+        return serialized
+    if item_type in {"String", "java.lang.String"}:
+        return f"{serialized}[]"
+    return f"{serialized}[].name"
+
+
 def _manga_mappings(
     files: Iterable[SourceFile],
     shapes: tuple[DecompiledDtoShape, ...],
@@ -1018,16 +1038,14 @@ def _manga_mappings(
                 prefix = _decode_java_string(literal.group(1)) if literal else ""
             key_template = f"{prefix}{{{_serialized_field(shape, url_field)}}}"
 
-        authors = _setter_path(block, shape, "setAuthor")
-        tags = _setter_path(block, shape, "setGenre")
         mappings.append(
             MangaMappingIR(
                 item_type=type_name,
                 key_template=key_template,
                 title_path=_setter_path(block, shape, "setTitle"),
                 cover_path=_setter_path(block, shape, "setThumbnail_url"),
-                authors_path=f"{authors}[].name" if authors else None,
-                tags_path=f"{tags}[].name" if tags else None,
+                authors_path=_setter_collection_path(block, shape, "setAuthor"),
+                tags_path=_setter_collection_path(block, shape, "setGenre"),
                 description_path=_setter_path(block, shape, "setDescription"),
             )
         )
