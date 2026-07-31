@@ -5,7 +5,7 @@ import re
 import signal
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager, suppress
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -17,6 +17,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    PrivateAttr,
     ValidationError,
     field_validator,
     model_validator,
@@ -50,6 +51,7 @@ from .models import (
     SourceIR,
     validate_generated_path,
 )
+from .normalization_trace import NormalizationTrace
 from .scaffold import (
     normalize_pinned_aidoku_rust,
     render_generated_lib_rs,
@@ -130,14 +132,24 @@ class AIResult[T: BaseModel]:
     reasoning_effort: ReasoningEffort | None = None
     usage: AIUsage | None = None
     warnings: list[str] = field(default_factory=list)
+    normalization_rewrites: dict[str, int] = field(default_factory=dict)
 
-    def with_value[TOther: BaseModel](self, value: TOther) -> AIResult[TOther]:
+    def with_value[TOther: BaseModel](
+        self,
+        value: TOther,
+        *,
+        normalization_rewrites: Mapping[str, int] | None = None,
+    ) -> AIResult[TOther]:
+        trace = NormalizationTrace()
+        trace.merge(self.normalization_rewrites)
+        trace.merge(normalization_rewrites or {})
         return AIResult(
             value=value,
             structured_output=self.structured_output,
             reasoning_effort=self.reasoning_effort,
             usage=self.usage,
             warnings=list(self.warnings),
+            normalization_rewrites=trace.counts,
         )
 
 
@@ -175,6 +187,7 @@ class _RustGenerationManifest(BaseModel):
     dependencies: list[DependencyRequest] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     unsupported_features: list[str] = Field(default_factory=list)
+    _normalization_rewrites: dict[str, int] = PrivateAttr(default_factory=dict)
 
     @field_validator("files")
     @classmethod
@@ -198,6 +211,10 @@ class _RustGenerationManifest(BaseModel):
 
     def to_manifest(self) -> GenerationManifest:
         return GenerationManifest.model_validate(self.model_dump(mode="json"))
+
+    @property
+    def normalization_rewrites(self) -> dict[str, int]:
+        return dict(self._normalization_rewrites)
 
 
 class _AISettingItem(BaseModel):
@@ -411,13 +428,16 @@ def _validate_rust_manifest(manifest: _RustGenerationManifest) -> None:
             manifest.files.append(_RustGeneratedFile(path="src/lib.rs", content=lib_content))
         else:
             lib.content = lib_content
+    trace = NormalizationTrace()
     for generated in manifest.files:
         generated.content = normalize_pinned_aidoku_rust(
             generated.content,
             allow_dead_code=generated.path != "src/lib.rs",
             remove_extern_std=True,
+            trace=trace,
         )
         validate_generated_content(generated.path, generated.content)
+    manifest._normalization_rewrites = trace.counts
 
 
 def _compact_manifest_history(
@@ -643,6 +663,7 @@ class OpenAICompatibleClient:
                     reasoning_effort=active_reasoning,
                     usage=self._combined_usage(usages),
                     warnings=warnings,
+                    normalization_rewrites=getattr(value, "normalization_rewrites", {}),
                 )
             except AIProviderError as exc:
                 diagnostic = str(exc)
@@ -732,6 +753,7 @@ class OpenAICompatibleClient:
             reasoning_effort=rust_result.reasoning_effort,
             usage=self._combined_usage(usages),
             warnings=warnings,
+            normalization_rewrites=rust_result.normalization_rewrites,
         )
 
     def _generate_settings(self, ir: SourceIR) -> AIResult[_SettingsDocument]:
@@ -867,4 +889,5 @@ def ai_round[T: BaseModel](number: int, purpose: str, result: AIResult[T]) -> AI
         reasoning_effort=result.reasoning_effort,
         usage=result.usage,
         warnings=result.warnings,
+        normalization_rewrites=result.normalization_rewrites,
     )

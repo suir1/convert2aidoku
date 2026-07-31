@@ -4,7 +4,13 @@ import time
 import httpx
 import pytest
 
-from convert2aidoku.ai import OpenAICompatibleClient, _contract_text, _strict_model_schema
+from convert2aidoku.ai import (
+    AIResult,
+    OpenAICompatibleClient,
+    _contract_text,
+    _strict_model_schema,
+    ai_round,
+)
 from convert2aidoku.config import ReasoningEffort
 from convert2aidoku.errors import AIProviderError
 from convert2aidoku.models import (
@@ -45,6 +51,25 @@ def test_strict_schema_closes_every_object() -> None:
                 visit(child)
 
     visit(schema)
+
+
+def test_ai_result_preserves_and_merges_local_normalizer_rewrites() -> None:
+    manifest = GenerationManifest.model_validate(_manifest())
+    result = AIResult(
+        value=manifest,
+        structured_output=True,
+        normalization_rewrites={"safe_std_paths": 1},
+    )
+
+    updated = result.with_value(
+        manifest,
+        normalization_rewrites={"safe_std_paths": 1, "allow_dead_code": 2},
+    )
+
+    assert updated.normalization_rewrites == {
+        "allow_dead_code": 2,
+        "safe_std_paths": 2,
+    }
 
 
 def test_contract_requires_official_metadata_mapping() -> None:
@@ -516,6 +541,9 @@ def test_initial_generation_normalizes_safe_std_allocations_without_retry() -> N
     assert "mod source;" in files["src/lib.rs"]
     assert "pub use source::Example;" in files["src/lib.rs"]
     assert "BTreeMap::<String, String>" in files["src/source.rs"]
+    assert result.normalization_rewrites["normalize_safe_std_paths"] == 1
+    assert result.normalization_rewrites["allow_dead_code"] == 1
+    assert ai_round(1, "generate", result).normalization_rewrites == (result.normalization_rewrites)
 
 
 def test_initial_generation_stops_after_two_unsafe_full_outputs() -> None:

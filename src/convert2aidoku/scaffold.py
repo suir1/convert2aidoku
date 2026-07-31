@@ -36,6 +36,7 @@ from .models import (
     SourceIR,
     validate_generated_path,
 )
+from .normalization_trace import NormalizationTrace
 from .public_only_scope import public_only_filter_exclusion
 from .rust_inspection import RustInspection
 
@@ -3623,80 +3624,100 @@ def normalize_pinned_aidoku_rust(
     chapter_key_templates: tuple[str, ...] | None = None,
     request_builder_helpers: set[str] | None = None,
     remove_extern_std: bool = False,
+    trace: NormalizationTrace | None = None,
 ) -> str:
     """Apply small type-safe compatibility rewrites for the pinned Aidoku/Rust APIs."""
-    content = _normalize_boolean_let_some_alternatives(content)
-    content = _normalize_safe_std_paths(content, remove_extern_std=remove_extern_std)
-    content = _normalize_graphql_request_body(content)
-    content = _normalize_aidoku_api_paths(content)
-    content = _normalize_generic_deserialize(content)
-    content = _normalize_graphql_body_fragment(content)
-    content = _normalize_html_element_text(content)
-    content = _normalize_utf8_slice_loops(content)
-    content = _normalize_graphql_manga_update_projection(content)
-    content = _normalize_image_request_result(content)
-    content = _normalize_result_request_tails(content)
-    content = _normalize_detail_partial_move(content)
-    content = _normalize_manga_replacement_chapters(content)
-    content = _normalize_legacy_request_errors(content)
-    content = _normalize_defaults_get_bindings(content)
-    content = _normalize_owned_setting_routes(content)
-    content = _normalize_defaults_set_string_values(content)
-    content = _normalize_rsa_bootstrap_diagnostics(content)
-    content = _normalize_aidoku_result_errors(content)
-    content = _normalize_raw_json_response_bindings(content)
-    content = _normalize_request_builder_helpers(content, request_builder_helpers)
-    content = _inject_source_new(content)
-    content = _normalize_mutated_aidoku_models(content)
-    content = _normalize_default_model_assignments(content)
-    content = _normalize_page_index_fields(content)
-    content = _normalize_legacy_filter_fields(content)
-    content = _normalize_select_filter_constructors(content)
-    content = _normalize_legacy_page_context(content)
-    content = _normalize_page_url_context(content)
-    content = _normalize_deep_link_defaults(content)
-    content = _normalize_parse_date_option_patterns(content)
-    content = _normalize_optional_chapter_dates(content)
-    content = _normalize_chapter_group_scope(content)
-    if allow_dead_code and not re.search(
-        r"#!\[allow\([^\]]*\bdead_code\b",
-        content,
-    ):
+    active_trace = trace or NormalizationTrace()
+
+    def apply(rewrite: Any, *args: Any, **kwargs: Any) -> None:
+        nonlocal content
+        content = active_trace.apply(
+            rewrite.__name__.removeprefix("_"),
+            content,
+            lambda value: rewrite(value, *args, **kwargs),
+        )
+
+    def record(rule_id: str, before: str) -> None:
+        active_trace.observe(rule_id, before, content)
+
+    apply(_normalize_boolean_let_some_alternatives)
+    apply(_normalize_safe_std_paths, remove_extern_std=remove_extern_std)
+    apply(_normalize_graphql_request_body)
+    apply(_normalize_aidoku_api_paths)
+    apply(_normalize_generic_deserialize)
+    apply(_normalize_graphql_body_fragment)
+    apply(_normalize_html_element_text)
+    apply(_normalize_utf8_slice_loops)
+    apply(_normalize_graphql_manga_update_projection)
+    apply(_normalize_image_request_result)
+    apply(_normalize_result_request_tails)
+    apply(_normalize_detail_partial_move)
+    apply(_normalize_manga_replacement_chapters)
+    apply(_normalize_legacy_request_errors)
+    apply(_normalize_defaults_get_bindings)
+    apply(_normalize_owned_setting_routes)
+    apply(_normalize_defaults_set_string_values)
+    apply(_normalize_rsa_bootstrap_diagnostics)
+    apply(_normalize_aidoku_result_errors)
+    apply(_normalize_raw_json_response_bindings)
+    apply(_normalize_request_builder_helpers, request_builder_helpers)
+    apply(_inject_source_new)
+    apply(_normalize_mutated_aidoku_models)
+    apply(_normalize_default_model_assignments)
+    apply(_normalize_page_index_fields)
+    apply(_normalize_legacy_filter_fields)
+    apply(_normalize_select_filter_constructors)
+    apply(_normalize_legacy_page_context)
+    apply(_normalize_page_url_context)
+    apply(_normalize_deep_link_defaults)
+    apply(_normalize_parse_date_option_patterns)
+    apply(_normalize_optional_chapter_dates)
+    apply(_normalize_chapter_group_scope)
+    before = content
+    if allow_dead_code and not re.search(r"#!\[allow\([^\]]*\bdead_code\b", content):
         content = "#![allow(dead_code)]\n" + content.lstrip()
+    record("allow_dead_code", before)
+    before = content
     content = content.replace("aidoku::std::filters::SelectFilter", "aidoku::SelectFilter")
     content = content.replace("aidoku::filters::SelectFilter", "aidoku::SelectFilter")
     content = content.replace("aidoku::filter::SelectFilter", "aidoku::SelectFilter")
-    content = _normalize_select_filter_import(content)
-    content = _remove_macro_only_trait_imports(content)
+    record("select_filter_paths", before)
+    apply(_normalize_select_filter_import)
+    apply(_remove_macro_only_trait_imports)
+    before = content
     if re.search(r"let\s+host\s*=\s*absolute\b", content):
         content = content.replace("Request::get(absolute)?", "Request::get(absolute.clone())?")
+    record("clone_absolute_request_url", before)
+    before = content
     content = re.sub(
         r'"(?:\\.|[^"\\])*"',
         lambda match: match.group(0).replace("}//chapters", "}/chapters"),
         content,
     )
-    content = _normalize_idempotent_get_retry(content)
-    content = _normalize_pinned_model_shapes(content)
-    content = _normalize_optional_model_shorthand(content)
-    content = _normalize_pinned_model_fields(content)
-    content = _normalize_nested_optional_model_fields(content)
-    content = _normalize_base_url_provider(content)
-    content = _normalize_comic_path_helper(content)
-    content = _normalize_struct_expression_defaults(content)
-    content = _normalize_pagination_result_impls(content)
-    content = _normalize_partial_move_pagination(content)
-    content = _normalize_partial_move_loop_pagination(content)
-    content = _normalize_collection_len_after_move(content)
-    content = _normalize_moved_key_then_borrowed_url(content)
-    content = _normalize_select_filter_structs(content)
-    content = _normalize_resolution_regex(content)
-    content = _normalize_discarded_enumerate_index(content)
-    content = _normalize_filter_match_predicate(content)
-    content = _normalize_prequeried_url_helpers(content, prequeried_url_helpers)
-    content = _normalize_public_absolute_url(content, public_base_url)
-    content = _normalize_chapter_key_templates(content, chapter_key_templates)
-    content = _normalize_identical_if_branches(content)
-    content = _normalize_preserved_cover_urls(content, preserve_cover_urls)
+    record("chapter_route_double_slash", before)
+    apply(_normalize_idempotent_get_retry)
+    apply(_normalize_pinned_model_shapes)
+    apply(_normalize_optional_model_shorthand)
+    apply(_normalize_pinned_model_fields)
+    apply(_normalize_nested_optional_model_fields)
+    apply(_normalize_base_url_provider)
+    apply(_normalize_comic_path_helper)
+    apply(_normalize_struct_expression_defaults)
+    apply(_normalize_pagination_result_impls)
+    apply(_normalize_partial_move_pagination)
+    apply(_normalize_partial_move_loop_pagination)
+    apply(_normalize_collection_len_after_move)
+    apply(_normalize_moved_key_then_borrowed_url)
+    apply(_normalize_select_filter_structs)
+    apply(_normalize_resolution_regex)
+    apply(_normalize_discarded_enumerate_index)
+    apply(_normalize_filter_match_predicate)
+    apply(_normalize_prequeried_url_helpers, prequeried_url_helpers)
+    apply(_normalize_public_absolute_url, public_base_url)
+    apply(_normalize_chapter_key_templates, chapter_key_templates)
+    apply(_normalize_identical_if_branches)
+    apply(_normalize_preserved_cover_urls, preserve_cover_urls)
+    before = content
     content = re.sub(
         r"\blet\s+domain\s*=\s*defaults_get\(",
         "let domain: String = defaults_get(",
@@ -3706,12 +3727,16 @@ def normalize_pinned_aidoku_rust(
         "let domain: String = defaults_get(",
         "let domain: String = defaults_get::<String>(",
     )
+    record("typed_domain_default", before)
+    before = content
     content = re.sub(
         r"(?P<prefix>\b(?:id|title):\s*(?:Some\()?)"
         r'(?P<literal>"(?:\\.|[^"\\])*")\.to_string\(\)',
         r"\g<prefix>\g<literal>.into()",
         content,
     )
+    record("aidoku_model_string_into", before)
+    before = content
     content = content.replace(
         '.header("User-Agent", get_user_agent())',
         '.header("User-Agent", &get_user_agent())',
@@ -3723,21 +3748,25 @@ def normalize_pinned_aidoku_rust(
         r"\g<prefix>&\g<value>\g<suffix>",
         content,
     )
-    content = _normalize_dynamic_api_base(content, setting_defaults)
-    content = _normalize_generated_setting_key_aliases(content, setting_defaults, setting_keys)
-    content = _normalize_generated_setting_defaults(content, setting_defaults)
-    content = _normalize_resolution_setting(content, setting_defaults, setting_values)
-    content = _normalize_platform_header_setting(content, setting_defaults, setting_values)
-    content = _inject_no_std_macro_imports(content)
-    content = _inject_required_aidoku_imports(content)
-    content = _remove_macro_only_trait_imports(content)
-    content = _remove_duplicate_imports(content)
-    content = _remove_unused_known_imports(content)
+    record("borrow_header_values", before)
+    apply(_normalize_dynamic_api_base, setting_defaults)
+    apply(_normalize_generated_setting_key_aliases, setting_defaults, setting_keys)
+    apply(_normalize_generated_setting_defaults, setting_defaults)
+    apply(_normalize_resolution_setting, setting_defaults, setting_values)
+    apply(_normalize_platform_header_setting, setting_defaults, setting_values)
+    apply(_inject_no_std_macro_imports)
+    apply(_inject_required_aidoku_imports)
+    apply(_remove_macro_only_trait_imports)
+    apply(_remove_duplicate_imports)
+    apply(_remove_unused_known_imports)
+    before = content
     content = re.sub(
         r"(\bparse_(?:local_)?date\s*\([^;]{0,800}?\))\s*\.ok\(\)",
         r"\1",
         content,
     )
+    record("parse_date_result", before)
+    before = content
     content = re.sub(
         r"\b(?P<items>[A-Za-z_]\w*)\.sort_by\(\|(?P<left>[A-Za-z_]\w*),\s*"
         r"(?P<right>[A-Za-z_]\w*)\|\s*(?P=right)\.(?P<field>[A-Za-z_]\w*)"
@@ -3748,6 +3777,7 @@ def normalize_pinned_aidoku_rust(
         ),
         content,
     )
+    record("descending_sort_key", before)
     return content
 
 
@@ -5157,6 +5187,8 @@ def _project_recovered_check_filter_mappings(
 def normalize_generation_manifest(
     ir: SourceIR,
     manifest: GenerationManifest,
+    *,
+    trace: NormalizationTrace | None = None,
 ) -> GenerationManifest:
     """Project deterministic Rust compatibility and recovered behavior into a manifest."""
     resources = GeneratedResources(manifest)
@@ -5196,6 +5228,7 @@ def normalize_generation_manifest(
                     route.chapter_key_template for route in ir.chapter_page_routes
                 ),
                 request_builder_helpers=request_builder_helpers,
+                trace=trace,
             )
         changed |= content != generated.content
         files.append(generated.model_copy(update={"content": content}))

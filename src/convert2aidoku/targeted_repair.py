@@ -20,6 +20,7 @@ from .models import (
     SourceIR,
     ValidationResult,
 )
+from .normalization_trace import NormalizationTrace
 from .rust_inspection import RustInspection
 from .scaffold import (
     normalize_pinned_aidoku_rust,
@@ -111,6 +112,8 @@ def apply_repair_patch(
     current_files: list[dict[str, str]],
     patch: RepairPatch,
     allowed_excerpts: list[dict[str, object]],
+    *,
+    trace: NormalizationTrace | None = None,
 ) -> GenerationManifest:
     contents = {item["path"]: item["content"] for item in current_files}
     excerpt_contents: dict[str, list[str]] = {}
@@ -142,6 +145,7 @@ def apply_repair_patch(
             content = normalize_pinned_aidoku_rust(
                 content,
                 allow_dead_code=path != "src/lib.rs",
+                trace=trace,
             )
         try:
             validate_generated_content(path, content)
@@ -296,13 +300,18 @@ class TargetedRepair:
                 diagnostics=patch_request.diagnostics,
                 scope=patch_request.scope,
             )
+            trace = NormalizationTrace()
             patched_manifest = apply_repair_patch(
                 self.manifest,
                 current_files,
                 patch_result.value,
                 patch_request.excerpts,
+                trace=trace,
             )
-            return patch_result.with_value(patched_manifest)
+            return patch_result.with_value(
+                patched_manifest,
+                normalization_rewrites=trace.counts,
+            )
 
         diagnostics = repair_diagnostics(
             self.validation,

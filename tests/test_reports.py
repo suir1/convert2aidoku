@@ -110,3 +110,35 @@ def test_report_lists_template_matches(tmp_path: Path) -> None:
     markdown = (tmp_path / "report.md").read_text(encoding="utf-8")
     assert "## Templates" in markdown
     assert "html-http-source" in markdown
+
+
+def test_report_aggregates_deterministic_rewrites_across_ai_rounds(tmp_path: Path) -> None:
+    report = ConversionReport(
+        status=ConversionStatus.BUILD_ONLY,
+        input_ref="source",
+        source_id="en.example",
+        ai_rounds=[
+            {
+                "round": 1,
+                "purpose": "generate",
+                "structured_output": True,
+                "normalization_rewrites": {"safe_std_paths": 2, "allow_dead_code": 1},
+                "projection_rewrites": {"setting_defaults": 2},
+            },
+            {
+                "round": 2,
+                "purpose": "repair",
+                "structured_output": True,
+                "normalization_rewrites": {"safe_std_paths": 1},
+            },
+        ],
+        validation=ValidationResult(),
+    )
+
+    write_report(tmp_path, report)
+
+    markdown = (tmp_path / "report.md").read_text(encoding="utf-8")
+    assert "Normalizer rewrite hits: 6" in markdown
+    assert "`safe_std_paths`: 3 generated file(s) changed" in markdown
+    assert "`setting_defaults`: 2 generated file(s) changed" in markdown
+    assert "`allow_dead_code`: 1 generated file(s) changed" in markdown

@@ -870,6 +870,8 @@ class AIRound(BaseModel):
     reasoning_effort: Literal["auto", "off", "low", "medium", "high"] | None = None
     usage: AIUsage | None = None
     warnings: list[str] = Field(default_factory=list)
+    normalization_rewrites: dict[str, int] = Field(default_factory=dict)
+    projection_rewrites: dict[str, int] = Field(default_factory=dict)
 
 
 class AIFailedExchange(BaseModel):

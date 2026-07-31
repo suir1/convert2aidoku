@@ -19,6 +19,7 @@ from convert2aidoku.models import (
     SourceFilterOption,
     SourceFilterSpec,
 )
+from convert2aidoku.normalization_trace import NormalizationTrace
 from convert2aidoku.scaffold import (
     apply_generation_manifest,
     normalize_generation_manifest,
@@ -173,13 +174,15 @@ def test_normalizer_rewrites_boolean_let_some_alternatives() -> None:
         "}\n"
     )
 
-    normalized = normalize_pinned_aidoku_rust(content)
+    trace = NormalizationTrace()
+    normalized = normalize_pinned_aidoku_rust(content, trace=trace)
 
     assert "(let Some" not in normalized
     assert (
         'if let Some((_, path)) = key.split_once("/comic/").or_else(|| '
         'key.split_once("/comic2/")) {' in normalized
     )
+    assert trace.counts["normalize_boolean_let_some_alternatives"] == 1
 
 
 def test_normalizer_repairs_pinned_required_models_and_image_context() -> None:

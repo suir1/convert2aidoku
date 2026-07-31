@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 
 from .models import ConversionReport, ConversionStatus, StageKind, ValidationResult
@@ -48,6 +49,10 @@ def write_report(project: Path, report: ConversionReport) -> None:
         report.model_dump_json(indent=2, exclude_none=True) + "\n",
         encoding="utf-8",
     )
+    normalization_rewrites: Counter[str] = Counter()
+    for round_result in report.ai_rounds:
+        normalization_rewrites.update(round_result.normalization_rewrites)
+        normalization_rewrites.update(round_result.projection_rewrites)
     lines = [
         f"# Conversion report: {report.source_id}",
         "",
@@ -55,6 +60,7 @@ def write_report(project: Path, report: ConversionReport) -> None:
         f"- Input: `{report.input_ref}`",
         f"- Model: `{report.model or 'not used'}`",
         f"- AI rounds: {len(report.ai_rounds)}",
+        f"- Normalizer rewrite hits: {sum(normalization_rewrites.values())}",
         f"- Failed AI exchanges: {len(report.failed_ai_exchanges)}",
         "",
     ]
@@ -77,7 +83,16 @@ def write_report(project: Path, report: ConversionReport) -> None:
                 "",
             ]
         )
-    lines.extend(["## Validation", ""])
+    if normalization_rewrites:
+        lines.extend(["", "## Normalizer rewrites", ""])
+        lines.extend(
+            f"- `{rule_id}`: {count} generated file(s) changed"
+            for rule_id, count in sorted(
+                normalization_rewrites.items(),
+                key=lambda item: (-item[1], item[0]),
+            )
+        )
+    lines.extend(["", "## Validation", ""])
     for stage in report.validation.stages:
         marker = "PASS" if stage.ok else "SKIP" if stage.skipped else "FAIL"
         lines.append(f"- `{marker}` {stage.name} ({stage.duration_seconds:.2f}s)")
