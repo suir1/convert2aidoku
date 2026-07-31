@@ -146,7 +146,6 @@ function renderAnalysis(payload) {
   assessmentSummary.className = `assessment-summary ${assessment.status}`;
   byId("assessment-label").textContent = assessmentLabels[assessment.status] || assessment.status;
   byId("assessment-score").textContent = `${assessment.score}/100`;
-  byId("assessment-bar").style.width = `${assessment.score}%`;
   const budget = assessment.token_budget;
   const tokenRange = (minimum, maximum) =>
     `${Number(minimum).toLocaleString()}–${Number(maximum).toLocaleString()}`;

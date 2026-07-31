@@ -42,8 +42,8 @@ def test_local_dashboard_is_self_contained_and_hardened(web_client) -> None:
     response = client.get("/")
 
     assert response.status_code == 200
-    assert "本地转换工作台" in response.text
-    assert 'Tachi <span aria-hidden="true">→</span> Aidoku' in response.text
+    assert "Convert to Aidoku" in response.text
+    assert "转换设置" in response.text
     assert "把源代码变成" not in response.text
     assert "/static/app.css" in response.text
     assert "/static/app.js" in response.text

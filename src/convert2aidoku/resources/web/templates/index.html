@@ -14,7 +14,7 @@
   <header class="topbar">
     <a class="brand" href="/" aria-label="C2A 首页">
       <span class="brand-mark">C2A</span>
-      <span class="brand-copy"><strong>C2A</strong><small>Convert to Aidoku</small></span>
+      <span class="brand-copy"><strong>Convert to Aidoku</strong></span>
     </a>
     <div class="local-badge"><span></span>本机运行</div>
   </header>
@@ -22,24 +22,16 @@
   <main>
     <section class="intro">
       <div class="intro-copy">
-        <p class="eyebrow">本地转换工作台</p>
-        <h1>Tachi <span aria-hidden="true">→</span> Aidoku</h1>
+        <h1>新建转换</h1>
         <p>选择一个 APK、模块目录或 GitHub 地址。C2A 会在本机完成分析、Rust 生成、WASM 编译和实站验证。</p>
-      </div>
-      <div class="workflow-steps" aria-label="转换过程">
-        <span><b>1</b>分析</span>
-        <i aria-hidden="true"></i>
-        <span><b>2</b>生成</span>
-        <i aria-hidden="true"></i>
-        <span><b>3</b>验证</span>
       </div>
     </section>
 
     <section class="readiness panel" aria-labelledby="readiness-title">
       <div class="section-heading compact">
         <div>
-          <h2 id="readiness-title">环境状态</h2>
-          <p class="section-description">转换所需的本机工具</p>
+          <h2 id="readiness-title">运行环境</h2>
+          <p class="section-description">本机编译与验证工具</p>
         </div>
         <button class="button ghost small" id="refresh-doctor" type="button">重新检查</button>
       </div>
@@ -57,10 +49,9 @@
       <section class="panel source-panel" aria-labelledby="source-title">
         <div class="section-heading">
           <div>
-            <h2 id="source-title">新建转换</h2>
-            <p class="section-description">配置 AI 服务并选择输入源</p>
+            <h2 id="source-title">转换设置</h2>
+            <p class="section-description">连接 AI 服务并选择 Tachi 输入源</p>
           </div>
-          <span class="step-pill">配置</span>
         </div>
 
         <form id="conversion-form">
@@ -107,7 +98,6 @@
                 <span><i aria-hidden="true"></i><strong id="assessment-label">正在评估</strong></span>
                 <b id="assessment-score">–</b>
               </div>
-              <div class="assessment-track"><span id="assessment-bar"></span></div>
               <div class="token-budget" id="token-budget">
                 <div><span>首轮 Prompt</span><strong id="initial-token-budget">–</strong></div>
                 <div><span>建议总预算</span><strong id="total-token-budget">–</strong></div>
@@ -171,7 +161,7 @@
         <div class="empty-state" id="empty-state">
           <div class="empty-symbol" aria-hidden="true"><span></span></div>
           <h3>尚无转换任务</h3>
-          <p>先在左侧分析输入源。开始转换后，这里会显示 AI、编译和实站验证进度。</p>
+          <p>分析输入源并开始转换后，这里会显示生成和验证记录。</p>
         </div>
 
         <div class="job-view hidden" id="job-view">
@@ -195,6 +185,6 @@
   </main>
 
   <div class="toast hidden" id="toast" role="status" aria-live="polite"></div>
-  <footer><span>C2A · 本地转换工作台</span><span>工作目录：{{ working_directory }}</span></footer>
+  <footer><span>C2A</span><span>工作目录：{{ working_directory }}</span></footer>
 </body>
 </html>
