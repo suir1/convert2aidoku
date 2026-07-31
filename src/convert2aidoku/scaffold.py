@@ -4354,7 +4354,12 @@ def _project_shared_request_headers(
                 projected_request = request + "".join(
                     f".header({json.dumps(name)}, {json.dumps(value)})" for name, value in missing
                 )
-                projected_function = function.text.replace(request, projected_request, 1)
+                encoded = function.text.encode("utf-8")
+                projected_function = (
+                    encoded[: receiver.start_byte]
+                    + projected_request.encode("utf-8")
+                    + encoded[receiver.end_byte :]
+                ).decode("utf-8")
                 break
             if projected_function is not None:
                 replacements.append((function.text, projected_function))
@@ -4369,13 +4374,24 @@ def _project_shared_request_headers(
                     or len(arguments.named_children) != 1
                 ):
                     continue
-                argument = arguments.named_children[0].text.decode("utf-8", errors="replace")
+                argument_node = arguments.named_children[0]
+                argument = argument_node.text.decode("utf-8", errors="replace")
                 if "Request::get" not in argument and not re.fullmatch(r"[A-Za-z_]\w*", argument):
                     continue
                 projected = argument + "".join(
                     f".header({json.dumps(name)}, {json.dumps(value)})" for name, value in missing
                 )
-                replacements.append((function.text, function.text.replace(argument, projected, 1)))
+                encoded = function.text.encode("utf-8")
+                replacements.append(
+                    (
+                        function.text,
+                        (
+                            encoded[: argument_node.start_byte]
+                            + projected.encode("utf-8")
+                            + encoded[argument_node.end_byte :]
+                        ).decode("utf-8"),
+                    )
+                )
                 break
         for original, normalized in replacements:
             content = content.replace(original, normalized, 1)

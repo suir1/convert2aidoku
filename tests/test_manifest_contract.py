@@ -568,6 +568,8 @@ def test_decompiled_enum_setting_names_are_projected_to_storage_values() -> None
                     COPY2("api2.example", "api2.example", "Secondary"),
                     CUSTOM("custom", "custom", "Custom");
                     public static final String KEY = "v2.pref.api_domain";
+                    private static final String DEFAULT;
+                    static { DEFAULT = COPY2.entryKey; }
                 }
                 """,
             )
@@ -592,7 +594,47 @@ def test_decompiled_enum_setting_names_are_projected_to_storage_values() -> None
     settings_file = next(file for file in normalized.files if file.path == "res/settings.json")
     setting = json.loads(settings_file.content)[0]["items"][0]
     assert setting["values"] == ["api.example", "api2.example", "custom"]
-    assert setting["default"] == "api.example"
+    assert setting["default"] == "api2.example"
+
+
+def test_decompiled_enum_default_overrides_ai_storage_value_guess() -> None:
+    ir = minimal_source_ir(
+        source_format="decompiled_apk",
+        files=[
+            SourceFile(
+                path="sources/example/ApiDomainOption.java",
+                sha256="0",
+                content="""
+                public enum ApiDomainOption {
+                    FIRST("api.example", "api.example", "Primary"),
+                    SECOND("api2.example", "api2.example", "Secondary");
+                    public static final String KEY = "v2.pref.api_domain";
+                    private static final String DEFAULT;
+                    static { DEFAULT = SECOND.entryKey; }
+                }
+                """,
+            )
+        ],
+    )
+    manifest = _manifest("struct Source;")
+    manifest.files.append(
+        GeneratedFile(
+            path="res/settings.json",
+            content="""[
+                {"type":"group","items":[
+                    {"type":"select","key":"v2.pref.api_domain","title":"Domain",
+                     "values":["api.example","api2.example"],
+                     "titles":["Primary","Secondary"],"default":"api.example"}
+                ]}
+            ]""",
+        )
+    )
+
+    normalized = normalize_decompiled_setting_manifest(ir, manifest)
+
+    settings_file = next(file for file in normalized.files if file.path == "res/settings.json")
+    setting = json.loads(settings_file.content)[0]["items"][0]
+    assert setting["default"] == "api2.example"
 
 
 def test_public_only_decompiled_settings_exclude_non_reading_preferences() -> None:

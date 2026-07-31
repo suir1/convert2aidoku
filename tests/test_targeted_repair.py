@@ -4,12 +4,12 @@ import pytest
 
 from convert2aidoku.checkpoint_store import CheckpointStore
 from convert2aidoku.errors import AIProviderError
-from convert2aidoku.live_validation_evidence import LiveValidationEvidence
 from convert2aidoku.manifest_contract import ContractDiagnostic, ContractEvaluation
 from convert2aidoku.models import (
     ConversionCheckpoint,
     DependencyRequest,
     RepairPatch,
+    StageKind,
     ValidationResult,
     ValidationStage,
 )
@@ -71,20 +71,22 @@ def test_compile_and_contract_repairs_are_capped_at_two_rounds() -> None:
     )
 
 
-def test_repair_diagnostics_include_live_validation_evidence(monkeypatch) -> None:
-    ir = minimal_source_ir()
-    monkeypatch.setattr(
-        "convert2aidoku.targeted_repair.live_validation_evidence",
-        lambda _ir: LiveValidationEvidence(repair_context="benchmark context"),
-    )
-
+def test_repair_diagnostics_use_only_current_validation_and_contract_evidence() -> None:
     diagnostics = repair_diagnostics(
-        ir,
-        ValidationResult(blocked=True),
+        ValidationResult(
+            stages=[
+                ValidationStage(
+                    name="live-smoke",
+                    kind=StageKind.LIVE_TEST,
+                    ok=False,
+                    output="current live failure",
+                )
+            ]
+        ),
         ["relative URL gap"],
     )
 
-    assert "benchmark context" in diagnostics
+    assert "current live failure" in diagnostics
     assert "relative URL gap" in diagnostics
 
 

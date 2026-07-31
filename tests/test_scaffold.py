@@ -2360,7 +2360,8 @@ def test_manifest_projects_shared_headers_into_existing_request_builder() -> Non
                 path="src/source.rs",
                 content=(
                     "fn request(url: String) -> Result<Request> {\n"
-                    '    Ok(Request::get(url)?.header("Accept-Language", "zh"))\n'
+                    '    let request = Request::get(url)?.header("Accept-Language", "zh");\n'
+                    "    Ok(request)\n"
                     "}\n"
                     "fn fetch(url: String) -> Result<Response> {\n"
                     "    Request::get(url)?.send()\n"
@@ -2375,6 +2376,7 @@ def test_manifest_projects_shared_headers_into_existing_request_builder() -> Non
 
     assert source.count('.header("Accept-Language", "zh")') == 2
     assert source.count('.header("User-Agent", "Mozilla/5.0 Test Browser")') == 2
+    assert "fn request.header" not in source
     assert normalize_generation_manifest(ir, normalized) == normalized
 
 

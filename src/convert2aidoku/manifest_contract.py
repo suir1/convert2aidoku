@@ -469,6 +469,7 @@ def normalize_decompiled_setting_manifest(
     if ir.source_format != "decompiled_apk":
         return manifest
     enum_values: dict[str, dict[str, str]] = {}
+    enum_defaults: dict[str, str] = {}
     for source in ir.files:
         key_match = re.search(
             r'public\s+static\s+final\s+String\s+KEY\s*=\s*"([^"]+)"', source.content
@@ -489,7 +490,16 @@ def normalize_decompiled_setting_manifest(
             )
         }
         if values:
-            enum_values[key_match.group(1)] = values
+            key = key_match.group(1)
+            enum_values[key] = values
+            default_match = re.search(
+                r"\bDEFAULT\s*=\s*(?P<name>[A-Z][A-Z0-9_]*)\.(?:entryKey|entry)\s*;",
+                source.content,
+            )
+            if default_match is not None:
+                default = values.get(default_match.group("name"))
+                if default is not None:
+                    enum_defaults[key] = default
     files = []
     changed = False
     for generated in manifest.files:
@@ -514,6 +524,14 @@ def normalize_decompiled_setting_manifest(
                         default = item.get("default")
                         if isinstance(default, str) and default in mapping:
                             item["default"] = mapping[default]
+                    recovered_default = enum_defaults.get(item.get("key"))
+                    effective_values = item.get("values")
+                    if (
+                        recovered_default is not None
+                        and isinstance(effective_values, list)
+                        and recovered_default in effective_values
+                    ):
+                        item["default"] = recovered_default
             if ir.feature_scope == "public_only":
                 data = _without_public_only_settings(data)
             content = json.dumps(data, ensure_ascii=False, indent="\t") + "\n"

@@ -688,10 +688,8 @@ class GeneratedResources:
         self,
         *,
         filter_specs: list[SourceFilterSpec] | None = None,
-        setting_overrides: dict[str, str] | None = None,
     ) -> GenerationManifest:
         specs = {spec.id: spec for spec in filter_specs or []}
-        overrides = setting_overrides or {}
         updated_files: list[GeneratedFile] = []
         changed = False
         for generated in self._manifest.files:
@@ -716,21 +714,6 @@ class GeneratedResources:
                         }
                         item.setdefault("canAscend", True)
                     item["default"] = value
-            elif generated.path == self.SETTINGS and data is not None and overrides:
-                for group in data:
-                    if not isinstance(group, dict) or not isinstance(group.get("items"), list):
-                        continue
-                    for item in group["items"]:
-                        if not isinstance(item, dict):
-                            continue
-                        preferred = overrides.get(item.get("key"))
-                        values = item.get("values")
-                        if (
-                            preferred is not None
-                            and isinstance(values, list)
-                            and preferred in values
-                        ):
-                            item["default"] = preferred
             if data is None:
                 updated_files.append(generated)
                 continue

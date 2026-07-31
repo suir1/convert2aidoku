@@ -11,7 +11,6 @@ from .ai import AIResult, OpenAICompatibleClient
 from .checkpoint_store import CheckpointStore
 from .constants import MAX_AI_DIAGNOSTIC_CHARS
 from .errors import AIProviderError, SecurityError
-from .live_validation_evidence import live_validation_evidence
 from .manifest_contract import ContractEvaluation
 from .models import (
     ConversionCheckpoint,
@@ -223,14 +222,10 @@ def repair_state_signature(
 
 
 def repair_diagnostics(
-    ir: SourceIR,
     validation: ValidationResult,
     capability_gaps: list[str],
 ) -> str:
     parts = [validation.diagnostics]
-    evidence = live_validation_evidence(ir)
-    if evidence.repair_context:
-        parts.append(evidence.repair_context)
     if capability_gaps:
         parts.append("Generated capability/contract gaps:\n- " + "\n- ".join(capability_gaps))
     return "\n\n".join(part for part in parts if part)
@@ -310,7 +305,6 @@ class TargetedRepair:
             return patch_result.with_value(patched_manifest)
 
         diagnostics = repair_diagnostics(
-            self.ir,
             self.validation,
             self.contract.messages,
         )[-MAX_AI_DIAGNOSTIC_CHARS:]
