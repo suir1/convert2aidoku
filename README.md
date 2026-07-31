@@ -19,8 +19,12 @@ layers: system Git/JADX/Java prerequisites, `uv`, a managed Python 3.13, C2A, Ru
 `aidoku-rs` revision. Linux JADX 1.5.3 is checksum-pinned; macOS uses Homebrew. System package
 installation may request the user's sudo password.
 
+The current public preview is pinned so the installer and package always come from the same
+release:
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/suir1/convert2aidoku/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/suir1/convert2aidoku/v0.1.0-beta.1/install.sh | \
+  C2A_INSTALL_REF=v0.1.0-beta.1 sh
 ```
 
 Open a new terminal after installation, then confirm the environment:
@@ -96,7 +100,7 @@ argument.
 [ai]
 base_url = "http://localhost:50048/v1"
 model = "your-model-id"
-max_repair_rounds = 1
+max_repair_rounds = 2
 timeout_seconds = 300
 generation_reasoning_effort = "auto"
 repair_reasoning_effort = "low"
@@ -123,8 +127,8 @@ boilerplate; Kotlin modules still send their complete selected source files. The
 returns Rust files only. Static filters are generated deterministically from `SourceIR`, while
 settings use a separate bounded evidence prompt whose response contains real JSON objects rather
 than JSON text nested inside a manifest string. Rust format, compiler, and Clippy repairs first use
-bounded source excerpts and exact `old_text` → `new_text` replacements. Each replacement must come from a
-supplied excerpt, match once, stay inside the generated-file allowlist, and pass the same Rust
+bounded source excerpts and exact `old_text` → `new_text` replacements. Each replacement must come
+from a supplied excerpt, match once, stay inside the generated-file allowlist, and pass the same Rust
 safety checks. A rejected compact patch does not escalate into a second full-source request in the
 same run; the checkpoint is retained for explicit resume. Live-behavior failures retain the full
 repair context. This keeps repair prompts small without weakening path, dependency, or

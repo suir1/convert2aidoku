@@ -8,7 +8,12 @@ ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "install.sh"
 
 
-def _dry_run(os_name: str, *, package_manager: str | None = None) -> str:
+def _dry_run(
+    os_name: str,
+    *,
+    package_manager: str | None = None,
+    install_ref: str | None = None,
+) -> str:
     environment = {
         **os.environ,
         "C2A_INSTALL_DRY_RUN": "1",
@@ -19,6 +24,8 @@ def _dry_run(os_name: str, *, package_manager: str | None = None) -> str:
     }
     if package_manager is not None:
         environment["C2A_INSTALL_PACKAGE_MANAGER"] = package_manager
+    if install_ref is not None:
+        environment["C2A_INSTALL_REF"] = install_ref
     result = subprocess.run(
         ["sh", str(INSTALLER)],
         check=True,
@@ -41,7 +48,7 @@ def test_macos_dry_run_bootstraps_every_layer() -> None:
     assert "brew install jadx" in output
     assert "uv/install.sh" in output
     assert "tool install --python 3.13 --force" in output
-    assert "convert2aidoku/archive/refs/heads/main.zip" in output
+    assert "convert2aidoku/archive/main.zip" in output
     assert "c2a setup --yes" in output
     assert "c2a doctor" in output
 
@@ -68,3 +75,9 @@ def test_installer_rejects_unsupported_operating_system() -> None:
 
     assert result.returncode == 1
     assert "Unsupported operating system" in result.stderr
+
+
+def test_installer_can_pin_a_release_tag() -> None:
+    output = _dry_run("Darwin", install_ref="v0.1.0-beta.1")
+
+    assert "convert2aidoku/archive/v0.1.0-beta.1.zip" in output

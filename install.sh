@@ -4,7 +4,7 @@ set -eu
 
 REPOSITORY_URL="${C2A_INSTALL_REPOSITORY_URL:-https://github.com/suir1/convert2aidoku.git}"
 INSTALL_REF="${C2A_INSTALL_REF:-main}"
-ARCHIVE_URL="${C2A_INSTALL_ARCHIVE_URL:-https://github.com/suir1/convert2aidoku/archive/refs/heads/${INSTALL_REF}.zip}"
+ARCHIVE_URL="${C2A_INSTALL_ARCHIVE_URL:-https://github.com/suir1/convert2aidoku/archive/${INSTALL_REF}.zip}"
 PYTHON_VERSION="${C2A_INSTALL_PYTHON_VERSION:-3.13}"
 JADX_VERSION="${C2A_INSTALL_JADX_VERSION:-1.5.3}"
 JADX_SHA256="${C2A_INSTALL_JADX_SHA256:-8280f3799c0273fe797a2bcd90258c943e451fd195f13d05400de5e6451d15ec}"
