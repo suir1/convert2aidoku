@@ -124,12 +124,14 @@ def test_report_aggregates_deterministic_rewrites_across_ai_rounds(tmp_path: Pat
                 "structured_output": True,
                 "normalization_rewrites": {"safe_std_paths": 2, "allow_dead_code": 1},
                 "projection_rewrites": {"setting_defaults": 2},
+                "contract_rule_ids": ["missing_retry", "missing_settings"],
             },
             {
                 "round": 2,
                 "purpose": "repair",
                 "structured_output": True,
                 "normalization_rewrites": {"safe_std_paths": 1},
+                "contract_rule_ids": ["missing_retry"],
             },
         ],
         validation=ValidationResult(),
@@ -139,6 +141,9 @@ def test_report_aggregates_deterministic_rewrites_across_ai_rounds(tmp_path: Pat
 
     markdown = (tmp_path / "report.md").read_text(encoding="utf-8")
     assert "Normalizer rewrite hits: 6" in markdown
+    assert "Contract rule triggers: 3" in markdown
     assert "`safe_std_paths`: 3 generated file(s) changed" in markdown
     assert "`setting_defaults`: 2 generated file(s) changed" in markdown
     assert "`allow_dead_code`: 1 generated file(s) changed" in markdown
+    assert "`missing_retry`: 2 round(s)" in markdown
+    assert "`missing_settings`: 1 round(s)" in markdown

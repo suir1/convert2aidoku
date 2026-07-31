@@ -50,9 +50,11 @@ def write_report(project: Path, report: ConversionReport) -> None:
         encoding="utf-8",
     )
     normalization_rewrites: Counter[str] = Counter()
+    contract_rules: Counter[str] = Counter()
     for round_result in report.ai_rounds:
         normalization_rewrites.update(round_result.normalization_rewrites)
         normalization_rewrites.update(round_result.projection_rewrites)
+        contract_rules.update(round_result.contract_rule_ids)
     lines = [
         f"# Conversion report: {report.source_id}",
         "",
@@ -61,6 +63,7 @@ def write_report(project: Path, report: ConversionReport) -> None:
         f"- Model: `{report.model or 'not used'}`",
         f"- AI rounds: {len(report.ai_rounds)}",
         f"- Normalizer rewrite hits: {sum(normalization_rewrites.values())}",
+        f"- Contract rule triggers: {sum(contract_rules.values())}",
         f"- Failed AI exchanges: {len(report.failed_ai_exchanges)}",
         "",
     ]
@@ -89,6 +92,15 @@ def write_report(project: Path, report: ConversionReport) -> None:
             f"- `{rule_id}`: {count} generated file(s) changed"
             for rule_id, count in sorted(
                 normalization_rewrites.items(),
+                key=lambda item: (-item[1], item[0]),
+            )
+        )
+    if contract_rules:
+        lines.extend(["", "## Contract rule triggers", ""])
+        lines.extend(
+            f"- `{rule_id}`: {count} round(s)"
+            for rule_id, count in sorted(
+                contract_rules.items(),
                 key=lambda item: (-item[1], item[0]),
             )
         )

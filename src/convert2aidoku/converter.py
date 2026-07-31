@@ -119,6 +119,8 @@ class _ConversionRoundRunner:
         )
         self.contract = evaluate_manifest_contract(self.ir, self.manifest)
         self.capability_gaps = self.contract.messages
+        if self.checkpoint.ai_rounds:
+            self.checkpoint.ai_rounds[-1].contract_rule_ids = self.contract.rule_ids
         self.validation = validate_project(self.project, live=self.live, proxy=self.proxy)
         self.validation.contract_ok = not self.capability_gaps
         self.checkpoint.generated_files = generated_files

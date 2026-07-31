@@ -872,6 +872,7 @@ class AIRound(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     normalization_rewrites: dict[str, int] = Field(default_factory=dict)
     projection_rewrites: dict[str, int] = Field(default_factory=dict)
+    contract_rule_ids: list[str] = Field(default_factory=list)
 
 
 class AIFailedExchange(BaseModel):

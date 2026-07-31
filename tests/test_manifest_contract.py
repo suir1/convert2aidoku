@@ -12,6 +12,8 @@ from convert2aidoku.manifest_contract import (
 )
 from convert2aidoku.models import (
     Capability,
+    ChapterPageRoute,
+    ChapterPageRouteVariant,
     DependencyRequest,
     GeneratedFile,
     GenerationManifest,
@@ -74,10 +76,23 @@ def test_targeted_diagnostics_keep_exact_user_messages_and_structured_kinds() ->
         _manifest('fn parse_chapters(data: &str) { Regex::new("chapters"); }'),
     )
 
-    assert decompiled.diagnostics == (ContractDiagnostic(DECOMPILED_RETRY_MESSAGE, "retry"),)
-    assert ContractDiagnostic(KOTLIN_RETRY_MESSAGE, "retry") in kotlin.diagnostics
-    assert ContractDiagnostic(CHAPTER_REGEX_MESSAGE, "chapter_regex") in chapter.diagnostics
+    assert decompiled.diagnostics == (
+        ContractDiagnostic(
+            DECOMPILED_RETRY_MESSAGE,
+            "retry",
+            "missing_decompiled_get_retry",
+        ),
+    )
+    assert (
+        ContractDiagnostic(KOTLIN_RETRY_MESSAGE, "retry", "missing_kotlin_get_retry")
+        in kotlin.diagnostics
+    )
+    assert (
+        ContractDiagnostic(CHAPTER_REGEX_MESSAGE, "chapter_regex", "chapter_regex_hot_path")
+        in chapter.diagnostics
+    )
     assert decompiled.messages == [DECOMPILED_RETRY_MESSAGE]
+    assert decompiled.rule_ids == ["missing_decompiled_get_retry"]
 
 
 def test_detail_request_dedup_ignores_relative_manga_key_prefixes() -> None:
@@ -126,6 +141,7 @@ def test_mixed_diagnostics_cannot_request_a_targeted_repair(tmp_path: Path) -> N
     )
 
     assert not evaluation.is_fully_targeted_repair
+    assert evaluation.rule_ids == []
     assert evaluation.repair(tmp_path) is None
 
 
@@ -173,7 +189,11 @@ def test_manual_accept_encoding_is_a_targeted_contract_gap(tmp_path: Path) -> No
     repair = evaluation.repair(tmp_path)
 
     assert evaluation.diagnostics == (
-        ContractDiagnostic(TRANSPORT_HEADER_MESSAGE, "transport_header"),
+        ContractDiagnostic(
+            TRANSPORT_HEADER_MESSAGE,
+            "transport_header",
+            "runtime_managed_headers",
+        ),
     )
     assert repair is not None
     assert [item["content"] for item in repair.excerpts] == [
@@ -245,6 +265,7 @@ def test_decompiled_dto_map_value_mismatch_is_a_targeted_contract_gap(
             "generated Rust field is BTreeMap<String, String>; preserve the recovered map "
             "key/value DTO types so detail JSON can deserialize",
             "dto_shape",
+            "decompiled_dto_shape",
         ),
     )
     assert repair is not None
@@ -360,6 +381,20 @@ def test_settings_contract_lists_keys_not_consumed_by_generated_rust() -> None:
     assert "POPULAR_MANGA_DISPLAY" not in gap
 
 
+def test_static_filter_and_setting_capabilities_require_resource_files() -> None:
+    filters = evaluate_manifest_contract(
+        minimal_source_ir(capabilities=[Capability.FILTERS]),
+        _manifest("fn source() {}"),
+    )
+    settings = evaluate_manifest_contract(
+        minimal_source_ir(capabilities=[Capability.SETTINGS]),
+        _manifest("fn source() {}"),
+    )
+
+    assert "missing_filters_resource" in filters.rule_ids
+    assert "missing_settings_resource" in settings.rule_ids
+
+
 def test_contextual_chapter_url_contract_requires_complete_resolution() -> None:
     ir = minimal_source_ir(capabilities=[Capability.CONTEXTUAL_CHAPTER_URLS])
     incomplete = _manifest(
@@ -391,6 +426,30 @@ def test_contextual_chapter_url_contract_requires_complete_resolution() -> None:
         "placeholder chapter URLs" in message
         for message in evaluate_manifest_contract(ir, complete).messages
     )
+
+
+def test_chapter_page_route_contract_requires_recovered_prefix_removal() -> None:
+    ir = minimal_source_ir(
+        chapter_page_routes=[
+            ChapterPageRoute(
+                source_method="chapterContentDetailUrl",
+                chapter_key_template="/comic/{comic_path}/chapter/{chapter_id}",
+                endpoint_template="/api/v3/comic/{normalized_chapter_key}",
+                variants=[
+                    ChapterPageRouteVariant(
+                        name="default",
+                        condition="default API domain",
+                        is_default=True,
+                        strip_prefix="/comic/",
+                    )
+                ],
+            )
+        ]
+    )
+
+    evaluation = evaluate_manifest_contract(ir, _manifest("fn page_list() {}"))
+
+    assert "chapter_route_strip_prefix" in evaluation.rule_ids
 
 
 def test_shared_request_headers_are_required_by_contract() -> None:

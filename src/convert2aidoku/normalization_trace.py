@@ -26,21 +26,21 @@ class NormalizationTrace:
         return normalized
 
     def observe(self, rule_id: str, before: str, after: str) -> None:
+        self.hit(rule_id, changed=after != before)
+
+    def hit(self, rule_id: str, *, changed: bool = True) -> None:
         if _RULE_ID.fullmatch(rule_id) is None:
             raise ValueError(f"invalid normalization rule id: {rule_id!r}")
         self._rule_ids.add(rule_id)
-        if after != before:
+        if changed:
             self._counts[rule_id] += 1
 
     def merge(self, counts: Mapping[str, int]) -> None:
         for rule_id, count in counts.items():
-            if _RULE_ID.fullmatch(rule_id) is None:
-                raise ValueError(f"invalid normalization rule id: {rule_id!r}")
             if count < 0:
                 raise ValueError("normalization rule counts cannot be negative")
-            self._rule_ids.add(rule_id)
-            if count:
-                self._counts[rule_id] += count
+            self.hit(rule_id, changed=False)
+            self._counts[rule_id] += count
 
     @property
     def counts(self) -> dict[str, int]:

@@ -27,11 +27,58 @@ RepairKind = Literal[
     "transport_header",
 ]
 
+CONTRACT_RULE_IDS = frozenset(
+    {
+        "chapter_regex_hot_path",
+        "chapter_route_replacement",
+        "chapter_route_strip_prefix",
+        "decompiled_dto_shape",
+        "dependency_policy",
+        "detail_api_envelope",
+        "dynamic_base_url_resolver",
+        "dynamic_base_url_settings",
+        "dynamic_filter_deserialization",
+        "dynamic_filter_full_listing",
+        "empty_filters_resource",
+        "empty_settings_resource",
+        "filter_resource_contract",
+        "graphql_listing_overfetch",
+        "graphql_update_overfetch",
+        "image_resolution_scope",
+        "incomplete_contextual_chapter_urls",
+        "missing_absolute_url",
+        "missing_chapter_date",
+        "missing_chapter_url",
+        "missing_cookie_support",
+        "missing_decompiled_get_retry",
+        "missing_deep_link_handler",
+        "missing_dynamic_filters_provider",
+        "missing_filters_resource",
+        "missing_image_request_provider",
+        "missing_kotlin_get_retry",
+        "missing_legacy_setting_value",
+        "missing_listing_provider",
+        "missing_live_timestamp",
+        "missing_page_url_context",
+        "missing_scanlators",
+        "missing_settings_resource",
+        "missing_shared_headers",
+        "rank_item_wrapper",
+        "relative_key_request",
+        "repeated_detail_route",
+        "runtime_managed_headers",
+        "transformed_cover_url",
+        "unmapped_dynamic_filter",
+        "unread_settings",
+    }
+)
+
 
 @dataclass(frozen=True)
 class ContractDiagnostic:
     message: str
     repair_kind: RepairKind | None = None
+    rule_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -47,6 +94,12 @@ class ContractEvaluation:
     @property
     def messages(self) -> list[str]:
         return [diagnostic.message for diagnostic in self.diagnostics]
+
+    @property
+    def rule_ids(self) -> list[str]:
+        return [
+            diagnostic.rule_id for diagnostic in self.diagnostics if diagnostic.rule_id is not None
+        ]
 
     @property
     def is_fully_targeted_repair(self) -> bool:
@@ -88,16 +141,25 @@ def evaluate_manifest_contract(
     input_content = "\n".join(item.content for item in ir.files)
     diagnostics: list[ContractDiagnostic] = []
 
-    def add(message: str, repair_kind: RepairKind | None = None) -> None:
-        diagnostics.append(ContractDiagnostic(message, repair_kind))
+    def add(
+        rule_id: str,
+        message: str,
+        repair_kind: RepairKind | None = None,
+    ) -> None:
+        if rule_id not in CONTRACT_RULE_IDS:
+            raise ValueError(f"unregistered manifest contract rule: {rule_id}")
+        diagnostics.append(ContractDiagnostic(message, repair_kind, rule_id))
 
     for message in _decompiled_dto_shape_gaps(ir, rust):
-        add(message, "dto_shape")
+        add("decompiled_dto_shape", message, "dto_shape")
 
     if (Capability.POPULAR in ir.capabilities or Capability.LATEST in ir.capabilities) and (
         "ListingProvider" not in traits
     ):
-        add("source declares popular/latest listings but generated no ListingProvider")
+        add(
+            "missing_listing_provider",
+            "source declares popular/latest listings but generated no ListingProvider",
+        )
     dynamic_filters_cover_all = (
         Capability.DYNAMIC_FILTERS in ir.capabilities
         and "DynamicFilters" in traits
@@ -105,16 +167,25 @@ def evaluate_manifest_contract(
     )
     if Capability.FILTERS in ir.capabilities and not dynamic_filters_cover_all:
         if not resources.has(GeneratedResources.FILTERS):
-            add("source declares filters but generated no res/filters.json")
+            add(
+                "missing_filters_resource",
+                "source declares filters but generated no res/filters.json",
+            )
         elif resources.is_empty(GeneratedResources.FILTERS):
-            add("source declares filters but generated an empty res/filters.json")
+            add(
+                "empty_filters_resource",
+                "source declares filters but generated an empty res/filters.json",
+            )
         for message in resources.filter_contract_gaps(
             ir.filter_specs,
             has_sort_mapping="FilterValue::Sort" in rust_content,
         ):
-            add(message)
+            add("filter_resource_contract", message)
     if Capability.DYNAMIC_FILTERS in ir.capabilities and "DynamicFilters" not in traits:
-        add("source fetches dynamic filters but generated no DynamicFilters provider")
+        add(
+            "missing_dynamic_filters_provider",
+            "source fetches dynamic filters but generated no DynamicFilters provider",
+        )
     dynamic_filter_deserialization = any(
         "serde_json::from_str" in function.text
         and (
@@ -133,17 +204,19 @@ def evaluate_manifest_contract(
     )
     if Capability.DYNAMIC_FILTERS in ir.capabilities and dynamic_filter_deserialization:
         add(
+            "dynamic_filter_deserialization",
             "get_dynamic_filters attempts to deserialize aidoku::Filter with serde_json; "
             "construct typed SelectFilter/Filter values directly because Filter is not "
-            "Deserialize"
+            "Deserialize",
         )
     if Capability.DYNAMIC_FILTERS in ir.capabilities and rust.function_contains(
         "get_dynamic_filters", "listing_query"
     ):
         add(
+            "dynamic_filter_full_listing",
             "get_dynamic_filters performs a full manga listing request; use a dedicated "
             "options-only request (for GraphQL, query only the recovered option field) "
-            "instead of downloading manga entries"
+            "instead of downloading manga entries",
         )
     if (
         Capability.JSON_API in ir.capabilities
@@ -151,32 +224,44 @@ def evaluate_manifest_contract(
         and rust.function_contains("listing_query", "allCategory")
     ):
         add(
+            "graphql_listing_overfetch",
             "GraphQL listing requests include detail-only fields and dynamic-filter metadata; "
             "keep the source page size but omit description from list projections and fetch "
-            "allCategory only in the dedicated dynamic-filter request"
+            "allCategory only in the dedicated dynamic-filter request",
         )
     if Capability.DYNAMIC_FILTERS in ir.capabilities:
         for filter_id in sorted(_dynamic_filter_ids_missing_from_query_mapping(rust)):
             add(
+                "unmapped_dynamic_filter",
                 f"dynamic filter {filter_id!r} is never read by get_search_manga_list; "
                 "read its FilterValue using the same id and send the selected site value "
-                "in the list/search request"
+                "in the list/search request",
             )
     if Capability.SETTINGS in ir.capabilities:
         if not resources.has(GeneratedResources.SETTINGS):
-            add("source declares settings but generated no res/settings.json")
+            add(
+                "missing_settings_resource",
+                "source declares settings but generated no res/settings.json",
+            )
         elif resources.is_empty(GeneratedResources.SETTINGS):
-            add("source declares settings but generated an empty res/settings.json")
+            add(
+                "empty_settings_resource",
+                "source declares settings but generated an empty res/settings.json",
+            )
         else:
             unread_settings = _settings_not_read(resources, rust_content)
             if unread_settings:
                 add(
+                    "unread_settings",
                     "generated Rust does not consume source settings with defaults_get: "
                     + ", ".join(unread_settings)
-                    + "; read every setting key and apply its recovered behavior"
+                    + "; read every setting key and apply its recovered behavior",
                 )
     if Capability.IMAGE_HEADERS in ir.capabilities and "ImageRequestProvider" not in traits:
-        add("source declares image headers but generated no ImageRequestProvider")
+        add(
+            "missing_image_request_provider",
+            "source declares image headers but generated no ImageRequestProvider",
+        )
     missing_shared_headers = (
         [
             name
@@ -187,7 +272,10 @@ def evaluate_manifest_contract(
         else []
     )
     if missing_shared_headers:
-        add("generated requests omit source-wide headers: " + ", ".join(missing_shared_headers))
+        add(
+            "missing_shared_headers",
+            "generated requests omit source-wide headers: " + ", ".join(missing_shared_headers),
+        )
     manual_runtime_headers = sorted(
         name
         for name in AIDOKU_RUNTIME_MANAGED_REQUEST_HEADERS
@@ -196,6 +284,7 @@ def evaluate_manifest_contract(
     if manual_runtime_headers:
         display = ", ".join(name.title() for name in manual_runtime_headers)
         add(
+            "runtime_managed_headers",
             f"generated requests set {display} manually; omit it because the Aidoku runtime "
             "owns response decompression and may otherwise expose compressed bytes to "
             "HTML/JSON parsers",
@@ -208,9 +297,10 @@ def evaluate_manifest_contract(
         and "PageContent::url_context" not in rust_content
     ):
         add(
+            "missing_page_url_context",
             "get_image_request reads a Referer from PageContext but generated pages never use "
             "PageContent::url_context; attach the exact chapter/page Referer to every page URL "
-            "and use the site base URL as the cover-image fallback"
+            "and use the site base URL as the cover-image fallback",
         )
     source_uses_cookie_jar = any(
         marker in input_content
@@ -226,14 +316,18 @@ def evaluate_manifest_contract(
         has_image_cookie_header = rust.function_has_header("get_image_request", "cookie")
         if not has_cookie_setting or not has_api_cookie_header or not has_image_cookie_header:
             add(
+                "missing_cookie_support",
                 "input public requests depend on a Cookie session, but the generated source "
                 "does not expose an optional cookie setting and apply its Cookie header to both "
-                "API and image requests"
+                "API and image requests",
             )
     if Capability.DEEP_LINKS in ir.capabilities and "DeepLinkHandler" not in traits:
-        add("source declares deep links but generated no DeepLinkHandler")
+        add(
+            "missing_deep_link_handler",
+            "source declares deep links but generated no DeepLinkHandler",
+        )
     for message in dependency_evaluation.diagnostics:
-        add(message)
+        add("dependency_policy", message)
     update_uses_combined_helper = (
         rust.function_contains("get_manga_update", "needs_details")
         and rust.function_contains("get_manga_update", "needs_chapters")
@@ -251,9 +345,10 @@ def evaluate_manifest_contract(
         and "chaptersByComicId" in rust_content
     ):
         add(
+            "graphql_update_overfetch",
             "get_manga_update unconditionally fetches a combined details-and-chapters GraphQL "
             "query; choose details-only, chapters-only, or combined queries so each call fetches "
-            "only the data requested by needs_details and needs_chapters"
+            "only the data requested by needs_details and needs_chapters",
         )
     if Capability.DETAILS in ir.capabilities and Capability.CHAPTERS in ir.capabilities:
         repeated_detail_routes: set[str] = set()
@@ -269,10 +364,11 @@ def evaluate_manifest_contract(
                 repeated_detail_routes.update(update_routes & helper_routes)
         if repeated_detail_routes:
             add(
+                "repeated_detail_route",
                 "get_manga_update and its chapter helper fetch the same REST detail route twice "
                 "when details and chapters are both requested; fetch it once and pass the "
                 "decoded detail response into the chapter helper: "
-                + ", ".join(sorted(repeated_detail_routes))
+                + ", ".join(sorted(repeated_detail_routes)),
             )
     if (
         ir.source_format == "decompiled_apk"
@@ -280,6 +376,7 @@ def evaluate_manifest_contract(
         and not _has_idempotent_get_retry(rust)
     ):
         add(
+            "missing_decompiled_get_retry",
             "decompiled Tachi JSON source generated no centralized one-retry helper for "
             "transient idempotent GET RequestError; reconstruct and resend the same request "
             "once, then deserialize only the successful response",
@@ -292,6 +389,7 @@ def evaluate_manifest_contract(
         and not _has_idempotent_get_retry(rust)
     ):
         add(
+            "missing_kotlin_get_retry",
             "standard Kotlin HttpSource generated no centralized one-retry helper for "
             "transient idempotent GET RequestError; reconstruct and resend the same request "
             "once, then parse only the successful response",
@@ -299,6 +397,7 @@ def evaluate_manifest_contract(
         )
     if Capability.CHAPTERS in ir.capabilities and _rust_chapter_parser_compiles_regex(rust):
         add(
+            "chapter_regex_hot_path",
             "generated code compiles Regex::new on every chapter parse; for fixed embedded-JSON "
             "delimiters or numeric chapter labels, use bounded string scanning so each update "
             "does not compile a regex and pull regex runtime cost into the WASM hot path",
@@ -309,40 +408,56 @@ def evaluate_manifest_contract(
         and not _preserves_contextual_chapter_urls(rust_content)
     ):
         add(
+            "incomplete_contextual_chapter_urls",
             "source resolves placeholder chapter URLs from adjacent chapter context, but the "
             "generated Rust does not preserve the placeholder chapters and complete the "
-            "prev/next response lookup, numeric fallback, and terminal '_2.' path rewrite"
+            "prev/next response lookup, numeric fallback, and terminal '_2.' path rewrite",
         )
     if Capability.TRIPLE_DES_CBC in ir.capabilities and (
         "current_date" not in rust_content or re.search(r"\blet\s+time\s*=\s*\"0\"", rust_content)
     ):
         add(
+            "missing_live_timestamp",
             "3DES-CBC request signing uses no live millisecond Unix timestamp; "
-            "call aidoku::imports::std::current_date() and multiply its seconds by 1000"
+            "call aidoku::imports::std::current_date() and multiply its seconds by 1000",
         )
     if Capability.DYNAMIC_BASE_URLS in ir.capabilities:
         if not resources.has(GeneratedResources.SETTINGS):
-            add("dynamic base URL source generated no res/settings.json")
+            add(
+                "dynamic_base_url_settings",
+                "dynamic base URL source generated no res/settings.json",
+            )
         if "defaults_get" not in rust_content:
-            add("dynamic base URL source generated no validated defaults_get resolver")
+            add(
+                "dynamic_base_url_resolver",
+                "dynamic base URL source generated no validated defaults_get resolver",
+            )
     if ir.relative_url_keys:
         if not rust.has_function("absolute_url"):
-            add("source emits relative manga/chapter keys but generated no absolute_url helper")
+            add(
+                "missing_absolute_url",
+                "source emits relative manga/chapter keys but generated no absolute_url helper",
+            )
         if _passes_relative_key_to_request(rust):
-            add("generated code passes Manga.key or Chapter.key to a request without absolute_url")
+            add(
+                "relative_key_request",
+                "generated code passes Manga.key or Chapter.key to a request without absolute_url",
+            )
     for route in ir.chapter_page_routes:
         default_variant = next(variant for variant in route.variants if variant.is_default)
         if default_variant.strip_prefix and default_variant.strip_prefix not in rust_content:
             add(
+                "chapter_route_strip_prefix",
                 "chapter page route omits required key prefix removal: "
-                + repr(default_variant.strip_prefix)
+                + repr(default_variant.strip_prefix),
             )
         for replacement in default_variant.replacements:
             if replacement.new not in rust_content:
                 add(
+                    "chapter_route_replacement",
                     "chapter page route omits required default replacement "
                     f"{replacement.old!r} -> {replacement.new!r} for "
-                    f"{route.endpoint_template!r}"
+                    f"{route.endpoint_template!r}",
                 )
     image_policy = ir.image_url_policy
     if image_policy is not None:
@@ -351,6 +466,7 @@ def evaluate_manifest_contract(
             rust_content,
         ):
             add(
+                "transformed_cover_url",
                 "source image policy requires preserving each cover URL exactly; "
                 "generated code applies a chapter-resolution transform to a cover URL",
                 "image_resolution",
@@ -359,38 +475,51 @@ def evaluate_manifest_contract(
             rust_content
         ):
             add(
+                "image_resolution_scope",
                 "chapter image resolution translation lacks the recovered exact x.jpg/x.webp "
                 f"suffix scope {image_policy.chapter_resolution_regex!r}",
                 "image_resolution",
             )
     if "date_upload" in input_content and "date_uploaded" not in rust_content:
-        add("input chapters expose date_upload but generated chapters omit date_uploaded")
+        add(
+            "missing_chapter_date",
+            "input chapters expose date_upload but generated chapters omit date_uploaded",
+        )
     if "scanlator" in input_content and "scanlators" not in rust_content:
-        add("input chapters expose scanlator but generated chapters omit scanlators")
+        add(
+            "missing_scanlators",
+            "input chapters expose scanlator but generated chapters omit scanlators",
+        )
     if decompiled_rank_list_wraps_comic(ir.files) and _rank_helper_skips_item_wrapper(rust):
         add(
+            "rank_item_wrapper",
             "rank endpoint returns RankResult.list entries wrapping the manga in ListItem.comic; "
             "generated code incorrectly deserializes ranks as a direct ListResult<Comic>, "
-            "producing empty manga titles and keys"
+            "producing empty manga titles and keys",
         )
     if decompiled_detail_uses_api_envelope(ir.files) and _detail_helper_skips_api_envelope(rust):
         add(
+            "detail_api_envelope",
             "detail endpoint is wrapped in ApiResponse<ComicDetailResult>, but generated detail "
             "helper deserializes the HTTP response directly into DetailResult; deserialize "
-            "ApiResponse<DetailResult> and return response.results"
+            "ApiResponse<DetailResult> and return response.results",
         )
     if re.search(r"\bSChapter\b[\s\S]{0,2000}?\burl\s*=", input_content) and not re.search(
         r"\bChapter\s*\{[\s\S]{0,4000}?\burl\s*:", rust_content
     ):
-        add("input chapters expose a URL but generated Chapter values omit url")
+        add(
+            "missing_chapter_url",
+            "input chapters expose a URL but generated Chapter values omit url",
+        )
     legacy_settings = {value for value in ("zh-hant", "zh-hans") if f'"{value}"' in input_content}
     missing_legacy_settings = sorted(
         value for value in legacy_settings if f'"{value}"' not in rust_content
     )
     if missing_legacy_settings:
         add(
+            "missing_legacy_setting_value",
             "generated settings logic omits legacy input values: "
-            + ", ".join(missing_legacy_settings)
+            + ", ".join(missing_legacy_settings),
         )
     return ContractEvaluation(tuple(diagnostics))
 

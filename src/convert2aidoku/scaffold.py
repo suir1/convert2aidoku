@@ -86,6 +86,25 @@ _AIDOKU_ROOT_NAMES = {
     "Viewer",
 }
 
+MANIFEST_PROJECTION_RULE_IDS = frozenset(
+    {
+        "project_generated_module_topology",
+        "project_prune_public_only_dynamic_filters",
+        "project_recovered_chapter_image_resolution",
+        "project_recovered_chapter_page_variants",
+        "project_recovered_check_filter_mappings",
+        "project_recovered_detail_api_envelope",
+        "project_recovered_dynamic_filter_queries",
+        "project_recovered_dynamic_filters",
+        "project_recovered_nested_dto_aliases",
+        "project_recovered_nullable_dto_defaults",
+        "project_recovered_rank_item_wrapper",
+        "project_recovered_request_headers",
+        "project_skip_unused_decompiled_dto_fields",
+        "project_synthesize_recovered_dynamic_filters",
+    }
+)
+
 
 def _rust_identifier(node: Any) -> str | None:
     if node is None or node.type not in _RUST_IDENTIFIER_NODES:
@@ -5191,6 +5210,16 @@ def normalize_generation_manifest(
     trace: NormalizationTrace | None = None,
 ) -> GenerationManifest:
     """Project deterministic Rust compatibility and recovered behavior into a manifest."""
+
+    def projected(rule_id: str, before: object, after: object) -> bool:
+        rule_id = f"project_{rule_id}"
+        if rule_id not in MANIFEST_PROJECTION_RULE_IDS:
+            raise ValueError(f"unregistered manifest projection rule: {rule_id}")
+        changed = before != after
+        if trace is not None:
+            trace.hit(rule_id, changed=changed)
+        return changed
+
     resources = GeneratedResources(manifest)
     setting_defaults = resources.setting_defaults()
     setting_keys = resources.setting_keys()
@@ -5199,19 +5228,26 @@ def normalize_generation_manifest(
     request_builder_helpers = _request_builder_helpers(manifest)
     preserve_cover_urls = bool(ir.image_url_policy and ir.image_url_policy.preserve_cover_urls)
     implemented_traits = list(manifest.implemented_traits)
+    original_files = list(manifest.files)
+    original_traits = list(implemented_traits)
     seeded_files, implemented_traits = _synthesize_recovered_dynamic_filters(
         ir,
-        list(manifest.files),
+        original_files,
         source_struct=manifest.source_struct,
         implemented_traits=implemented_traits,
     )
+    changed = projected(
+        "synthesize_recovered_dynamic_filters",
+        (original_files, original_traits),
+        (seeded_files, implemented_traits),
+    )
+    before = seeded_files
     seeded_files = _prune_public_only_dynamic_filters(ir, seeded_files)
+    changed |= projected("prune_public_only_dynamic_filters", before, seeded_files)
+    before = seeded_files
     seeded_files = _project_recovered_rank_item_wrapper(ir, seeded_files)
+    changed |= projected("recovered_rank_item_wrapper", before, seeded_files)
     files = []
-    changed = any(
-        before.content != after.content
-        for before, after in zip(manifest.files, seeded_files, strict=True)
-    ) or implemented_traits != list(manifest.implemented_traits)
     for generated in seeded_files:
         content = generated.content
         if generated.path.endswith(".rs"):
@@ -5233,82 +5269,63 @@ def normalize_generation_manifest(
         changed |= content != generated.content
         files.append(generated.model_copy(update={"content": content}))
     if ir.source_format == "decompiled_apk":
+        before = files
         optionalized = _skip_unused_decompiled_dto_fields(files)
-        changed |= any(
-            before.content != after.content
-            for before, after in zip(files, optionalized, strict=True)
-        )
+        changed |= projected("skip_unused_decompiled_dto_fields", before, optionalized)
         files = optionalized
+        before = files
         aliased = _project_recovered_nested_dto_aliases(ir, files)
-        changed |= any(
-            before.content != after.content for before, after in zip(files, aliased, strict=True)
-        )
+        changed |= projected("recovered_nested_dto_aliases", before, aliased)
         files = aliased
+        before = files
         defaulted = _project_recovered_nullable_dto_defaults(ir, files)
-        changed |= any(
-            before.content != after.content for before, after in zip(files, defaulted, strict=True)
-        )
+        changed |= projected("recovered_nullable_dto_defaults", before, defaulted)
         files = defaulted
+    before = files
     header_projected = _project_recovered_request_headers(
         ir,
         files,
         setting_defaults=setting_defaults,
         setting_values=setting_values,
     )
-    changed |= any(
-        before.content != after.content
-        for before, after in zip(files, header_projected, strict=True)
-    )
+    changed |= projected("recovered_request_headers", before, header_projected)
     files = header_projected
+    before = files
     envelope_projected = _project_recovered_detail_api_envelope(ir, files)
-    changed |= any(
-        before.content != after.content
-        for before, after in zip(files, envelope_projected, strict=True)
-    )
+    changed |= projected("recovered_detail_api_envelope", before, envelope_projected)
     files = envelope_projected
+    before = files
     route_projected = _project_recovered_chapter_page_variants(ir, files)
-    changed |= any(
-        before.content != after.content
-        for before, after in zip(files, route_projected, strict=True)
-    )
+    changed |= projected("recovered_chapter_page_variants", before, route_projected)
     files = route_projected
+    before = files
     resolution_projected = _project_recovered_chapter_image_resolution(
         ir,
         files,
         setting_defaults=setting_defaults,
         setting_values=setting_values,
     )
-    changed |= any(
-        before.content != after.content
-        for before, after in zip(files, resolution_projected, strict=True)
-    )
+    changed |= projected("recovered_chapter_image_resolution", before, resolution_projected)
     files = resolution_projected
+    before = files
     filters_projected = _project_recovered_dynamic_filters(
         ir,
         files,
         implemented_traits=implemented_traits,
     )
-    changed |= any(
-        before.content != after.content
-        for before, after in zip(files, filters_projected, strict=True)
-    )
+    changed |= projected("recovered_dynamic_filters", before, filters_projected)
     files = filters_projected
+    before = files
     query_projected = _project_recovered_dynamic_filter_queries(ir, files)
-    changed |= any(
-        before.content != after.content
-        for before, after in zip(files, query_projected, strict=True)
-    )
+    changed |= projected("recovered_dynamic_filter_queries", before, query_projected)
     files = query_projected
+    before = files
     check_projected = _project_recovered_check_filter_mappings(ir, files)
-    changed |= any(
-        before.content != after.content
-        for before, after in zip(files, check_projected, strict=True)
-    )
+    changed |= projected("recovered_check_filter_mappings", before, check_projected)
     files = check_projected
+    before = files
     topologized = _normalize_generated_module_topology(files)
-    changed |= any(
-        before.content != after.content for before, after in zip(files, topologized, strict=True)
-    )
+    changed |= projected("generated_module_topology", before, topologized)
     files = topologized
     return (
         manifest.model_copy(update={"files": files, "implemented_traits": implemented_traits})

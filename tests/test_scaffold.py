@@ -1523,11 +1523,13 @@ impl CopyManga {
         ],
     )
 
-    normalized = normalize_generation_manifest(ir, manifest)
+    trace = NormalizationTrace()
+    normalized = normalize_generation_manifest(ir, manifest, trace=trace)
     source = normalized.files[0].content
 
     assert "let response: ApiResponse<DetailResult>" in source
     assert "Ok(response.results)" in source
+    assert trace.counts["project_recovered_detail_api_envelope"] == 1
     assert normalize_generation_manifest(ir, normalized) == normalized
 
 
@@ -2013,13 +2015,15 @@ fn get_dynamic_filters(&self) -> Result<Vec<Filter>> {
         ],
     )
 
-    normalized = normalize_generation_manifest(ir, manifest)
+    trace = NormalizationTrace()
+    normalized = normalize_generation_manifest(ir, manifest, trace=trace)
     source = next(item.content for item in normalized.files if item.path == "src/source.rs")
 
     assert 'id: "category".into()' in source
     assert 'id: "status".into()' in source
     assert 'ids: Some(aidoku::alloc::vec!["".into(), "END".into()])' in source
     assert "let mut c2a_filters" in source
+    assert trace.counts["project_recovered_dynamic_filters"] == 1
     assert normalize_generation_manifest(ir, normalized) == normalized
 
 
@@ -2334,7 +2338,8 @@ def test_manifest_projects_recovered_request_header_profiles(tmp_path: Path) -> 
         ],
     )
 
-    normalized = normalize_generation_manifest(ir, manifest)
+    trace = NormalizationTrace()
+    normalized = normalize_generation_manifest(ir, manifest, trace=trace)
     source = next(item.content for item in normalized.files if item.path == "src/source.rs")
 
     assert 'url.contains("api.hot.example")' in source
@@ -2345,6 +2350,8 @@ def test_manifest_projects_recovered_request_header_profiles(tmp_path: Path) -> 
     assert 'request.header("platform", &platform)' in source
     assert 'defaults_get::<aidoku::alloc::String>("v2.key.user_agent")' in source
     assert source.count("c2a_request(url)?.send()") == 2
+    assert trace.counts["project_recovered_request_headers"] == 1
+    assert "project_generated_module_topology" in trace.rule_ids
     assert normalize_generation_manifest(ir, normalized) == normalized
 
 
