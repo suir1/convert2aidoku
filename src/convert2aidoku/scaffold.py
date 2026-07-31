@@ -266,6 +266,12 @@ def _normalize_pinned_model_shapes(content: str) -> str:
     """Repair unambiguous model/request shapes for the pinned Aidoku revision."""
     content = content.replace("Manga::new()", "Manga::default()")
     content = re.sub(
+        r"\b(?P<owner>manga|chapter)\s*\.\s*key\s*\.\s*ok_or_else\(\s*"
+        r"\|\|\s*AidokuError::message\([^)]*\)\s*\)\?",
+        r"\g<owner>.key",
+        content,
+    )
+    content = re.sub(
         r"(?m)^\s*[A-Za-z_]\w*\.initialized\s*=\s*[^;]+;\s*\n?",
         "",
         content,
@@ -472,7 +478,13 @@ def _normalize_pinned_model_fields(content: str) -> str:
                 owner = owner.parent
             local_options = local_option_bindings.get(owner.start_byte, set())
             nested_local_option = re.fullmatch(r"Some\((?P<name>[A-Za-z_]\w*)\)", value)
-            if type_name == "Manga" and field_name == "title" and value.endswith(".text()"):
+            wrapped_required = re.fullmatch(r"Some\((?P<value>[\s\S]+)\)", value)
+            if (
+                (type_name == "Manga" and field_name in {"key", "title"})
+                or (type_name == "Chapter" and field_name == "key")
+            ) and wrapped_required is not None:
+                replacement_value = wrapped_required.group("value")
+            elif type_name == "Manga" and field_name == "title" and value.endswith(".text()"):
                 replacement_value = f"{value}.unwrap_or_default()"
             elif (
                 field_name == "url"
@@ -498,6 +510,11 @@ def _normalize_pinned_model_fields(content: str) -> str:
             elif type_name == "Manga" and field_name == "status" and value.startswith("Some("):
                 replacement_value = value[5:-1]
             elif type_name == "Chapter" and field_name in {"chapter_number", "volume_number"}:
+                if re.search(r"\bas\s+f64\b", value):
+                    replacement_value = re.sub(r"\bas\s+f64\b", "as f32", value)
+                    original = field.text.decode("utf-8", errors="replace")
+                    replacements.append((original, f"{field_name}: {replacement_value}"))
+                    continue
                 local_option_f32_bindings = option_f32_bindings.get(owner.start_byte, set())
                 if value in local_option_f32_bindings:
                     continue
@@ -1301,6 +1318,18 @@ def _normalize_mutated_aidoku_models(content: str) -> str:
         )
         if target is None:
             continue
+        required_fields = {"key", "title"} if target.group("model") == "manga" else {"key"}
+        expression = right.text.decode("utf-8", errors="replace")
+        wrapped_required = re.fullmatch(r"Some\((?P<value>[\s\S]+)\)", expression)
+        if target.group("field") in required_fields and wrapped_required is not None:
+            edits.append(
+                (
+                    right.start_byte,
+                    right.end_byte,
+                    wrapped_required.group("value").encode(),
+                )
+            )
+            continue
         optional_fields = (
             {"url", "cover", "description"}
             if target.group("model") == "manga"
@@ -1308,7 +1337,6 @@ def _normalize_mutated_aidoku_models(content: str) -> str:
         )
         if target.group("field") not in optional_fields:
             continue
-        expression = right.text.decode("utf-8", errors="replace")
         if expression.startswith(("Some(", "None")):
             continue
         edits.append((right.start_byte, right.end_byte, f"Some({expression})".encode()))
@@ -1442,6 +1470,12 @@ def _normalize_select_filter_constructors(content: str) -> str:
         r"(?P<options>[A-Za-z_]\w*)\s*,\s*Some\((?P<ids>[A-Za-z_]\w*)\)\s*\)",
         r"aidoku::SelectFilter { id: \g<id>.into(), title: Some(\g<title>.into()), "
         r"options: \g<options>, ids: Some(\g<ids>), ..Default::default() }.into()",
+        content,
+    )
+    content = re.sub(
+        r"(?<![A-Za-z0-9_:])Filter::(?:Check|Checkbox|MultiSelect|Select|Sort)\("
+        r"(?P<value>[A-Za-z_][A-Za-z0-9_]*)\)",
+        r"Filter::from(\g<value>)",
         content,
     )
     replacements: list[tuple[str, str]] = []
@@ -1708,6 +1742,24 @@ def _normalize_page_url_context(content: str) -> str:
 
 
 def _normalize_image_request_result(content: str) -> str:
+    context_replacements: list[tuple[str, str]] = []
+    for function in RustInspection.from_content(content).functions:
+        if function.name != "get_image_request":
+            continue
+        normalized = re.sub(
+            r"&(?P<context>[A-Za-z_][A-Za-z0-9_]*)\.url\b",
+            r'\g<context>.get("referer").map(String::as_str).unwrap_or("")',
+            function.text,
+        )
+        normalized = re.sub(
+            r'\.header\("Referer",\s*(?P<function>[A-Za-z_][A-Za-z0-9_]*\(\))\)',
+            r'.header("Referer", \g<function>.as_str())',
+            normalized,
+        )
+        if normalized != function.text:
+            context_replacements.append((function.text, normalized))
+    for original, replacement in context_replacements:
+        content = content.replace(original, replacement, 1)
     content = re.sub(
         r"(?P<context>[A-Za-z_]\w*)\s*\.map\(\s*\|(?P<value>[A-Za-z_]\w*)\|\s*"
         r"(?P=value)\.referer\s*\)",
@@ -2048,6 +2100,24 @@ def _normalize_request_builder_helpers(
 
 
 def _normalize_parse_date_option_patterns(content: str) -> str:
+    replacements: list[tuple[str, str]] = []
+    for node in RustInspection.from_content(content).nodes("call_expression"):
+        function = node.child_by_field_name("function")
+        arguments = node.child_by_field_name("arguments")
+        if function is None or arguments is None or len(arguments.named_children) != 1:
+            continue
+        function_text = function.text.decode("utf-8", errors="replace")
+        if function_text != "aidoku::imports::std::parse_date":
+            continue
+        argument = arguments.named_children[0].text.decode("utf-8", errors="replace")
+        replacements.append(
+            (
+                node.text.decode("utf-8", errors="replace"),
+                f'{function_text}({argument}, "yyyy-MM-dd HH:mm:ss")',
+            )
+        )
+    for original, replacement in replacements:
+        content = content.replace(original, replacement, 1)
     content = re.sub(
         r"if\s+let\s+Ok\((?P<value>[A-Za-z_]\w*)\)\s*=\s*"
         r"(?P<call>(?:aidoku::)?imports::std::parse_(?:local_)?date\([^\n]+\))",
@@ -3520,6 +3590,26 @@ def _normalize_platform_header_setting(
     return content
 
 
+_BOOLEAN_LET_SOME_ALTERNATIVE = re.compile(
+    r"(?m)^(?P<indent>[ \t]*)if\s+\(let\s+Some\(\(_,[ \t]*"
+    r"(?P<binding>[A-Za-z_][A-Za-z0-9_]*)\)\)\s*=\s*(?P<first>[^\r\n]+?)\)\s*"
+    r"\|\|\s*\(let\s+Some\(\(_,[ \t]*(?P=binding)\)\)\s*=\s*"
+    r"(?P<second>[^\r\n]+?)\)\s*\{"
+)
+
+
+def _normalize_boolean_let_some_alternatives(content: str) -> str:
+    """Rewrite an invalid AI-style boolean let condition without changing its intent."""
+
+    def replace(match: re.Match[str]) -> str:
+        return (
+            f"{match.group('indent')}if let Some((_, {match.group('binding')})) = "
+            f"{match.group('first')}.or_else(|| {match.group('second')}) {{"
+        )
+
+    return _BOOLEAN_LET_SOME_ALTERNATIVE.sub(replace, content)
+
+
 def normalize_pinned_aidoku_rust(
     content: str,
     *,
@@ -3535,6 +3625,7 @@ def normalize_pinned_aidoku_rust(
     remove_extern_std: bool = False,
 ) -> str:
     """Apply small type-safe compatibility rewrites for the pinned Aidoku/Rust APIs."""
+    content = _normalize_boolean_let_some_alternatives(content)
     content = _normalize_safe_std_paths(content, remove_extern_std=remove_extern_std)
     content = _normalize_graphql_request_body(content)
     content = _normalize_aidoku_api_paths(content)

@@ -29,7 +29,8 @@ from .scaffold import (
 )
 
 _RUST_DIAGNOSTIC_LOCATION = re.compile(
-    r"-->\s+(?P<path>src/[A-Za-z0-9_./-]+\.rs):(?P<line>[1-9][0-9]*):[1-9][0-9]*"
+    r"-->\s+(?:[^\r\n]*/)?(?P<path>src/[A-Za-z0-9_./-]+\.rs):"
+    r"(?P<line>[1-9][0-9]*):[1-9][0-9]*"
 )
 _RUST_DIAGNOSTIC_NAMED_TYPE = re.compile(
     r"^\s*[1-9][0-9]*\s*\|\s*(?:pub(?:\([^)]*\))?\s+)?"
@@ -181,7 +182,7 @@ def repair_round_limit(
     live: bool,
     configured_limit: int,
 ) -> int:
-    """Cap cheap compiler/contract repair while preserving explicit live-repair control."""
+    """Cap compiler/contract repair while preserving explicit live-repair control."""
     if not repair_required(validation, capability_gaps, live=live):
         return 0
     build_or_contract_failure = (
@@ -190,7 +191,7 @@ def repair_round_limit(
         or not validation.package_ok
         or any(not stage.ok and stage.kind.value != "live_test" for stage in validation.stages)
     )
-    return min(configured_limit, 1) if build_or_contract_failure else configured_limit
+    return min(configured_limit, 2) if build_or_contract_failure else configured_limit
 
 
 def repair_state_signature(
@@ -270,7 +271,15 @@ class TargetedRepair:
     def _patch_request(self, diagnostics: str) -> _PatchRequest | None:
         excerpts = diagnostic_file_excerpts(self.store.project, diagnostics)
         failed_stages = {stage.name for stage in self.validation.stages if not stage.ok}
-        if excerpts and failed_stages and failed_stages <= {"cargo-check", "clippy", "clippy-fix"}:
+        compiler_stages = {
+            "format",
+            "cargo-check",
+            "clippy",
+            "clippy-fix",
+            "format-after-clippy-fix",
+            "format-after-clippy-fix-2",
+        }
+        if excerpts and failed_stages and failed_stages <= compiler_stages:
             return _PatchRequest("compiler", excerpts, diagnostics)
         contract_repair = self.contract.repair(self.store.project)
         if contract_repair is not None:

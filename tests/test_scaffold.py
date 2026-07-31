@@ -161,6 +161,74 @@ fn render(value: String) -> String { format!("{value}") }
     assert "use aidoku::alloc::format;" not in normalized
 
 
+def test_normalizer_rewrites_boolean_let_some_alternatives() -> None:
+    content = (
+        "fn comic_path(key: &str) -> Option<String> {\n"
+        '    if (let Some((_, path)) = key.split_once("/comic/")) || '
+        '(let Some((_, path)) = key.split_once("/comic2/")) {\n'
+        "        Some(path.to_string())\n"
+        "    } else {\n"
+        "        None\n"
+        "    }\n"
+        "}\n"
+    )
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "(let Some" not in normalized
+    assert (
+        'if let Some((_, path)) = key.split_once("/comic/").or_else(|| '
+        'key.split_once("/comic2/")) {' in normalized
+    )
+
+
+def test_normalizer_repairs_pinned_required_models_and_image_context() -> None:
+    content = """
+fn update(manga: &mut Manga, comic: Comic) {
+    manga.title = Some(comic.name.clone());
+    manga.key = Some(format!("/comic/{}", comic.path));
+}
+fn chapter(info: Info) -> Chapter {
+    Chapter {
+        key: Some(info.key),
+        chapter_number: Some(info.index as f64),
+        ..Default::default()
+    }
+}
+fn pages(chapter: Chapter) -> Result<String> {
+    let key = chapter.key.ok_or_else(|| AidokuError::message("missing"))?;
+    Ok(key)
+}
+fn filters(filter: SelectFilter) -> Vec<Filter> {
+    vec![Filter::Select(filter)]
+}
+fn get_image_request(context: Option<PageContext>) -> Result<Request> {
+    let mut request = Request::get("https://example.com")?;
+    if let Some(ctx) = &context {
+        request = request.header("Referer", &ctx.url);
+    } else {
+        request = request.header("Referer", web_base());
+    }
+    Ok(request)
+}
+fn date(value: &str) -> i64 {
+    aidoku::imports::std::parse_date(value).unwrap_or(0)
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "manga.title = comic.name.clone();" in normalized
+    assert 'manga.key = format!("/comic/{}", comic.path);' in normalized
+    assert "key: info.key" in normalized
+    assert "chapter_number: Some(info.index as f32)" in normalized
+    assert "let key = chapter.key;" in normalized
+    assert "vec![Filter::from(filter)]" in normalized
+    assert 'ctx.get("referer").map(String::as_str).unwrap_or("")' in normalized
+    assert 'request.header("Referer", web_base().as_str())' in normalized
+    assert 'aidoku::imports::std::parse_date(value, "yyyy-MM-dd HH:mm:ss")' in normalized
+
+
 def test_normalizer_rewrites_invalid_closure_retry_to_aidoku_error_flow() -> None:
     content = """#![no_std]
 fn http_get(url: &str) -> Result<Response> {

@@ -208,7 +208,7 @@ def test_repair_stops_after_two_attempts_with_the_same_validation_state(
     assert any("Repair stopped" in message for message in progress)
 
 
-def test_compiler_failure_uses_at_most_one_repair_even_when_configured_higher(
+def test_compiler_failure_uses_at_most_two_repairs_even_when_configured_higher(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -235,8 +235,8 @@ def test_compiler_failure_uses_at_most_one_repair_even_when_configured_higher(
     )
 
     assert outcome.report.status is ConversionStatus.FAILED
-    assert ai_calls.repair == 1
-    assert len(outcome.report.ai_rounds) == 2
+    assert ai_calls.repair == 2
+    assert len(outcome.report.ai_rounds) == 3
 
 
 def test_blocked_live_validation_skips_ai_repair_and_preserves_checkpoint(

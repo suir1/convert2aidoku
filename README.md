@@ -122,15 +122,15 @@ For decompiled APKs, the initial prompt uses deterministic Java behavior slices 
 boilerplate; Kotlin modules still send their complete selected source files. The primary AI call
 returns Rust files only. Static filters are generated deterministically from `SourceIR`, while
 settings use a separate bounded evidence prompt whose response contains real JSON objects rather
-than JSON text nested inside a manifest string. Compiler and Clippy repairs first use bounded
-source excerpts and exact `old_text` → `new_text` replacements. Each replacement must come from a
+than JSON text nested inside a manifest string. Rust format, compiler, and Clippy repairs first use
+bounded source excerpts and exact `old_text` → `new_text` replacements. Each replacement must come from a
 supplied excerpt, match once, stay inside the generated-file allowlist, and pass the same Rust
 safety checks. A rejected compact patch does not escalate into a second full-source request in the
 same run; the checkpoint is retained for explicit resume. Live-behavior failures retain the full
 repair context. This keeps repair prompts small without weakening path, dependency, or
 code-execution boundaries.
 
-Repair is adaptive. Compiler and contract failures are capped at one compact repair even when a
+Repair is adaptive. Compiler and contract failures are capped at two compact repairs even when a
 higher maximum is configured. Non-blocked live-behavior failures honor the explicit maximum.
 HTTP 403, TLS challenges, maintenance responses, DNS failures, and timeouts never trigger AI;
 their checkpoint is retained for a later `--resume` run.

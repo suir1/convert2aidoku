@@ -209,7 +209,7 @@ def convert(
         typer.Option(
             min=0,
             max=MAX_REPAIR_ROUNDS,
-            help="Maximum cumulative AI repairs; compiler/contract failures are capped at one.",
+            help="Maximum cumulative AI repairs; compiler/contract failures are capped at two.",
         ),
     ] = None,
     generation_reasoning: Annotated[

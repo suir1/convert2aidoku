@@ -37,7 +37,7 @@ def test_blocked_validation_never_repairs_even_with_contract_gaps() -> None:
     assert not repair_required(validation, ["relative URL gap"], live=True)
 
 
-def test_compile_and_contract_repairs_are_capped_at_one_round() -> None:
+def test_compile_and_contract_repairs_are_capped_at_two_rounds() -> None:
     compiler_failure = ValidationResult(
         stages=[ValidationStage(name="cargo-check", kind="check", ok=False, output="error")]
     )
@@ -49,7 +49,7 @@ def test_compile_and_contract_repairs_are_capped_at_one_round() -> None:
         package_ok=True,
     )
 
-    assert repair_round_limit(compiler_failure, [], live=True, configured_limit=8) == 1
+    assert repair_round_limit(compiler_failure, [], live=True, configured_limit=8) == 2
     assert (
         repair_round_limit(
             ValidationResult(build_ok=True, package_ok=True),
@@ -57,7 +57,7 @@ def test_compile_and_contract_repairs_are_capped_at_one_round() -> None:
             live=True,
             configured_limit=8,
         )
-        == 1
+        == 2
     )
     assert repair_round_limit(live_failure, [], live=True, configured_limit=8) == 8
     assert (
@@ -133,6 +133,27 @@ def test_compiler_diagnostics_produce_bounded_source_excerpts(tmp_path: Path) ->
             "start_line": 17,
             "end_line": 27,
             "content": "\n".join(lines[16:27]),
+        }
+    ]
+
+
+def test_compiler_diagnostics_accept_absolute_rust_paths(tmp_path: Path) -> None:
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "lib.rs").write_text("fn broken() {}\n", encoding="utf-8")
+
+    excerpts = diagnostic_file_excerpts(
+        tmp_path,
+        f"error\n  --> {source / 'lib.rs'}:1:4",
+        context_lines=0,
+    )
+
+    assert excerpts == [
+        {
+            "path": "src/lib.rs",
+            "start_line": 1,
+            "end_line": 1,
+            "content": "fn broken() {}",
         }
     ]
 
@@ -280,6 +301,61 @@ def test_targeted_repair_applies_compiler_patch_without_loading_history(tmp_path
         result = repair.request(client)
 
     assert result.value.files[0].content == "let title = Some(title);\n"
+    assert calls.repair_patch == 1
+    assert calls.repair == 0
+
+
+def test_format_parse_failure_uses_bounded_compiler_patch(tmp_path: Path) -> None:
+    store = CheckpointStore(tmp_path / "workspace")
+    source = store.project / "src"
+    source.mkdir(parents=True)
+    rust = "fn broken() { invalid(); }\n"
+    source_path = source / "lib.rs"
+    source_path.write_text(rust, encoding="utf-8")
+    manifest = generation_manifest(rust)
+    patch = RepairPatch.model_validate(
+        {
+            "edits": [
+                {
+                    "path": "src/lib.rs",
+                    "old_text": "invalid();",
+                    "new_text": "valid();",
+                }
+            ]
+        }
+    )
+    adapter, calls = scripted_ai_client(
+        generation=manifest,
+        repair_patch=patch,
+        patch_scope="compiler",
+    )
+    repair = TargetedRepair(
+        ir=minimal_source_ir(),
+        store=store,
+        checkpoint=ConversionCheckpoint(
+            input_ref="fixture",
+            output="generated/en.example",
+            provider_base_url="http://local/v1",
+            model="test",
+        ),
+        manifest=manifest,
+        validation=ValidationResult(
+            stages=[
+                ValidationStage(
+                    name="format",
+                    kind="format",
+                    ok=False,
+                    output=f"error: expected expression\n  --> {source_path}:1:15",
+                )
+            ]
+        ),
+        contract=ContractEvaluation(()),
+    )
+
+    with adapter(provider_settings()) as client:
+        result = repair.request(client)
+
+    assert "valid();" in result.value.files[0].content
     assert calls.repair_patch == 1
     assert calls.repair == 0
 
