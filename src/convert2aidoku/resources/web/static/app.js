@@ -14,6 +14,7 @@ const emptyState = byId("empty-state");
 const jobView = byId("job-view");
 const toastElement = byId("toast");
 let analyzedInput = "";
+let analyzedEligible = false;
 let activeJob = "";
 let eventStream = null;
 
@@ -40,6 +41,46 @@ const capabilityLabels = {
   dynamic_base_urls: "动态域名",
   image_headers: "图片请求头",
 };
+
+const assessmentLabels = {
+  ready: "适合自动转换",
+  caution: "可以转换，需关注风险",
+  blocked: "未通过付费前检查",
+};
+
+const assessmentFindingLabels = {
+  "APK behavior is recovered from JADX output and requires live validation":
+    "APK 行为来自 JADX 反编译，必须进行实站验证",
+  "authenticated and Android-only features are outside public-reading scope":
+    "登录功能和 Android 专用行为不在公开阅读范围内",
+  "dynamic filters require an additional live endpoint": "动态筛选依赖额外的实站接口",
+  "runtime domain selection must remain inside a recovered allowlist":
+    "运行时域名必须限制在已恢复的白名单内",
+  "page images require source-specific request behavior": "漫画图片需要源站专用请求行为",
+  "filter capability was detected but no stable filter contract was recovered":
+    "检测到筛选功能，但未恢复出稳定的筛选契约",
+  "settings were detected but no focused settings evidence was recovered":
+    "检测到源设置，但没有恢复出聚焦的设置证据",
+  "no search, popular, or latest listing entry point was recovered":
+    "没有恢复出搜索、热门或最新列表入口",
+  "analysis produced no source evidence files": "分析没有产生可用的源码证据",
+};
+
+function assessmentFinding(message) {
+  if (assessmentFindingLabels[message]) return assessmentFindingLabels[message];
+  const optional = message.match(/^(\d+) optional features will be excluded$/);
+  if (optional) return `${optional[1]} 项可选功能会被排除`;
+  const omitted = message.match(/^(\d+) source files exceed the bounded generation context$/);
+  if (omitted) return `${omitted[1]} 个源码文件超出生成上下文上限`;
+  const missing = message.match(/^missing core reading behavior: (.+)$/);
+  if (missing) {
+    const labels = missing[1].split(", ").map((item) => capabilityLabels[item] || item);
+    return `缺少核心阅读行为：${labels.join("、")}`;
+  }
+  const crypto = message.match(/^supported cryptography still increases implementation risk: (.+)$/);
+  if (crypto) return `受支持的加密仍会增加实现风险：${crypto[1]}`;
+  return message;
+}
 
 function toast(message, error = false) {
   toastElement.textContent = message;
@@ -91,7 +132,9 @@ dropZone.addEventListener("drop", (event) => {
 
 function renderAnalysis(payload) {
   const source = payload.source;
+  const assessment = payload.assessment;
   analyzedInput = payload.input_ref;
+  analyzedEligible = assessment.eligible;
   byId("source-id").textContent = source.id;
   byId("source-name").textContent = source.name;
   byId("source-format").textContent = source.format === "decompiled_apk" ? "APK / JADX" : "Kotlin module";
@@ -99,6 +142,33 @@ function renderAnalysis(payload) {
   byId("source-files").textContent = String(source.files);
   byId("source-filters").textContent = String(source.filters);
   byId("source-license").textContent = source.license || "未发现";
+  const assessmentSummary = byId("assessment-summary");
+  assessmentSummary.className = `assessment-summary ${assessment.status}`;
+  byId("assessment-label").textContent = assessmentLabels[assessment.status] || assessment.status;
+  byId("assessment-score").textContent = `${assessment.score}/100`;
+  byId("assessment-bar").style.width = `${assessment.score}%`;
+  const budget = assessment.token_budget;
+  const tokenRange = (minimum, maximum) =>
+    `${Number(minimum).toLocaleString()}–${Number(maximum).toLocaleString()}`;
+  byId("token-budget").classList.toggle("hidden", !budget);
+  if (budget) {
+    byId("initial-token-budget").textContent = tokenRange(
+      budget.initial_prompt_tokens_min,
+      budget.initial_prompt_tokens_max,
+    );
+    byId("total-token-budget").textContent = tokenRange(
+      budget.recommended_total_tokens_min,
+      budget.recommended_total_tokens_max,
+    );
+  }
+  const findings = byId("assessment-findings");
+  findings.replaceChildren();
+  [...assessment.blockers, ...assessment.risks].slice(0, 4).forEach((message) => {
+    const item = document.createElement("li");
+    item.textContent = assessmentFinding(message);
+    findings.appendChild(item);
+  });
+  findings.classList.toggle("hidden", findings.childElementCount === 0);
   const capabilities = byId("capabilities");
   capabilities.replaceChildren();
   source.capabilities.forEach((item) => {
@@ -114,7 +184,10 @@ function renderAnalysis(payload) {
   analysisCard.classList.remove("hidden");
   options.classList.remove("hidden");
   options.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  convertButton.disabled = !consent.checked;
+  convertButton.disabled = !consent.checked || !analyzedEligible;
+  convertButton.textContent = analyzedEligible
+    ? "开始生成 Aidoku 源"
+    : "当前源未通过付费前检查";
 }
 
 analyzeButton.addEventListener("click", async () => {
@@ -134,7 +207,7 @@ analyzeButton.addEventListener("click", async () => {
 });
 
 consent.addEventListener("change", () => {
-  convertButton.disabled = !consent.checked || !analyzedInput;
+  convertButton.disabled = !consent.checked || !analyzedInput || !analyzedEligible;
 });
 
 byId("ai-check").addEventListener("click", async (event) => {

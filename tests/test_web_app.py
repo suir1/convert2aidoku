@@ -47,6 +47,7 @@ def test_local_dashboard_is_self_contained_and_hardened(web_client) -> None:
     assert "把源代码变成" not in response.text
     assert "/static/app.css" in response.text
     assert "/static/app.js" in response.text
+    assert "/static/favicon.svg" in response.text
     assert "web-secret" not in response.text
     assert response.headers["x-frame-options"] == "DENY"
     assert "default-src 'self'" in response.headers["content-security-policy"]
@@ -54,6 +55,7 @@ def test_local_dashboard_is_self_contained_and_hardened(web_client) -> None:
     assert styles.status_code == 200
     assert "prefers-color-scheme: dark" in styles.text
     assert "prefers-reduced-motion: reduce" in styles.text
+    assert client.get("/static/favicon.svg").status_code == 200
 
 
 def test_mutating_routes_require_local_csrf_and_origin(web_client) -> None:
@@ -138,6 +140,11 @@ def test_analyze_previews_a_local_module_without_ai(web_client) -> None:
     assert payload["source"]["id"] == "en.simple"
     assert payload["source"]["format"] == "kotlin_module"
     assert payload["suggested_output"].endswith("generated/en.simple")
+    assert payload["assessment"]["status"] == "ready"
+    assert payload["assessment"]["eligible"] is True
+    assert payload["assessment"]["score"] >= 85
+    budget = payload["assessment"]["token_budget"]
+    assert budget["initial_prompt_tokens_min"] < budget["initial_prompt_tokens_max"]
 
 
 def test_web_upload_rejects_non_apk_files(web_client) -> None:

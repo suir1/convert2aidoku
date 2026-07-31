@@ -56,9 +56,10 @@ c2a ui
 
 The UI opens at `http://127.0.0.1:51821`, keeps all static assets local, and reuses the same
 analyzer, converter, checkpoint, validator, and reports as the CLI. It supports APK upload or a
-local/GitHub module reference, no-token analysis preview, AI connectivity checks, live conversion
-progress, failed-job resume, and controlled AIX/report downloads. Provider keys are read only from
-the process environment and are never accepted by Web forms.
+local/GitHub module reference, no-token analysis preview, conversion-readiness scoring, token-budget
+estimates, AI connectivity checks, live conversion progress, failed-job resume, and controlled
+AIX/report downloads. Sources missing core reading evidence are blocked before any provider request.
+Provider keys are read only from the process environment and are never accepted by Web forms.
 
 On WSL2, C2A opens the URL with Windows PowerShell when available; otherwise open the same
 `localhost` URL in the Windows browser. Headless Linux users can suppress browser launch:
@@ -69,6 +70,16 @@ c2a ui --no-open
 
 The server binds only to loopback by default. Non-loopback binding requires both an explicit host
 and `--allow-network`; keep the default for normal desktop and WSL use.
+
+The same provider-free readiness assessment is available in the CLI:
+
+```bash
+c2a assess <local-module-or-apk>
+```
+
+Its score measures recovered evidence and supported complexity, not a guaranteed success
+probability. The prompt and total-token ranges are model-independent character estimates intended
+for budgeting; actual provider tokenization and repair needs can vary.
 
 `c2a templates` reports source-agnostic patterns compatible with that pinned revision. These
 patterns describe slots such as selectors, URL construction, filter mapping, and image headers;

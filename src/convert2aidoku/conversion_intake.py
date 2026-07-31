@@ -8,6 +8,7 @@ from typing import Self
 from .analyzer import analyze_source
 from .checkpoint_store import CheckpointStore
 from .config import AISettings
+from .conversion_assessment import require_ai_eligible
 from .errors import InputError
 from .generated_source_metadata import GeneratedSourceMetadata
 from .ingest import resolve_source
@@ -73,6 +74,7 @@ class ConversionIntake:
         try:
             with resolve_source(request.input_ref) as resolved:
                 source_ir = analyze_source(resolved)
+                require_ai_eligible(source_ir)
                 create_scaffold(store.project, source_ir, resolved)
         except BaseException:
             shutil.rmtree(workspace, ignore_errors=True)

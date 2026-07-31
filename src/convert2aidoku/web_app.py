@@ -21,6 +21,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .ai import OpenAICompatibleClient
 from .analyzer import analyze_path
 from .config import ai_config_defaults, load_ai_settings
+from .conversion_assessment import assess_source_ir
 from .errors import C2AError, InputError
 from .toolchain import doctor
 from .web_jobs import TERMINAL_WEB_JOB_STATUSES, WebConversionRequest, WebJobManager
@@ -48,6 +49,7 @@ def _doctor_payload() -> list[dict[str, object]]:
 
 
 def _analysis_payload(ir, *, input_ref: str, working_directory: Path) -> dict[str, object]:
+    assessment = assess_source_ir(ir)
     return {
         "input_ref": input_ref,
         "suggested_output": str(
@@ -65,6 +67,7 @@ def _analysis_payload(ir, *, input_ref: str, working_directory: Path) -> dict[st
             "warnings": ir.warnings,
             "unsupported_features": ir.unsupported_features,
         },
+        "assessment": assessment.model_dump(mode="json"),
     }
 
 

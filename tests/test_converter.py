@@ -367,11 +367,25 @@ def test_failed_initial_exchange_usage_and_diagnostic_are_checkpointed(
 
 def test_repair_preserves_source_ir_required_resources(tmp_path: Path, monkeypatch) -> None:
     original_analyze = analyze_source
+
+    def analyze_with_required_resources(resolved):
+        ir = original_analyze(resolved)
+        return ir.model_copy(
+            update={
+                "capabilities": [
+                    Capability.SEARCH,
+                    Capability.DETAILS,
+                    Capability.CHAPTERS,
+                    Capability.PAGES,
+                    Capability.FILTERS,
+                    Capability.SETTINGS,
+                ]
+            }
+        )
+
     monkeypatch.setattr(
         "convert2aidoku.conversion_intake.analyze_source",
-        lambda resolved: original_analyze(resolved).model_copy(
-            update={"capabilities": [Capability.FILTERS, Capability.SETTINGS]}
-        ),
+        analyze_with_required_resources,
     )
 
     _install_ai_scenario(

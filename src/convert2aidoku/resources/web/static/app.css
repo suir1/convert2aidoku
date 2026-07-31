@@ -647,6 +647,117 @@ input[type="checkbox"] {
   white-space: nowrap;
 }
 
+.assessment-summary {
+  margin: 12px 0;
+  padding: 11px;
+  border: 1px solid var(--separator);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.assessment-heading,
+.assessment-heading span {
+  display: flex;
+  align-items: center;
+}
+
+.assessment-heading {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.assessment-heading span {
+  gap: 7px;
+}
+
+.assessment-heading i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--success);
+}
+
+.assessment-heading strong {
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.assessment-heading b {
+  color: var(--secondary);
+  font: 600 10px var(--mono);
+}
+
+.assessment-summary.caution .assessment-heading i {
+  background: var(--warning);
+}
+
+.assessment-summary.blocked .assessment-heading i {
+  background: var(--danger);
+}
+
+.assessment-track {
+  overflow: hidden;
+  height: 3px;
+  margin: 9px 0 10px;
+  border-radius: 99px;
+  background: rgba(128, 128, 128, 0.16);
+}
+
+.assessment-track span {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--success);
+  transition: width 0.35s ease;
+}
+
+.assessment-summary.caution .assessment-track span {
+  background: var(--warning);
+}
+
+.assessment-summary.blocked .assessment-track span {
+  background: var(--danger);
+}
+
+.token-budget {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.token-budget div {
+  min-width: 0;
+  padding: 7px 8px;
+  border-radius: 6px;
+  background: rgba(128, 128, 128, 0.055);
+}
+
+.token-budget span {
+  display: block;
+  color: var(--tertiary);
+  font-size: 8px;
+}
+
+.token-budget strong {
+  display: block;
+  overflow: hidden;
+  margin-top: 3px;
+  font: 600 9px var(--mono);
+  text-overflow: ellipsis;
+}
+
+.assessment-findings {
+  display: grid;
+  gap: 4px;
+  margin: 9px 0 0;
+  padding: 9px 0 0 15px;
+  color: var(--secondary);
+  border-top: 1px solid var(--separator);
+  font-size: 8px;
+  line-height: 1.4;
+}
+
 .capabilities {
   display: flex;
   flex-wrap: wrap;

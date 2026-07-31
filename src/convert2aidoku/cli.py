@@ -12,6 +12,7 @@ from .ai import OpenAICompatibleClient
 from .analyzer import analyze_path
 from .config import ReasoningEffort, load_ai_settings
 from .constants import MAX_REPAIR_ROUNDS
+from .conversion_assessment import assess_source_ir
 from .converter import convert_source, validate_existing
 from .errors import C2AError
 from .templates import match_templates
@@ -146,6 +147,29 @@ def analyze(
         console.print(f"Wrote [bold]{output}[/bold]")
     else:
         typer.echo(serialized, nl=False)
+
+
+@app.command()
+def assess(
+    input_ref: Annotated[str, typer.Argument(help="Local module/APK path or GitHub module URL.")],
+) -> None:
+    """Estimate conversion readiness and token budget without calling AI."""
+    try:
+        with console.status("Assessing conversion evidence..."):
+            ir = analyze_path(input_ref)
+            assessment = assess_source_ir(ir)
+    except C2AError as exc:
+        _abort(exc)
+    typer.echo(
+        json.dumps(
+            {
+                "source_id": ir.metadata.source_id,
+                "assessment": assessment.model_dump(mode="json"),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
 
 
 @app.command("templates")

@@ -6,6 +6,7 @@
   <meta name="c2a-csrf" content="{{ csrf_token }}">
   <title>C2A · Tachi 转 Aidoku</title>
   <meta name="description" content="在本机分析、生成并验证 Aidoku 源。">
+  <link rel="icon" href="{{ url_for('static', path='/favicon.svg') }}" type="image/svg+xml">
   <link rel="stylesheet" href="{{ url_for('static', path='/app.css') }}">
   <script src="{{ url_for('static', path='/app.js') }}" defer></script>
 </head>
@@ -101,6 +102,18 @@
               <span id="source-format"></span>
             </div>
             <p class="source-url" id="source-url"></p>
+            <div class="assessment-summary" id="assessment-summary">
+              <div class="assessment-heading">
+                <span><i aria-hidden="true"></i><strong id="assessment-label">正在评估</strong></span>
+                <b id="assessment-score">–</b>
+              </div>
+              <div class="assessment-track"><span id="assessment-bar"></span></div>
+              <div class="token-budget" id="token-budget">
+                <div><span>首轮 Prompt</span><strong id="initial-token-budget">–</strong></div>
+                <div><span>建议总预算</span><strong id="total-token-budget">–</strong></div>
+              </div>
+              <ul class="assessment-findings" id="assessment-findings"></ul>
+            </div>
             <div class="capabilities" id="capabilities"></div>
             <dl class="facts">
               <div><dt>证据文件</dt><dd id="source-files">–</dd></div>
