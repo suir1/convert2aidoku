@@ -10,4 +10,8 @@ public final class FilterKt {
         new Tag("热门", "popular"),
         new Tag("更新时间", "datetime_updated")
     };
+    private static final Tag[] migrateFilter = {
+        new Tag("無", ""),
+        new Tag("源站收藏", "migrate")
+    };
 }

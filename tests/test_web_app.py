@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,6 +11,7 @@ from fastapi.testclient import TestClient
 from convert2aidoku.models import ConversionStatus
 from convert2aidoku.toolchain import ToolStatus
 from convert2aidoku.web_app import create_web_app
+from convert2aidoku.web_jobs import WebConversionRequest, WebJobManager
 
 FIXTURE = Path(__file__).parent / "fixtures" / "simple"
 
@@ -231,3 +233,39 @@ def test_job_resume_reuses_the_saved_request(web_client, monkeypatch: pytest.Mon
             break
         time.sleep(0.01)
     assert calls == [False, True]
+
+
+def test_running_job_exposes_ai_round_and_token_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    progressed = threading.Event()
+    release = threading.Event()
+
+    def fake_convert(_input_ref: str, **kwargs):
+        kwargs["progress"]("AI round 1 returned (59,799 tokens); validating")
+        progressed.set()
+        release.wait(timeout=5)
+        raise RuntimeError("stop after progress assertion")
+
+    monkeypatch.setenv("C2A_API_KEY", "web-secret")
+    monkeypatch.setattr("convert2aidoku.web_jobs.convert_source", fake_convert)
+    manager = WebJobManager(working_directory=tmp_path)
+    job = manager.submit(
+        WebConversionRequest(
+            input_ref="input.apk",
+            output="generated/example",
+            base_url="http://localhost/v1",
+            model="model",
+            consent=True,
+        )
+    )
+    assert progressed.wait(timeout=5)
+
+    snapshot = manager.snapshot(job.id)
+
+    release.set()
+    manager.shutdown()
+    assert snapshot.status == "running"
+    assert snapshot.ai_rounds == 1
+    assert snapshot.total_tokens == 59_799

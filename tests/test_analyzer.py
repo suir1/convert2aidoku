@@ -452,10 +452,15 @@ def test_analyzes_decompiled_apk_as_public_only(
     assert sort.kind == "sort"
     assert sort.default_index == 1
     assert sort.default_ascending is True
+    assert "migrate" not in {item.id for item in ir.filter_specs}
     assert {"Accept", "Origin", "Version"} <= set(ir.header_names)
     assert any("login/authentication" in item for item in ir.unsupported_features)
     assert any("collection/bookcase" in item for item in ir.unsupported_features)
+    assert any("migration filter" in item for item in ir.unsupported_features)
     assert any("chapter comments" in item for item in ir.unsupported_features)
+    assert any("WebView login/navigation" in item for item in ir.unsupported_features)
+    assert any("Android ChineseUtils" in item for item in ir.unsupported_features)
+    assert any("library-update chapter hiding" in item for item in ir.unsupported_features)
 
 
 def test_decompiled_apk_reports_optional_anti_watermark_cleanup() -> None:

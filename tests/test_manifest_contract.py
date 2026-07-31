@@ -593,3 +593,35 @@ def test_decompiled_enum_setting_names_are_projected_to_storage_values() -> None
     setting = json.loads(settings_file.content)[0]["items"][0]
     assert setting["values"] == ["api.example", "api2.example", "custom"]
     assert setting["default"] == "api.example"
+
+
+def test_public_only_decompiled_settings_exclude_non_reading_preferences() -> None:
+    ir = minimal_source_ir(source_format="decompiled_apk", feature_scope="public_only")
+    manifest = _manifest("struct Source;")
+    manifest.files.append(
+        GeneratedFile(
+            path="res/settings.json",
+            content="""[
+                {"type":"group","items":[
+                    {"type":"select","key":"v2.pref.api_domain","title":"API Domain",
+                     "values":["api.example"],"default":"api.example"},
+                    {"type":"text","key":"v2.pref.web_view_link","title":"WebView Link"},
+                    {"type":"text","key":"v2.pref.web_view_link_custom","title":"WebView Custom"},
+                    {"type":"select","key":"v2.pref.web_view_client","title":"WebView Client",
+                     "values":["desktop"],"default":"desktop"},
+                    {"type":"select","key":"v2.pref.lan_option","title":"Chinese Script",
+                     "values":["default"],"default":"default"},
+                    {"type":"text","key":"v2.key.hide_default_continuous_chapter",
+                     "title":"Shelf Update Workaround"},
+                    {"type":"select","key":"v2.pref.resolution","title":"Resolution",
+                     "values":["1500"],"default":"1500"}
+                ]}
+            ]""",
+        )
+    )
+
+    normalized = normalize_decompiled_setting_manifest(ir, manifest)
+
+    settings_file = next(file for file in normalized.files if file.path == "res/settings.json")
+    keys = [item["key"] for item in json.loads(settings_file.content)[0]["items"]]
+    assert keys == ["v2.pref.api_domain", "v2.pref.resolution"]

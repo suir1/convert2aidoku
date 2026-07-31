@@ -36,6 +36,7 @@ from .models import (
     SourceIR,
     validate_generated_path,
 )
+from .public_only_scope import public_only_filter_exclusion
 from .rust_inspection import RustInspection
 
 _FORBIDDEN_GENERATED_TOKENS = (
@@ -2765,30 +2766,58 @@ def _normalize_discarded_enumerate_index(content: str) -> str:
 
 
 def _normalize_identical_if_branches(content: str) -> str:
-    replacements: list[tuple[str, str]] = []
-    for node in RustInspection.from_content(content).nodes("if_expression"):
-        condition = node.child_by_field_name("condition")
-        consequence = node.child_by_field_name("consequence")
-        alternative = node.child_by_field_name("alternative")
-        if condition is None or consequence is None or alternative is None:
-            continue
-        alternative_blocks = [
-            child for child in alternative.named_children if child.type == "block"
-        ]
-        if consequence.type != "block" or len(alternative_blocks) != 1:
-            continue
-        alternative_block = alternative_blocks[0]
-        if RustInspection.compact_node(consequence) != RustInspection.compact_node(
-            alternative_block
-        ):
-            continue
-        original = node.text.decode("utf-8", errors="replace")
-        condition_text = condition.text.decode("utf-8", errors="replace")
-        branch = consequence.text.decode("utf-8", errors="replace")[1:-1].strip()
-        replacements.append((original, f"{{ let _ = {condition_text}; {branch} }}"))
-    for original, replacement in replacements:
-        content = content.replace(original, replacement, 1)
-    return content
+    while True:
+        replacement: tuple[str, str] | None = None
+        for node in RustInspection.from_content(content).nodes("if_expression"):
+            condition = node.child_by_field_name("condition")
+            consequence = node.child_by_field_name("consequence")
+            alternative = node.child_by_field_name("alternative")
+            if condition is None or consequence is None or alternative is None:
+                continue
+            if consequence.type != "block":
+                continue
+            original = node.text.decode("utf-8", errors="replace")
+            condition_text = condition.text.decode("utf-8", errors="replace")
+            nested_ifs = [
+                child for child in alternative.named_children if child.type == "if_expression"
+            ]
+            if len(nested_ifs) == 1:
+                nested = nested_ifs[0]
+                nested_condition = nested.child_by_field_name("condition")
+                nested_consequence = nested.child_by_field_name("consequence")
+                nested_alternative = nested.child_by_field_name("alternative")
+                if (
+                    nested_condition is not None
+                    and nested_consequence is not None
+                    and nested_consequence.type == "block"
+                    and RustInspection.compact_node(consequence)
+                    == RustInspection.compact_node(nested_consequence)
+                ):
+                    combined = (
+                        f"if ({condition_text}) || "
+                        f"({nested_condition.text.decode('utf-8', errors='replace')}) "
+                        f"{consequence.text.decode('utf-8', errors='replace')}"
+                    )
+                    if nested_alternative is not None:
+                        combined += " " + nested_alternative.text.decode("utf-8", errors="replace")
+                    replacement = (original, combined)
+                    break
+            alternative_blocks = [
+                child for child in alternative.named_children if child.type == "block"
+            ]
+            if len(alternative_blocks) != 1:
+                continue
+            alternative_block = alternative_blocks[0]
+            if RustInspection.compact_node(consequence) != RustInspection.compact_node(
+                alternative_block
+            ):
+                continue
+            branch = consequence.text.decode("utf-8", errors="replace")[1:-1].strip()
+            replacement = (original, f"{{ let _ = {condition_text}; {branch} }}")
+            break
+        if replacement is None:
+            return content
+        content = content.replace(*replacement, 1)
 
 
 def _normalize_filter_match_predicate(content: str) -> str:
@@ -4865,6 +4894,55 @@ def _project_recovered_dynamic_filters(
     return updated
 
 
+def _prune_public_only_dynamic_filters(
+    ir: SourceIR,
+    files: list[GeneratedFile],
+) -> list[GeneratedFile]:
+    if ir.feature_scope != "public_only":
+        return files
+    updated: list[GeneratedFile] = []
+    for generated in files:
+        content = generated.content
+        if not generated.path.endswith(".rs"):
+            updated.append(generated)
+            continue
+        replacements: list[str] = []
+        for function in RustInspection.from_content(content).named("get_dynamic_filters"):
+            for call in RustInspection.from_content(function.text).nodes("call_expression"):
+                callee = call.child_by_field_name("function")
+                arguments = call.child_by_field_name("arguments")
+                if (
+                    callee is None
+                    or arguments is None
+                    or not RustInspection.compact_node(callee).endswith(".push")
+                ):
+                    continue
+                argument = arguments.text.decode("utf-8", errors="replace")
+                filter_id = re.search(r'\bid\s*:\s*(?P<value>"(?:\\.|[^"\\])*")', argument)
+                title = re.search(
+                    r'\btitle\s*:\s*Some\(\s*(?P<value>"(?:\\.|[^"\\])*")',
+                    argument,
+                )
+                if filter_id is None or title is None:
+                    continue
+                identifier = json.loads(filter_id.group("value"))
+                label = json.loads(title.group("value"))
+                if public_only_filter_exclusion(f"{identifier}Filter", label) is None:
+                    continue
+                statement = call.parent
+                if statement is None or statement.type != "expression_statement":
+                    continue
+                replacements.append(statement.text.decode("utf-8", errors="replace"))
+        for original in replacements:
+            content = content.replace(original, "", 1)
+        updated.append(
+            generated.model_copy(update={"content": content})
+            if content != generated.content
+            else generated
+        )
+    return updated
+
+
 def _project_recovered_dynamic_filter_queries(
     ir: SourceIR,
     files: list[GeneratedFile],
@@ -4988,6 +5066,7 @@ def normalize_generation_manifest(
         source_struct=manifest.source_struct,
         implemented_traits=implemented_traits,
     )
+    seeded_files = _prune_public_only_dynamic_filters(ir, seeded_files)
     seeded_files = _project_recovered_rank_item_wrapper(ir, seeded_files)
     files = []
     changed = any(

@@ -16,6 +16,7 @@ from .decompiled_input import (
 )
 from .dependency_policy import evaluate_dependency_policy
 from .models import Capability, GeneratedResources, GenerationManifest, SourceIR
+from .public_only_scope import public_only_setting_exclusion
 from .rust_inspection import RustInspection
 
 RepairKind = Literal[
@@ -489,9 +490,6 @@ def normalize_decompiled_setting_manifest(
         }
         if values:
             enum_values[key_match.group(1)] = values
-    if not enum_values:
-        return manifest
-
     files = []
     changed = False
     for generated in manifest.files:
@@ -516,10 +514,31 @@ def normalize_decompiled_setting_manifest(
                         default = item.get("default")
                         if isinstance(default, str) and default in mapping:
                             item["default"] = mapping[default]
+            if ir.feature_scope == "public_only":
+                data = _without_public_only_settings(data)
             content = json.dumps(data, ensure_ascii=False, indent="\t") + "\n"
         changed |= content != generated.content
         files.append(generated.model_copy(update={"content": content}))
     return manifest.model_copy(update={"files": files}) if changed else manifest
+
+
+def _without_public_only_settings(items: list[object]) -> list[object]:
+    retained: list[object] = []
+    for raw_item in items:
+        if not isinstance(raw_item, dict):
+            retained.append(raw_item)
+            continue
+        key = raw_item.get("key")
+        if isinstance(key, str) and public_only_setting_exclusion(key) is not None:
+            continue
+        item = dict(raw_item)
+        children = item.get("items")
+        if isinstance(children, list):
+            item["items"] = _without_public_only_settings(children)
+            if item.get("type") in {"group", "page"} and not item["items"]:
+                continue
+        retained.append(item)
+    return retained
 
 
 def _normalize_decompiled_dto_content(

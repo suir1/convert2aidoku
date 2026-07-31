@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import threading
 import time
 import uuid
@@ -24,6 +25,7 @@ WebJobStatus = Literal[
     "failed",
 ]
 TERMINAL_WEB_JOB_STATUSES = frozenset({"verified", "build_only", "blocked", "failed"})
+_AI_TOKEN_PROGRESS = re.compile(r"AI round (?P<round>\d+) returned \((?P<tokens>[\d,]+) tokens\)")
 
 
 class WebConversionRequest(BaseModel):
@@ -76,13 +78,16 @@ class _WebJob:
     updated_at: float = field(default_factory=time.time)
     outcome: ConversionOutcome | None = None
     error: str | None = None
+    ai_usage_by_round: dict[int, int] = field(default_factory=dict)
 
     def snapshot(self) -> WebJobSnapshot:
         report = self.outcome.report if self.outcome is not None else None
         rounds = report.ai_rounds if report is not None else []
-        total_tokens = sum(
+        report_tokens = sum(
             item.usage.total_tokens or 0 for item in rounds if item.usage is not None
         )
+        ai_rounds = max(len(rounds), len(self.ai_usage_by_round))
+        total_tokens = report_tokens or sum(self.ai_usage_by_round.values())
         artifacts: dict[str, str] = {}
         if self.outcome is not None:
             output = self.outcome.output
@@ -106,7 +111,7 @@ class _WebJob:
             updated_at=self.updated_at,
             input_ref=self.request.input_ref,
             output=self.request.output,
-            ai_rounds=len(rounds),
+            ai_rounds=ai_rounds,
             total_tokens=total_tokens,
             error=self.error,
             artifacts=artifacts,
@@ -191,6 +196,10 @@ class WebJobManager:
                 if not job.logs or job.logs[-1] != message:
                     job.logs.append(message)
                     job.logs = job.logs[-80:]
+                    if match := _AI_TOKEN_PROGRESS.search(message):
+                        job.ai_usage_by_round[int(match.group("round"))] = int(
+                            match.group("tokens").replace(",", "")
+                        )
             if error is not None:
                 job.error = error
             if outcome is not None:

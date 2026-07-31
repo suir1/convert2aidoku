@@ -552,6 +552,27 @@ fn chapter_key(info: Info) -> String {
     assert normalize_pinned_aidoku_rust(normalized) == normalized
 
 
+def test_normalizer_merges_adjacent_identical_else_if_branches() -> None:
+    content = """
+fn user_agent(value: String) -> String {
+    if value.is_empty() || value == "none" {
+        DEFAULT_USER_AGENT.into()
+    } else if value == "reset" {
+        DEFAULT_USER_AGENT.into()
+    } else {
+        value
+    }
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert normalized.count("DEFAULT_USER_AGENT.into()") == 1
+    assert 'value == "reset"' in normalized
+    assert "else {\n        value\n    }" in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
 def test_normalizer_repairs_dynamic_header_and_option_date_fallback() -> None:
     content = """
 fn request(request: Request, cookie: String) -> Request {
@@ -1928,6 +1949,47 @@ fn get_dynamic_filters(&self) -> Result<Vec<Filter>> {
     assert 'id: "status".into()' in source
     assert 'ids: Some(aidoku::alloc::vec!["".into(), "END".into()])' in source
     assert "let mut c2a_filters" in source
+    assert normalize_generation_manifest(ir, normalized) == normalized
+
+
+def test_manifest_prunes_authenticated_migration_filter_from_public_only_provider(
+    tmp_path: Path,
+) -> None:
+    _project, ir = scaffold_project(tmp_path)
+    ir = ir.model_copy(update={"feature_scope": "public_only"})
+    manifest = GenerationManifest(
+        source_struct="Simple",
+        implemented_traits=["DynamicFilters"],
+        files=[
+            GeneratedFile(path="src/lib.rs", content="#![no_std]\n"),
+            GeneratedFile(
+                path="src/source.rs",
+                content="""
+fn get_dynamic_filters(&self) -> Result<Vec<Filter>> {
+    let mut c2a_filters = vec![aidoku::SelectFilter {
+        id: "theme".into(),
+        title: Some("Theme".into()),
+        options: vec!["All".into()],
+        ..Default::default()
+    }.into()];
+    c2a_filters.push(aidoku::SelectFilter {
+        id: "migrate".into(),
+        title: Some("源站书柜 (需登入)".into()),
+        options: vec!["None".into(), "Collection".into()],
+        ..Default::default()
+    }.into());
+    Ok(c2a_filters)
+}
+""",
+            ),
+        ],
+    )
+
+    normalized = normalize_generation_manifest(ir, manifest)
+    source = next(item.content for item in normalized.files if item.path == "src/source.rs")
+
+    assert 'id: "theme".into()' in source
+    assert 'id: "migrate".into()' not in source
     assert normalize_generation_manifest(ir, normalized) == normalized
 
 

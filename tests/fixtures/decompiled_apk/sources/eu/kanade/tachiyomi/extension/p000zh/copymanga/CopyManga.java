@@ -25,7 +25,7 @@ public final class CopyManga extends HttpSource implements ConfigurableSource {
     protected SManga mangaDetailsParse(Response response) { return decodeFromString(response.body().string()); }
     public Observable fetchChapterList(SManga manga) { return Observable.just(ApiRepo.INSTANCE.chapterListUrl(manga.getUrl())); }
     public Observable fetchPageList(SChapter chapter) { ContentResult result = decodeFromString("{}"); return result.pages(); }
-    public FilterList getFilterList() { return new FilterList(); }
+    public FilterList getFilterList() { return new FilterList(new MigrateFilter()); }
     public void resetThemeFilter() { ApiRepo.INSTANCE.tagList(); }
     public String getMangaUrl(SManga manga) { return manga.getUrl(); }
     public String getChapterUrl(SChapter chapter) { return chapter.getUrl(); }
@@ -35,5 +35,8 @@ public final class CopyManga extends HttpSource implements ConfigurableSource {
         TokenProvider.login();
         ApiRepo.INSTANCE.memberCollectUrl(1);
         ApiRepo.INSTANCE.chapterCommentUrl("id");
+        String webViewLink = "v2.pref.web_view_link";
+        String languageOption = "v2.pref.lan_option";
+        String shelfWorkaround = "v2.key.hide_default_continuous_chapter";
     }
 }

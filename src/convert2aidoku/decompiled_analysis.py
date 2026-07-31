@@ -21,6 +21,10 @@ from .models import (
     SourceIR,
     SourceMetadata,
 )
+from .public_only_scope import (
+    public_only_filter_exclusion,
+    public_only_setting_exclusions,
+)
 
 
 def _java_string_array(content: str) -> list[str]:
@@ -324,6 +328,26 @@ def analyze_decompiled_source(resolved: ResolvedSource) -> SourceIR:
         warnings.append("no input license was found beside the APK")
 
     license_name, license_text = input_license(resolved)
+    filter_specs = _java_filter_specs(java)
+    excluded_filter_features = [
+        reason
+        for spec in filter_specs
+        if (reason := public_only_filter_exclusion(spec.source_class, spec.title)) is not None
+    ]
+    filter_specs = [
+        spec
+        for spec in filter_specs
+        if public_only_filter_exclusion(spec.source_class, spec.title) is None
+    ]
+    unsupported_features = list(
+        dict.fromkeys(
+            [
+                *_apk_optional_features(java),
+                *excluded_filter_features,
+                *public_only_setting_exclusions(java),
+            ]
+        )
+    )
     return SourceIR(
         input_ref=resolved.input_ref,
         commit=resolved.commit,
@@ -348,10 +372,10 @@ def analyze_decompiled_source(resolved: ResolvedSource) -> SourceIR:
         relative_url_keys=("url2comicPath" in java or "setUrlWithoutDomain" in java),
         chapter_page_routes=_java_chapter_page_routes(java),
         image_url_policy=_java_image_url_policy(java),
-        filter_specs=_java_filter_specs(java),
+        filter_specs=filter_specs,
         files=files,
         license_name=license_name,
         license_text=license_text,
         warnings=warnings,
-        unsupported_features=_apk_optional_features(java),
+        unsupported_features=unsupported_features,
     )
