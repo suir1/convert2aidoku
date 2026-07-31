@@ -13,7 +13,8 @@ from .implementation_ir import (
     ImplementationIR,
     ListingContainerIR,
     ListingEndpointIR,
-    ListingRole,
+    ListingImplementationIR,
+    ListingProviderIR,
     MangaMappingIR,
     project_implementation_ir,
 )
@@ -80,6 +81,12 @@ class _EndpointView:
 
 
 @dataclass(frozen=True)
+class _ConditionalRouteView:
+    endpoint: _EndpointView
+    condition_expression: str
+
+
+@dataclass(frozen=True)
 class _HeaderProfileView:
     domains: tuple[str, ...]
     headers: tuple[tuple[str, str], ...]
@@ -101,6 +108,32 @@ def _provider_is_complete(ir: SourceIR, implementation: ImplementationIR) -> boo
     if Capability.LATEST in ir.capabilities and provider.latest is None:
         return False
     return Capability.POPULAR in ir.capabilities or Capability.LATEST in ir.capabilities
+
+
+def _selected_endpoint_ids(
+    listing: ListingImplementationIR,
+    provider: ListingProviderIR | None,
+) -> tuple[str, ...]:
+    dispatch = listing.search_dispatch
+    if dispatch is None:
+        raise ValueError("Implementation IR has no deterministic search dispatch")
+    provider_ids: list[str] = []
+    if provider is not None:
+        if provider.popular_endpoint_id is not None:
+            provider_ids.append(provider.popular_endpoint_id)
+        if provider.latest is not None:
+            provider_ids.extend(provider.latest.endpoint_ids_by_setting_value.values())
+            provider_ids.append(provider.latest.default_endpoint_id)
+    return tuple(
+        dict.fromkeys(
+            [
+                dispatch.query_endpoint_id,
+                *(route.endpoint_id for route in dispatch.conditional_routes),
+                dispatch.default_endpoint_id,
+                *provider_ids,
+            ]
+        )
+    )
 
 
 _RUST_KEYWORDS = {
@@ -204,20 +237,6 @@ def _field(shape: DataShapeIR, path: str) -> DataFieldIR:
     if found is None:
         raise ValueError(f"Implementation IR shape {shape.name} has no field {root}")
     return found
-
-
-def _endpoint_for_role(
-    endpoints: list[ListingEndpointIR],
-    role: ListingRole,
-    *,
-    required: bool,
-) -> ListingEndpointIR | None:
-    matches = [endpoint for endpoint in endpoints if endpoint.role == role]
-    if len(matches) == 1:
-        return matches[0]
-    if not matches and not required:
-        return None
-    raise ValueError(f"deterministic search listing requires exactly one {role.value} endpoint")
 
 
 def _filter_default(spec: SourceFilterSpec | None) -> str:
@@ -527,23 +546,21 @@ def render_search_listing(
     listing = implementation.listing
     if listing is None:
         raise ValueError("Implementation IR has no deterministic listing slice")
-    search = _endpoint_for_role(listing.endpoints, ListingRole.SEARCH, required=True)
-    browse = _endpoint_for_role(listing.endpoints, ListingRole.BROWSE, required=True)
-    rank = _endpoint_for_role(listing.endpoints, ListingRole.RANK, required=False)
-    assert search is not None and browse is not None
+    dispatch = listing.search_dispatch
+    if dispatch is None:
+        raise ValueError("Implementation IR has no deterministic search dispatch")
     provider = listing.provider if _provider_is_complete(ir, implementation) else None
     endpoints_by_id = {endpoint.id: endpoint for endpoint in listing.endpoints}
-    provider_endpoint_ids: list[str] = []
-    if provider is not None:
-        if provider.popular_endpoint_id is not None:
-            provider_endpoint_ids.append(provider.popular_endpoint_id)
-        if provider.latest is not None:
-            provider_endpoint_ids.extend(provider.latest.endpoint_ids_by_setting_value.values())
-            provider_endpoint_ids.append(provider.latest.default_endpoint_id)
-    selected_ids = dict.fromkeys(
-        [search.id, *([rank.id] if rank else []), browse.id, *provider_endpoint_ids]
-    )
+    selected_ids = _selected_endpoint_ids(listing, provider)
     selected = [endpoints_by_id[endpoint_id] for endpoint_id in selected_ids]
+    low_confidence = [
+        endpoint.id for endpoint in selected if endpoint.response_evidence == "name_match"
+    ]
+    if low_confidence:
+        raise ValueError(
+            "deterministic listing requires parser evidence for endpoints: "
+            + ", ".join(low_confidence)
+        )
     if listing.api_base.default_host is None:
         raise ValueError("deterministic listing renderer requires a default API host")
     containers = {container.type_name: container for container in listing.containers}
@@ -562,17 +579,17 @@ def render_search_listing(
         ir,
         listing.api_base.default_host,
     )
-    rank_filter = (
-        next(
-            (
-                parameter.value_template.removeprefix("{filter:").removesuffix("}")
-                for parameter in rank.query_parameters
-                if parameter.source == "filter" and parameter.value_template == "{filter:rank}"
+    conditional_routes = tuple(
+        _ConditionalRouteView(
+            endpoint=views_by_id[route.endpoint_id],
+            condition_expression=" || ".join(
+                "selected_value(&filters, "
+                f"{_quoted(activation.filter_id)}).is_some_and(|value| "
+                f"value != {_quoted(activation.default_value)})"
+                for activation in route.activate_when_any
             ),
-            None,
         )
-        if rank is not None
-        else None
+        for route in dispatch.conditional_routes
     )
     content = (
         _environment()
@@ -589,10 +606,9 @@ def render_search_listing(
             structs=_required_structs(selected, containers, mappings, shapes),
             mappings=sorted(mapping_views, key=lambda item: item.type_name),
             endpoints=views,
-            search_endpoint=views_by_id[search.id],
-            rank_endpoint=views_by_id[rank.id] if rank else None,
-            browse_endpoint=views_by_id[browse.id],
-            rank_filter=rank_filter,
+            query_endpoint=views_by_id[dispatch.query_endpoint_id],
+            conditional_routes=conditional_routes,
+            default_endpoint=views_by_id[dispatch.default_endpoint_id],
             popular_endpoint=(
                 views_by_id[provider.popular_endpoint_id]
                 if provider is not None and provider.popular_endpoint_id is not None
@@ -653,22 +669,12 @@ def search_listing_ownership(ir: SourceIR) -> SearchListingOwnership | None:
         listing = implementation.listing
         if listing is None:
             return None
-        search = _endpoint_for_role(listing.endpoints, ListingRole.SEARCH, required=True)
-        browse = _endpoint_for_role(listing.endpoints, ListingRole.BROWSE, required=True)
-        rank = _endpoint_for_role(listing.endpoints, ListingRole.RANK, required=False)
-        assert search is not None and browse is not None
+        dispatch = listing.search_dispatch
+        if dispatch is None:
+            return None
         provider = listing.provider if _provider_is_complete(ir, implementation) else None
         endpoints_by_id = {endpoint.id: endpoint for endpoint in listing.endpoints}
-        provider_endpoint_ids: list[str] = []
-        if provider is not None:
-            if provider.popular_endpoint_id is not None:
-                provider_endpoint_ids.append(provider.popular_endpoint_id)
-            if provider.latest is not None:
-                provider_endpoint_ids.extend(provider.latest.endpoint_ids_by_setting_value.values())
-                provider_endpoint_ids.append(provider.latest.default_endpoint_id)
-        selected_ids = dict.fromkeys(
-            [search.id, *([rank.id] if rank else []), browse.id, *provider_endpoint_ids]
-        )
+        selected_ids = _selected_endpoint_ids(listing, provider)
         selected = [endpoints_by_id[endpoint_id] for endpoint_id in selected_ids]
         containers = {container.type_name: container for container in listing.containers}
         mappings = {mapping.item_type: mapping for mapping in listing.manga_mappings}

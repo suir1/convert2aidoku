@@ -201,22 +201,22 @@ pub(crate) fn get_search_manga_list(
 ) -> Result<MangaPageResult> {
     let query = query.unwrap_or_default();
     if !query.is_empty() {
-        return {{ search_endpoint.fetch_function }}({{ search_endpoint.url_function }}(
+        return {{ query_endpoint.fetch_function }}({{ query_endpoint.url_function }}(
             &query,
             page,
             &filters,
         ));
     }
-{% if rank_endpoint and rank_filter %}
-    if selected_value(&filters, {{ rank_filter | rust_string }}).is_some_and(|value| !value.is_empty()) {
-        return {{ rank_endpoint.fetch_function }}({{ rank_endpoint.url_function }}(
+{% for route in conditional_routes %}
+    if {{ route.condition_expression }} {
+        return {{ route.endpoint.fetch_function }}({{ route.endpoint.url_function }}(
             &query,
             page,
             &filters,
         ));
     }
-{% endif %}
-    {{ browse_endpoint.fetch_function }}({{ browse_endpoint.url_function }}(&query, page, &filters))
+{% endfor %}
+    {{ default_endpoint.fetch_function }}({{ default_endpoint.url_function }}(&query, page, &filters))
 }
 {% if popular_endpoint or latest_endpoint %}
 

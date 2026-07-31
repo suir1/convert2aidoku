@@ -103,6 +103,15 @@ def _copymanga_listing_files() -> list[SourceFile]:
                 protected Request popularMangaRequest(int page) {
                     return GET(ApiRepo.INSTANCE.recommendPageUrl(page));
                 }
+                protected MangasPage popularMangaParse(Response response) {
+                    if (contains(response.url(), "/api/v3/comics")) {
+                        Reflection.typeOf(
+                            ApiResponse.class,
+                            Reflection.typeOf(RecommendResult.class)
+                        );
+                    }
+                    return page;
+                }
                 protected Request latestUpdatesRequest(int page) {
                     int mode = latestMode();
                     if (mode == 1) {
@@ -112,6 +121,21 @@ def _copymanga_listing_files() -> list[SourceFile]:
                         return GET(ApiRepo.INSTANCE.newestPageUrl_update(page));
                     }
                     throw new NoWhenBranchMatchedException();
+                }
+                protected MangasPage latestUpdatesParse(Response response) {
+                    if (contains(response.url(), "/api/v3/update/newest")) {
+                        Reflection.typeOf(
+                            ApiResponse.class,
+                            Reflection.typeOf(NewestResult.class)
+                        );
+                    }
+                    if (contains(response.url(), "/api/v3/comics")) {
+                        Reflection.typeOf(
+                            ApiResponse.class,
+                            Reflection.typeOf(ComicsListResult.class)
+                        );
+                    }
+                    return page;
                 }
                 protected MangasPage searchMangaParse(Response response) {
                     if (contains(response.url(), "/api/v3/search/comic")) {
@@ -134,7 +158,7 @@ def _copymanga_listing_files() -> list[SourceFile]:
                             "q_type",
                             FilterKt.getTypeFilter()[typeIndex].getPathWord()
                         );
-                    } else if (rank > 0) {
+                    } else if (rankIndex > 0 || audienceIndex > 0) {
                         builder = get(ApiRepo.INSTANCE.comicRankUrl(page)).newBuilder();
                         builder.addQueryParameter(
                             "date_type",
@@ -331,6 +355,16 @@ def _serializable_listing_files() -> list[SourceFile]:
             "sources/example/Example.java",
             """
             public final class Example extends HttpSource {
+                protected Request searchMangaRequest(
+                    int page,
+                    String query,
+                    FilterList filters
+                ) {
+                    if (!query.isBlank()) {
+                        return GET(ApiRepo.INSTANCE.searchUrl(page, query));
+                    }
+                    return GET(ApiRepo.INSTANCE.comicListUrl(page));
+                }
                 protected MangasPage searchMangaParse(Response response) {
                     Reflection.typeOf(ComicList.class);
                     return page;
@@ -382,16 +416,19 @@ def _copymanga_filter_specs() -> list[SourceFilterSpec]:
             id=filter_id,
             title=filter_id,
             kind="sort" if filter_id == "sort" else "select",
-            options=[SourceFilterOption(title="Default", value=value)],
+            options=[
+                SourceFilterOption(title="Default", value=default_value),
+                SourceFilterOption(title="Alternative", value=alternative),
+            ],
             default_ascending=True if filter_id == "sort" else None,
         )
-        for source_name, filter_id, value in (
-            ("Type", "type", "name"),
-            ("Rank", "rank", "day"),
-            ("Audience", "audience", "male"),
-            ("Region", "region", "japan"),
-            ("FreeType", "free_type", "1"),
-            ("Sort", "sort", "datetime_updated"),
+        for source_name, filter_id, default_value, alternative in (
+            ("Type", "type", "", "name"),
+            ("Rank", "rank", "", "day"),
+            ("Audience", "audience", "male", "female"),
+            ("Region", "region", "", "japan"),
+            ("FreeType", "free_type", "", "1"),
+            ("Sort", "sort", "datetime_updated", "popular"),
         )
     ]
 
@@ -464,6 +501,8 @@ def test_projects_copymanga_listing_contract_without_provider() -> None:
     assert endpoints["searchUrl"].response_evidence == "parser_path"
     assert endpoints["comicRankUrl"].response_type == "RankResult"
     assert endpoints["comicListUrl"].response_type == "ComicsListResult"
+    assert endpoints["recommendPageUrl"].response_type == "RecommendResult"
+    assert endpoints["recommendPageUrl"].response_evidence == "parser_call"
     assert listing.provider is not None
     assert listing.provider.popular_endpoint_id == "recommend_page"
     assert listing.provider.latest == ListingSelectionIR(
@@ -475,6 +514,13 @@ def test_projects_copymanga_listing_contract_without_provider() -> None:
             "latest_update.latest_update": "newest_page_url_update",
         },
     )
+    assert listing.search_dispatch is not None
+    assert listing.search_dispatch.query_endpoint_id == "search"
+    assert listing.search_dispatch.default_endpoint_id == "comic_list"
+    assert [
+        (activation.filter_id, activation.default_value)
+        for activation in listing.search_dispatch.conditional_routes[0].activate_when_any
+    ] == [("rank", ""), ("audience", "male")]
 
     containers = {container.type_name: container for container in listing.containers}
     assert "ChapterListResult" not in containers
@@ -587,6 +633,130 @@ def test_required_filter_without_contract_prevents_deterministic_ownership() -> 
         render_search_listing(ir, implementation)
 
 
+def test_search_dispatch_does_not_depend_on_rank_filter_id() -> None:
+    specs = [
+        spec.model_copy(update={"id": "period"}) if spec.source_class == "RankFilter" else spec
+        for spec in _copymanga_filter_specs()
+    ]
+    ir = minimal_source_ir(
+        source_id="zh.example",
+        source_format="decompiled_apk",
+        main_class="CopyManga",
+        files=_copymanga_listing_files(),
+        filter_specs=specs,
+    )
+
+    implementation = project_implementation_ir(ir)
+    rendered = render_search_listing(ir, implementation)
+
+    assert implementation.listing is not None
+    assert implementation.listing.search_dispatch is not None
+    route = implementation.listing.search_dispatch.conditional_routes[0]
+    assert [activation.filter_id for activation in route.activate_when_any] == [
+        "period",
+        "audience",
+    ]
+    assert 'selected_value(&filters, "period")' in rendered.content
+    assert 'selected_value(&filters, "audience")' in rendered.content
+
+
+def test_search_dispatch_uses_branch_filters_not_endpoint_parameters() -> None:
+    files = _copymanga_listing_files()
+    source = next(file for file in files if file.path.endswith("CopyManga.java"))
+    source.content = source.content.replace(
+        "rankIndex > 0 || audienceIndex > 0",
+        "rankIndex > 0",
+    )
+    source.sha256 = hashlib.sha256(source.content.encode()).hexdigest()
+    ir = minimal_source_ir(
+        source_id="zh.example",
+        source_format="decompiled_apk",
+        main_class="CopyManga",
+        files=files,
+        filter_specs=_copymanga_filter_specs(),
+    )
+
+    implementation = project_implementation_ir(ir)
+    rendered = render_search_listing(ir, implementation)
+
+    assert implementation.listing is not None
+    assert implementation.listing.search_dispatch is not None
+    route = implementation.listing.search_dispatch.conditional_routes[0]
+    assert [activation.filter_id for activation in route.activate_when_any] == ["rank"]
+    dispatch = rendered.content.split("pub(crate) fn get_search_manga_list", 1)[1]
+    assert 'selected_value(&filters, "rank")' in dispatch
+    assert 'selected_value(&filters, "audience")' not in dispatch
+
+
+@pytest.mark.parametrize(
+    "condition",
+    ["rankIndex == 0", "rankIndex > 0 && audienceIndex > 0"],
+)
+def test_search_dispatch_rejects_unsupported_branch_semantics(condition: str) -> None:
+    files = _copymanga_listing_files()
+    source = next(file for file in files if file.path.endswith("CopyManga.java"))
+    source.content = source.content.replace(
+        "rankIndex > 0 || audienceIndex > 0",
+        condition,
+    )
+    source.sha256 = hashlib.sha256(source.content.encode()).hexdigest()
+    ir = minimal_source_ir(
+        source_id="zh.example",
+        source_format="decompiled_apk",
+        main_class="CopyManga",
+        files=files,
+        filter_specs=_copymanga_filter_specs(),
+    )
+
+    implementation = project_implementation_ir(ir)
+
+    assert implementation.listing is not None
+    assert implementation.listing.search_dispatch is None
+    assert "listing search dispatch is unresolved" in implementation.unresolved_facts
+    with pytest.raises(ValueError, match="no deterministic search dispatch"):
+        render_search_listing(ir, implementation)
+
+
+def test_search_dispatch_rejects_blank_query_branch() -> None:
+    files = _copymanga_listing_files()
+    source = next(file for file in files if file.path.endswith("CopyManga.java"))
+    source.content = source.content.replace("!query.isBlank()", "query.isBlank()")
+    source.sha256 = hashlib.sha256(source.content.encode()).hexdigest()
+    ir = minimal_source_ir(
+        source_id="zh.example",
+        source_format="decompiled_apk",
+        main_class="CopyManga",
+        files=files,
+        filter_specs=_copymanga_filter_specs(),
+    )
+
+    implementation = project_implementation_ir(ir)
+
+    assert implementation.listing is not None
+    assert implementation.listing.search_dispatch is None
+    assert "listing search dispatch is unresolved" in implementation.unresolved_facts
+
+
+def test_search_dispatch_rejects_nonzero_default_index() -> None:
+    specs = [
+        spec.model_copy(update={"default_index": 1}) if spec.source_class == "RankFilter" else spec
+        for spec in _copymanga_filter_specs()
+    ]
+    ir = minimal_source_ir(
+        source_id="zh.example",
+        source_format="decompiled_apk",
+        main_class="CopyManga",
+        files=_copymanga_listing_files(),
+        filter_specs=specs,
+    )
+
+    implementation = project_implementation_ir(ir)
+
+    assert implementation.listing is not None
+    assert implementation.listing.search_dispatch is None
+    assert "listing search dispatch is unresolved" in implementation.unresolved_facts
+
+
 def test_projects_serializable_dtos_and_string_mappings_without_directory_assumptions() -> None:
     ir = minimal_source_ir(
         source_id="en.example",
@@ -694,6 +864,94 @@ def test_response_envelope_is_projected_from_generic_decode_evidence() -> None:
     assert "let response: SearchEnvelope = get_json(url)?;" in rendered.content
 
 
+def test_markerless_default_response_does_not_depend_on_dto_name() -> None:
+    files = _copymanga_listing_files()
+    for source in files:
+        source.content = source.content.replace("ComicsListResult", "BrowsePayload")
+        source.sha256 = hashlib.sha256(source.content.encode()).hexdigest()
+    ir = minimal_source_ir(
+        source_id="zh.example",
+        source_format="decompiled_apk",
+        main_class="CopyManga",
+        files=files,
+        filter_specs=_copymanga_filter_specs(),
+    )
+
+    implementation = project_implementation_ir(ir)
+    rendered = render_search_listing(ir, implementation)
+
+    assert implementation.listing is not None
+    browse = next(
+        endpoint
+        for endpoint in implementation.listing.endpoints
+        if endpoint.source_method == "comicListUrl"
+    )
+    assert browse.response_type == "BrowsePayload"
+    assert browse.response_evidence == "parser_default"
+    assert "let result = response.value;" in rendered.content
+
+
+def test_listing_intent_uses_request_calls_before_helper_names() -> None:
+    files = _copymanga_listing_files()
+    replacements = {
+        "searchUrl": "lookupEndpoint",
+        "comicRankUrl": "conditionalEndpoint",
+        "comicListUrl": "defaultEndpoint",
+        "/search/comic": "/lookup",
+        "/ranks": "/scoreboard",
+        '"/comics?': '"/catalog?',
+    }
+    for source in files:
+        for old, new in replacements.items():
+            source.content = source.content.replace(old, new)
+        source.sha256 = hashlib.sha256(source.content.encode()).hexdigest()
+    ir = minimal_source_ir(
+        source_id="zh.example",
+        source_format="decompiled_apk",
+        main_class="CopyManga",
+        files=files,
+        filter_specs=_copymanga_filter_specs(),
+    )
+
+    implementation = project_implementation_ir(ir)
+    rendered = render_search_listing(ir, implementation)
+
+    assert implementation.listing is not None
+    endpoints = {endpoint.source_method: endpoint for endpoint in implementation.listing.endpoints}
+    assert endpoints["lookupEndpoint"].role == ListingRole.SEARCH
+    assert endpoints["conditionalEndpoint"].role == ListingRole.RANK
+    assert endpoints["defaultEndpoint"].role == ListingRole.BROWSE
+    assert implementation.listing.search_dispatch is not None
+    assert implementation.listing.search_dispatch.query_endpoint_id == "lookup_endpoint"
+    assert implementation.listing.search_dispatch.default_endpoint_id == "default_endpoint"
+    assert 'api_url("/api/v3/lookup")' in rendered.content
+    assert 'api_url("/api/v3/catalog")' in rendered.content
+
+
+def test_name_only_response_match_cannot_authorize_deterministic_ownership() -> None:
+    ir = minimal_source_ir(
+        source_id="en.example",
+        source_format="decompiled_apk",
+        main_class="Example",
+        files=_serializable_listing_files(),
+    )
+    implementation = project_implementation_ir(ir)
+    assert implementation.listing is not None
+    listing = implementation.listing
+    endpoints = [
+        endpoint.model_copy(update={"response_evidence": "name_match"})
+        if endpoint.id == listing.search_dispatch.default_endpoint_id
+        else endpoint
+        for endpoint in listing.endpoints
+    ]
+    low_confidence = implementation.model_copy(
+        update={"listing": listing.model_copy(update={"endpoints": endpoints})}
+    )
+
+    with pytest.raises(ValueError, match="requires parser evidence"):
+        render_search_listing(ir, low_confidence)
+
+
 def test_kotlin_projection_keeps_unresolved_slot_explicit() -> None:
     implementation = project_implementation_ir(minimal_source_ir())
 
@@ -751,6 +1009,9 @@ def test_deterministic_search_listing_renderer_uses_only_projected_contract() ->
     assert 'push_query(&mut url, "q", query);' in rendered.content
     assert "fn comic_rank_url(" in rendered.content
     assert 'selected_value(&filters, "rank")' in rendered.content
+    assert 'value != ""' in rendered.content
+    assert 'selected_value(&filters, "audience")' in rendered.content
+    assert 'value != "male"' in rendered.content
     assert "fn comic_list_url(" in rendered.content
     assert "struct SearchResult" in rendered.content
     assert "struct RankResult" in rendered.content

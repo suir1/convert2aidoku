@@ -72,7 +72,16 @@ class ListingEndpointIR(BaseModel):
     query_parameters: list[QueryParameterIR] = Field(default_factory=list)
     pagination: PaginationIR | None = None
     response_type: str | None = None
-    response_evidence: Literal["parser_path", "parser_role", "name_match"] | None = None
+    response_evidence: (
+        Literal[
+            "parser_path",
+            "parser_call",
+            "parser_default",
+            "parser_role",
+            "name_match",
+        ]
+        | None
+    ) = None
 
     @model_validator(mode="after")
     def query_parameter_names_are_unique(self) -> ListingEndpointIR:
@@ -146,6 +155,28 @@ class ListingSelectionIR(BaseModel):
         return self
 
 
+class ListingFilterActivationIR(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    filter_id: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
+    default_value: str
+
+
+class ListingConditionalRouteIR(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    endpoint_id: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
+    activate_when_any: list[ListingFilterActivationIR] = Field(min_length=1)
+
+
+class ListingSearchDispatchIR(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query_endpoint_id: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
+    default_endpoint_id: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
+    conditional_routes: list[ListingConditionalRouteIR] = Field(default_factory=list)
+
+
 class ListingProviderIR(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -164,6 +195,7 @@ class ListingImplementationIR(BaseModel):
     data_shapes: list[DataShapeIR] = Field(default_factory=list)
     containers: list[ListingContainerIR] = Field(default_factory=list)
     manga_mappings: list[MangaMappingIR] = Field(default_factory=list)
+    search_dispatch: ListingSearchDispatchIR | None = None
     provider: ListingProviderIR | None = None
 
     @model_validator(mode="after")
@@ -181,6 +213,18 @@ class ListingImplementationIR(BaseModel):
         if len(mapping_types) != len(set(mapping_types)):
             raise ValueError("listing manga mapping item types must be unique")
         endpoint_ids = set(endpoint_ids)
+        dispatch_ids: set[str] = set()
+        if self.search_dispatch is not None:
+            dispatch_ids.add(self.search_dispatch.query_endpoint_id)
+            dispatch_ids.add(self.search_dispatch.default_endpoint_id)
+            dispatch_ids.update(
+                route.endpoint_id for route in self.search_dispatch.conditional_routes
+            )
+        if missing := dispatch_ids - endpoint_ids:
+            raise ValueError(
+                "listing search dispatch references unknown endpoints: "
+                + ", ".join(sorted(missing))
+            )
         provider_ids = set()
         if self.provider is not None:
             if self.provider.popular_endpoint_id is not None:
@@ -393,10 +437,60 @@ def _api_base(ir: SourceIR, java: str) -> ApiBaseIR:
     )
 
 
-def _listing_role(method_name: str, path: str) -> ListingRole | None:
+def _api_repo_method_calls(content: str) -> list[str]:
+    return re.findall(
+        r"ApiRepo\.INSTANCE\.([A-Za-z_][A-Za-z0-9_]*)\s*\(",
+        content,
+    )
+
+
+def _search_request_branches(search_block: str) -> list[tuple[str, str, list[str]]]:
+    result: list[tuple[str, str, list[str]]] = []
+    for branch in re.finditer(
+        r"\b(?:else\s+)?if\s*\((?P<condition>[^{}]+)\)\s*\{",
+        search_block,
+    ):
+        block = _brace_block(search_block, branch.start())
+        result.append((branch.group("condition"), block, _api_repo_method_calls(block)))
+    return result
+
+
+def _request_method_roles(java: str) -> dict[str, ListingRole]:
+    candidates: dict[str, set[ListingRole]] = {}
+
+    def add(block: str, role: ListingRole) -> None:
+        for method_name in _api_repo_method_calls(block):
+            candidates.setdefault(method_name, set()).add(role)
+
+    add(_java_method_block(java, "popularMangaRequest"), ListingRole.POPULAR)
+    add(_java_method_block(java, "latestUpdatesRequest"), ListingRole.LATEST)
+    search_block = _java_method_block(java, "searchMangaRequest")
+    branched: set[str] = set()
+    for condition, _block, methods in _search_request_branches(search_block):
+        role = ListingRole.SEARCH if re.search(r"\bquery\b", condition) else ListingRole.RANK
+        for method_name in methods:
+            branched.add(method_name)
+            candidates.setdefault(method_name, set()).add(role)
+    for method_name in _api_repo_method_calls(search_block):
+        if method_name not in branched:
+            candidates.setdefault(method_name, set()).add(ListingRole.BROWSE)
+    return {
+        method_name: next(iter(roles))
+        for method_name, roles in candidates.items()
+        if len(roles) == 1
+    }
+
+
+def _listing_role(
+    method_name: str,
+    path: str,
+    call_role: ListingRole | None,
+) -> ListingRole | None:
     value = f"{method_name} {path}".casefold()
     if any(marker in value for marker in ("member", "collect", "comment", "theme/count")):
         return None
+    if call_role is not None:
+        return call_role
     if "search" in value:
         return ListingRole.SEARCH
     if "rank" in value:
@@ -668,6 +762,7 @@ def _listing_endpoints(
     )
     page_size = int(page_size_match.group(1)) if page_size_match else None
     builder_bindings = _request_query_bindings(java, filter_specs)
+    call_roles = _request_method_roles(java)
     endpoints: list[ListingEndpointIR] = []
     seen_ids: set[str] = set()
     for name, parameters, block in _java_string_methods(java):
@@ -681,7 +776,7 @@ def _listing_endpoints(
         )
         if template is None:
             continue
-        role = _listing_role(name, template)
+        role = _listing_role(name, template, call_roles.get(name))
         if role is None:
             continue
         path, _, query = template.partition("?")
@@ -706,6 +801,129 @@ def _listing_endpoints(
             )
         )
     return endpoints
+
+
+def _listing_search_dispatch(
+    java: str,
+    endpoints: list[ListingEndpointIR],
+    filter_specs: tuple[SourceFilterSpec, ...],
+) -> ListingSearchDispatchIR | None:
+    request_block = _java_method_block(java, "searchMangaRequest")
+    if not request_block:
+        return None
+    specs = {spec.id: spec for spec in filter_specs}
+    specs_by_class = {spec.source_class: spec for spec in filter_specs}
+    state_variables: dict[str, str] = {}
+    for assignment in re.finditer(
+        r"\b(?:int|Integer)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([^;]+);",
+        request_block,
+    ):
+        matched = [
+            spec
+            for source_class, spec in specs_by_class.items()
+            if re.search(rf"\b{re.escape(source_class)}\b", assignment.group(2))
+        ]
+        if len(matched) == 1:
+            state_variables[assignment.group(1)] = matched[0].id
+
+    def filter_for_variable(variable: str) -> SourceFilterSpec | None:
+        filter_id = state_variables.get(variable)
+        if filter_id is None:
+            normalized = _snake_case(variable)
+            for suffix in ("_index", "_state", "_value"):
+                normalized = normalized.removesuffix(suffix)
+            candidates = [
+                spec.id
+                for spec in filter_specs
+                if normalized
+                in {
+                    spec.id,
+                    _snake_case(spec.source_class.removesuffix("Filter")),
+                }
+            ]
+            filter_id = candidates[0] if len(candidates) == 1 else None
+        return specs.get(filter_id) if filter_id is not None else None
+
+    def condition_filters(condition: str) -> list[SourceFilterSpec]:
+        result: list[SourceFilterSpec] = []
+        for clause in condition.split("||"):
+            comparison = re.fullmatch(
+                r"\s*\(*\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:>|!=)\s*0\s*\)*\s*",
+                clause,
+            )
+            if comparison is None:
+                return []
+            spec = filter_for_variable(comparison.group(1))
+            if spec is None or spec.default_index != 0 or spec in result:
+                return []
+            result.append(spec)
+        return result
+
+    query_endpoint_id: str | None = None
+    routes: list[ListingConditionalRouteIR] = []
+    branched_endpoint_ids: set[str] = set()
+    for condition, branch_block, _methods in _search_request_branches(request_block):
+        called = _called_listing_endpoints(branch_block, endpoints)
+        if len(called) > 1:
+            return None
+        if not called:
+            continue
+        endpoint = called[0]
+        branched_endpoint_ids.add(endpoint.id)
+        if re.search(r"\bquery\b", condition):
+            compact = re.sub(r"\s+", "", condition)
+            nonempty_query = any(
+                re.fullmatch(pattern, compact)
+                for pattern in (
+                    r"!query\.(?:isBlank|isEmpty)\(\)",
+                    r"!StringsKt\.isBlank\(query\)",
+                )
+            )
+            if query_endpoint_id is not None or not nonempty_query:
+                return None
+            query_endpoint_id = endpoint.id
+            continue
+        branch_specs = condition_filters(condition)
+        bound_filter_ids = {
+            binding.group(1)
+            for parameter in endpoint.query_parameters
+            if parameter.source == "filter"
+            and (
+                binding := re.fullmatch(
+                    r"\{filter:([a-z][a-z0-9_]*)\}",
+                    parameter.value_template,
+                )
+            )
+            is not None
+        }
+        if not branch_specs or any(
+            spec.kind != "select" or spec.id not in bound_filter_ids for spec in branch_specs
+        ):
+            return None
+        routes.append(
+            ListingConditionalRouteIR(
+                endpoint_id=endpoint.id,
+                activate_when_any=[
+                    ListingFilterActivationIR(
+                        filter_id=spec.id,
+                        default_value=spec.options[spec.default_index].value,
+                    )
+                    for spec in branch_specs
+                ],
+            )
+        )
+    default = [
+        endpoint
+        for endpoint in _called_listing_endpoints(request_block, endpoints)
+        if endpoint.id not in branched_endpoint_ids
+    ]
+    if query_endpoint_id is None or len(default) != 1:
+        return None
+    return ListingSearchDispatchIR(
+        query_endpoint_id=query_endpoint_id,
+        default_endpoint_id=default[0].id,
+        conditional_routes=routes,
+    )
 
 
 def _java_method_block(java: str, name: str) -> str:
@@ -905,14 +1123,28 @@ def _associate_listing_responses(
     endpoints: list[ListingEndpointIR],
     containers: list[ListingContainerIR],
     java: str,
+    search_dispatch: ListingSearchDispatchIR | None,
 ) -> list[ListingEndpointIR]:
     container_names = {container.type_name for container in containers}
     facts = _listing_parser_facts(java, container_names)
+    parser_endpoint_ids = {
+        parser: {
+            endpoint.id
+            for endpoint in _called_listing_endpoints(
+                _java_method_block(java, f"{parser.removesuffix('Parse')}Request"),
+                endpoints,
+            )
+        }
+        for parser, _type_name, _marker in facts
+    }
     associated: list[ListingEndpointIR] = []
     for endpoint in endpoints:
+        relevant = [
+            fact for fact in facts if endpoint.id in parser_endpoint_ids.get(fact[0], set())
+        ]
         explicit = {
             type_name
-            for _parser, type_name, marker in facts
+            for _parser, type_name, marker in relevant
             if marker is not None and marker in endpoint.path
         }
         if len(explicit) == 1:
@@ -925,9 +1157,42 @@ def _associate_listing_responses(
                 )
             )
             continue
+        direct = {
+            type_name
+            for parser, type_name, _marker in relevant
+            if len(parser_endpoint_ids.get(parser, set())) == 1
+        }
+        if len(direct) == 1:
+            associated.append(
+                endpoint.model_copy(
+                    update={
+                        "response_type": direct.pop(),
+                        "response_evidence": "parser_call",
+                    }
+                )
+            )
+            continue
+        default_types = {
+            type_name
+            for parser, type_name, marker in relevant
+            if marker is None
+            and search_dispatch is not None
+            and endpoint.id == search_dispatch.default_endpoint_id
+            and endpoint.id in parser_endpoint_ids.get(parser, set())
+        }
+        if len(default_types) == 1:
+            associated.append(
+                endpoint.model_copy(
+                    update={
+                        "response_type": default_types.pop(),
+                        "response_evidence": "parser_default",
+                    }
+                )
+            )
+            continue
         role_types = {
             type_name
-            for parser, type_name, marker in facts
+            for parser, type_name, marker in relevant
             if marker is None and _parser_role(parser) == endpoint.role
         }
         if len(role_types) == 1:
@@ -1216,7 +1481,13 @@ def project_implementation_ir(ir: SourceIR) -> ImplementationIR:
         shapes,
         envelope_paths=_response_envelope_paths(java, shapes),
     )
-    endpoints = _associate_listing_responses(endpoints, containers, java)
+    search_dispatch = _listing_search_dispatch(java, endpoints, tuple(ir.filter_specs))
+    endpoints = _associate_listing_responses(
+        endpoints,
+        containers,
+        java,
+        search_dispatch,
+    )
     manga_item_types = {container.manga_item_type for container in containers}
     mappings = _manga_mappings(ir.files, shapes, allowed_types=manga_item_types)
     unresolved: list[str] = []
@@ -1225,10 +1496,16 @@ def project_implementation_ir(ir: SourceIR) -> ImplementationIR:
         unresolved.append("no deterministic listing endpoint template was recovered")
     if not containers:
         unresolved.append("no deterministic listing response container was recovered")
+    if search_dispatch is None:
+        unresolved.append("listing search dispatch is unresolved")
     for endpoint in endpoints:
         if endpoint.response_type is None:
             unresolved.append(
                 f"listing response container is unresolved for endpoint {endpoint.id}"
+            )
+        elif endpoint.response_evidence == "name_match":
+            unresolved.append(
+                f"listing response container has only name evidence for endpoint {endpoint.id}"
             )
         for parameter in endpoint.query_parameters:
             if parameter.source == "unknown":
@@ -1258,6 +1535,7 @@ def project_implementation_ir(ir: SourceIR) -> ImplementationIR:
             data_shapes=_listing_data_shapes(shapes, containers),
             containers=containers,
             manga_mappings=mappings,
+            search_dispatch=search_dispatch,
             provider=_listing_provider(java, endpoints),
         ),
         unresolved_facts=unresolved,
