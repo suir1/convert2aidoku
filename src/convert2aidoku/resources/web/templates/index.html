@@ -13,32 +13,32 @@
   <header class="topbar">
     <a class="brand" href="/" aria-label="C2A 首页">
       <span class="brand-mark">C2A</span>
-      <span class="brand-name">Convert to Aidoku</span>
+      <span class="brand-copy"><strong>C2A</strong><small>Convert to Aidoku</small></span>
     </a>
-    <div class="local-badge"><span></span>仅在本机运行</div>
+    <div class="local-badge"><span></span>本机运行</div>
   </header>
 
   <main>
-    <section class="hero">
-      <div class="hero-copy">
-        <p class="eyebrow">Tachi / Mihon → Aidoku</p>
-        <h1>把源代码变成<br><span>经过验证的 Aidoku 包</span></h1>
-        <p class="hero-lead">选择 APK、模块目录或 GitHub 地址。C2A 会分析行为、调用你的 AI、编译 WASM，并完成实站阅读验证。</p>
+    <section class="intro">
+      <div class="intro-copy">
+        <p class="eyebrow">本地转换工作台</p>
+        <h1>Tachi <span aria-hidden="true">→</span> Aidoku</h1>
+        <p>选择一个 APK、模块目录或 GitHub 地址。C2A 会在本机完成分析、Rust 生成、WASM 编译和实站验证。</p>
       </div>
-      <div class="hero-flow" aria-label="转换过程">
-        <div><b>01</b><span>分析输入</span></div>
-        <i></i>
-        <div><b>02</b><span>生成修复</span></div>
-        <i></i>
-        <div><b>03</b><span>打包验证</span></div>
+      <div class="workflow-steps" aria-label="转换过程">
+        <span><b>1</b>分析</span>
+        <i aria-hidden="true"></i>
+        <span><b>2</b>生成</span>
+        <i aria-hidden="true"></i>
+        <span><b>3</b>验证</span>
       </div>
     </section>
 
     <section class="readiness panel" aria-labelledby="readiness-title">
       <div class="section-heading compact">
         <div>
-          <p class="section-kicker">Environment</p>
           <h2 id="readiness-title">环境状态</h2>
+          <p class="section-description">转换所需的本机工具</p>
         </div>
         <button class="button ghost small" id="refresh-doctor" type="button">重新检查</button>
       </div>
@@ -56,10 +56,10 @@
       <section class="panel source-panel" aria-labelledby="source-title">
         <div class="section-heading">
           <div>
-            <p class="section-kicker">New conversion</p>
             <h2 id="source-title">新建转换</h2>
+            <p class="section-description">配置 AI 服务并选择输入源</p>
           </div>
-          <span class="step-pill">步骤 1–2</span>
+          <span class="step-pill">配置</span>
         </div>
 
         <form id="conversion-form">
@@ -84,7 +84,7 @@
             <legend>输入源</legend>
             <label class="drop-zone" for="source-file" id="drop-zone">
               <input id="source-file" name="source_file" type="file" accept=".apk,application/vnd.android.package-archive">
-              <span class="drop-icon">＋</span>
+              <span class="drop-icon" aria-hidden="true">APK</span>
               <strong id="drop-title">选择或拖入 Tachi APK</strong>
               <small>最大 512 MiB，文件只保存在本机缓存</small>
             </label>
@@ -149,16 +149,16 @@
       <aside class="panel progress-panel" aria-labelledby="progress-title">
         <div class="section-heading">
           <div>
-            <p class="section-kicker">Live progress</p>
             <h2 id="progress-title">转换进度</h2>
+            <p class="section-description">当前任务与验证结果</p>
           </div>
           <span class="job-state idle" id="job-state">待开始</span>
         </div>
 
         <div class="empty-state" id="empty-state">
-          <div class="empty-orbit"><span></span></div>
-          <h3>等待一个源</h3>
-          <p>完成左侧分析并确认后，这里会实时显示 AI、编译、修复和实站测试进度。</p>
+          <div class="empty-symbol" aria-hidden="true"><span></span></div>
+          <h3>尚无转换任务</h3>
+          <p>先在左侧分析输入源。开始转换后，这里会显示 AI、编译和实站验证进度。</p>
         </div>
 
         <div class="job-view hidden" id="job-view">
@@ -182,6 +182,6 @@
   </main>
 
   <div class="toast hidden" id="toast" role="status" aria-live="polite"></div>
-  <footer><span>C2A 本地工作台</span><span>工作目录：{{ working_directory }}</span></footer>
+  <footer><span>C2A · 本地转换工作台</span><span>工作目录：{{ working_directory }}</span></footer>
 </body>
 </html>
