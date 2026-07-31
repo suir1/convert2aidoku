@@ -165,6 +165,7 @@ class SourceIR(BaseModel):
     license_text: str | None = None
     warnings: list[str] = Field(default_factory=list)
     unsupported_features: list[str] = Field(default_factory=list)
+    analysis_rule_ids: list[str] = Field(default_factory=list)
 
 
 class DependencyRequest(BaseModel):
@@ -902,6 +903,7 @@ class ConversionCheckpoint(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     manifest_warnings: list[str] = Field(default_factory=list)
     unsupported_features: list[str] = Field(default_factory=list)
+    preflight_rule_ids: list[str] = Field(default_factory=list)
     validation: ValidationResult | None = None
 
 
@@ -918,5 +920,7 @@ class ConversionReport(BaseModel):
     template_matches: list[TemplateMatch] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     unsupported_features: list[str] = Field(default_factory=list)
+    source_analysis_rule_ids: list[str] = Field(default_factory=list)
+    preflight_rule_ids: list[str] = Field(default_factory=list)
     validation: ValidationResult
     provenance: dict[str, Any] = Field(default_factory=dict)

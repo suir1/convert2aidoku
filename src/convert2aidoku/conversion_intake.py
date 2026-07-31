@@ -74,7 +74,7 @@ class ConversionIntake:
         try:
             with resolve_source(request.input_ref) as resolved:
                 source_ir = analyze_source(resolved)
-                require_ai_eligible(source_ir)
+                assessment = require_ai_eligible(source_ir)
                 create_scaffold(store.project, source_ir, resolved)
         except BaseException:
             shutil.rmtree(workspace, ignore_errors=True)
@@ -89,6 +89,7 @@ class ConversionIntake:
             force=request.force,
             warnings=list(source_ir.warnings),
             unsupported_features=list(source_ir.unsupported_features),
+            preflight_rule_ids=assessment.rule_ids,
         )
         store = CheckpointStore.initialize(
             workspace,

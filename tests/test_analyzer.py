@@ -6,6 +6,8 @@ import pytest
 from convert2aidoku import ingest
 from convert2aidoku.analyzer import _uses_relative_url_keys, analyze_path
 from convert2aidoku.errors import UnsupportedSourceError
+from convert2aidoku.input_capabilities import InputCapabilityRecognition
+from convert2aidoku.kotlin_analysis import _parse_main_class, _unsupported_features
 from convert2aidoku.models import Capability, ContentRating
 
 FIXTURE = Path(__file__).parent / "fixtures" / "simple"
@@ -27,6 +29,8 @@ def test_analyzes_standard_http_source() -> None:
     assert Capability.DETAILS in ir.capabilities
     assert Capability.CHAPTERS in ir.capabilities
     assert Capability.PAGES in ir.capabilities
+    assert "capability_search" in ir.analysis_rule_ids
+    assert "capability_pages" in ir.analysis_rule_ids
     assert "Referer" in ir.header_names
     assert "User-Agent" in ir.header_names
     assert ir.license_text and ir.license_text.strip() == "Synthetic fixture license."
@@ -105,8 +109,49 @@ def test_rejects_crypto_source(tmp_path: Path) -> None:
         'abstract class X : HttpSource() { val cipher = javax.crypto.Cipher.getInstance("AES") }'
     )
 
-    with pytest.raises(UnsupportedSourceError, match="cryptography"):
+    with pytest.raises(UnsupportedSourceError, match="cryptography") as captured:
         analyze_path(str(tmp_path))
+
+    assert captured.value.rule_ids == ("unsupported_crypto",)
+
+
+@pytest.mark.parametrize(
+    ("marker", "rule_id"),
+    [
+        ("SourceFactory", "unsupported_multisrc_theme"),
+        ("WebView", "unsupported_authentication"),
+        ("android.graphics.Bitmap", "unsupported_image_processing"),
+        ("Mac.getInstance", "unsupported_custom_web_processing"),
+    ],
+)
+def test_kotlin_blocker_markers_have_one_stable_rule(marker: str, rule_id: str) -> None:
+    findings = _unsupported_features(
+        "",
+        marker,
+        InputCapabilityRecognition(capabilities=(), unsupported_crypto=False, rule_ids=()),
+    )
+
+    assert list(findings) == [rule_id]
+
+
+def test_webview_is_not_reported_twice_as_custom_processing() -> None:
+    findings = _unsupported_features(
+        "",
+        "WebView",
+        InputCapabilityRecognition(capabilities=(), unsupported_crypto=False, rule_ids=()),
+    )
+
+    assert findings == {"unsupported_authentication": "login/authentication"}
+
+
+def test_source_shape_blockers_have_stable_rules() -> None:
+    with pytest.raises(UnsupportedSourceError) as missing:
+        _parse_main_class("class Example")
+    with pytest.raises(UnsupportedSourceError) as custom:
+        _parse_main_class("class Example : HttpSource(), CustomSourceBase")
+
+    assert missing.value.rule_ids == ("unsupported_no_standalone_http_source",)
+    assert custom.value.rule_ids == ("unsupported_custom_source_base",)
 
 
 def test_analyzes_supported_encrypted_json_api() -> None:
@@ -428,6 +473,11 @@ def test_analyzes_decompiled_apk_as_public_only(
     assert Capability.JSON_API in ir.capabilities
     assert Capability.DYNAMIC_BASE_URLS in ir.capabilities
     assert ir.relative_url_keys
+    assert {
+        "warn_missing_input_license",
+        "exclude_public_only_features",
+        "relative_url_keys",
+    } <= set(ir.analysis_rule_ids)
     assert len(ir.chapter_page_routes) == 1
     route = ir.chapter_page_routes[0]
     assert route.chapter_key_template == "/comic/{comic_path}/chapter/{chapter_id}"
@@ -461,6 +511,26 @@ def test_analyzes_decompiled_apk_as_public_only(
     assert any("WebView login/navigation" in item for item in ir.unsupported_features)
     assert any("Android ChineseUtils" in item for item in ir.unsupported_features)
     assert any("library-update chapter hiding" in item for item in ir.unsupported_features)
+
+
+def test_records_okhttp_interceptor_as_an_analysis_rule(tmp_path: Path) -> None:
+    (tmp_path / "build.gradle.kts").write_text(
+        'keiyoushi { name = "Interceptor"; source { lang = "en"; '
+        'baseUrl = "https://example.com" } }'
+    )
+    source = tmp_path / "src" / "Interceptor.kt"
+    source.parent.mkdir()
+    source.write_text(
+        """
+        abstract class Interceptor : HttpSource() {
+            val sourceClient = client.newBuilder().addInterceptor(SourceInterceptor()).build()
+        }
+        """
+    )
+
+    ir = analyze_path(str(tmp_path))
+
+    assert "warn_okhttp_interceptor" in ir.analysis_rule_ids
 
 
 def test_decompiled_apk_reports_optional_anti_watermark_cleanup() -> None:

@@ -64,6 +64,8 @@ def write_report(project: Path, report: ConversionReport) -> None:
         f"- AI rounds: {len(report.ai_rounds)}",
         f"- Normalizer rewrite hits: {sum(normalization_rewrites.values())}",
         f"- Contract rule triggers: {sum(contract_rules.values())}",
+        f"- Source analysis rules: {len(report.source_analysis_rule_ids)}",
+        f"- Preflight rules: {len(report.preflight_rule_ids)}",
         f"- Failed AI exchanges: {len(report.failed_ai_exchanges)}",
         "",
     ]
@@ -104,6 +106,12 @@ def write_report(project: Path, report: ConversionReport) -> None:
                 key=lambda item: (-item[1], item[0]),
             )
         )
+    if report.source_analysis_rule_ids:
+        lines.extend(["", "## Source analysis rules", ""])
+        lines.extend(f"- `{rule_id}`" for rule_id in report.source_analysis_rule_ids)
+    if report.preflight_rule_ids:
+        lines.extend(["", "## Preflight rules", ""])
+        lines.extend(f"- `{rule_id}`" for rule_id in report.preflight_rule_ids)
     lines.extend(["", "## Validation", ""])
     for stage in report.validation.stages:
         marker = "PASS" if stage.ok else "SKIP" if stage.skipped else "FAIL"

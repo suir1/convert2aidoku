@@ -356,7 +356,10 @@ class DecompiledInputInspection:
                 None,
             )
         if main is None:
-            raise UnsupportedSourceError("decompiled APK contains no standalone HttpSource class")
+            raise UnsupportedSourceError(
+                "decompiled APK contains no standalone HttpSource class",
+                rule_ids=("unsupported_no_standalone_http_source",),
+            )
         main_file, declaration = main
         assert declaration is not None
         main_class, parents = declaration

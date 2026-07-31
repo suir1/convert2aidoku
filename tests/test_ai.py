@@ -926,6 +926,7 @@ def test_repair_uses_compact_context_without_original_source_bodies() -> None:
         assert payload["reasoning_effort"] == "low"
         assert "source_files" not in repair_payload
         assert "files" not in repair_payload["source_ir"]
+        assert "analysis_rule_ids" not in repair_payload["source_ir"]
         assert repair_payload["current_files"][0]["content"] == "current rust"
         assert len(repair_payload["current_files"]) == 1
         assert b"current-resource-marker" not in request.content

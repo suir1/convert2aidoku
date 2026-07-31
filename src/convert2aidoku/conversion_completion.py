@@ -61,6 +61,8 @@ def _report(
         template_matches=match_templates(ir),
         warnings=list(dict.fromkeys(checkpoint.warnings + checkpoint.capability_gaps)),
         unsupported_features=list(dict.fromkeys(ir.unsupported_features)),
+        source_analysis_rule_ids=list(ir.analysis_rule_ids),
+        preflight_rule_ids=list(checkpoint.preflight_rule_ids),
         validation=validation,
         provenance={
             "input_commit": ir.commit,

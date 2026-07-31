@@ -13,6 +13,10 @@ class InputError(C2AError):
 class UnsupportedSourceError(C2AError):
     """Raised when a source is outside the MVP scope."""
 
+    def __init__(self, message: str, *, rule_ids: tuple[str, ...] = ()) -> None:
+        super().__init__(message)
+        self.rule_ids = rule_ids
+
 
 class AIProviderError(C2AError):
     """Raised when the compatible model endpoint cannot produce valid output."""

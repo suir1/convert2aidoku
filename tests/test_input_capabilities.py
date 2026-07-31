@@ -4,6 +4,7 @@ import pytest
 
 from convert2aidoku.input_capabilities import InputDialect, recognize_input_capabilities
 from convert2aidoku.models import Capability
+from convert2aidoku.source_rules import CAPABILITY_RULE_IDS, capability_rule_id
 
 
 def test_recognition_maps_kotlin_and_decompiled_java_dialects() -> None:
@@ -24,6 +25,8 @@ def test_recognition_maps_kotlin_and_decompiled_java_dialects() -> None:
     }
     assert set(kotlin.capabilities) == expected
     assert set(java.capabilities) == expected
+    assert set(kotlin.rule_ids) == {capability_rule_id(item) for item in expected}
+    assert set(java.rule_ids) == {capability_rule_id(item) for item in expected}
 
 
 def test_kotlin_recognition_honors_latest_override_and_dynamic_filter_shape() -> None:
@@ -93,3 +96,27 @@ def test_recognition_rejects_unknown_incomplete_or_mixed_crypto(content: str) ->
     assert recognition.unsupported_crypto
     assert Capability.ENCRYPTED_JSON not in recognition.capabilities
     assert Capability.TRIPLE_DES_CBC not in recognition.capabilities
+
+
+def test_every_capability_rule_has_recognition_evidence() -> None:
+    common = " ".join(
+        (
+            "getSearchMangaList getPopularManga getLatestUpdates fetchMangaUpdate getPageList",
+            "getFilterList resetThemeFilter setupPreferenceScreen headersBuilder",
+            "getMangaUrl getChapterUrl decodeFromString apiDomains",
+            "javascript:cid(1) #prev #next url_previous url_next",
+            'Cipher.getInstance("AES/CBC/PKCS5Padding") SecretKeySpec IvParameterSpec',
+            'Cipher.getInstance("RSA/ECB/PKCS1Padding")',
+            'KeyFactory.getInstance("RSA") X509EncodedKeySpec',
+            'MessageDigest.getInstance(type) hashString("MD5", payload)',
+        )
+    )
+    triple_des = 'Cipher.getInstance("DESede/CBC/PKCS5Padding") SecretKeySpec IvParameterSpec'
+
+    observed = {
+        rule_id
+        for content in (common, triple_des)
+        for rule_id in recognize_input_capabilities(content, dialect="kotlin").rule_ids
+    }
+
+    assert observed == CAPABILITY_RULE_IDS

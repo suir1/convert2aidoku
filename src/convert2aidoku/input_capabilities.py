@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from .models import Capability
+from .source_rules import capability_rule_id
 
 type InputDialect = Literal["kotlin", "decompiled_java"]
 type _Markers = tuple[tuple[Capability, tuple[str, ...]], ...]
@@ -67,6 +68,7 @@ _CRYPTO_TRANSFORMATIONS = {
 class InputCapabilityRecognition:
     capabilities: tuple[Capability, ...]
     unsupported_crypto: bool
+    rule_ids: tuple[str, ...]
 
 
 def _crypto_capabilities(content: str) -> tuple[set[Capability], bool]:
@@ -151,7 +153,9 @@ def recognize_input_capabilities(
 
     crypto_capabilities, unsupported_crypto = _crypto_capabilities(content)
     detected.update(crypto_capabilities)
+    capabilities = tuple(capability for capability in Capability if capability in detected)
     return InputCapabilityRecognition(
-        capabilities=tuple(capability for capability in Capability if capability in detected),
+        capabilities=capabilities,
         unsupported_crypto=unsupported_crypto,
+        rule_ids=tuple(capability_rule_id(capability) for capability in capabilities),
     )

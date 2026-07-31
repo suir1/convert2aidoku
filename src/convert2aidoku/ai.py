@@ -32,7 +32,11 @@ from .constants import (
 )
 from .dependency_policy import evaluate_dependency_policy, render_dependency_policy
 from .errors import AIProviderError, SecurityError
-from .generation_context import build_generation_context, build_settings_context
+from .generation_context import (
+    build_generation_context,
+    build_settings_context,
+    source_ir_prompt_payload,
+)
 from .kotlin_settings import with_kotlin_settings
 from .listing_renderer import (
     deterministic_listing_provider_available,
@@ -805,7 +809,7 @@ class OpenAICompatibleClient:
                 "role": "user",
                 "content": json.dumps(
                     {
-                        "source_ir": ir.model_dump(mode="json", exclude={"files", "license_text"}),
+                        "source_ir": source_ir_prompt_payload(ir),
                         "current_files": [
                             item
                             for item in current_files

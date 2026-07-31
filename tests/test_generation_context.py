@@ -131,6 +131,19 @@ def test_kotlin_generation_context_preserves_complete_source_files() -> None:
     assert payload["decompiled_dto_shapes"] == []
 
 
+def test_prompt_context_excludes_local_only_source_audit_data() -> None:
+    kotlin = _file("src/example/Example.kt", "class Example : HttpSource()")
+    ir = _ir(kotlin, source_format="kotlin_module").model_copy(
+        update={"analysis_rule_ids": ["capability_search"]}
+    )
+
+    generation = build_generation_context(ir).as_payload()
+    settings = build_settings_context(ir)
+
+    assert "analysis_rule_ids" not in generation["source_ir"]
+    assert "analysis_rule_ids" not in settings["source"]
+
+
 def test_settings_context_keeps_only_bounded_preference_evidence() -> None:
     option = _file(
         "sources/example/PlatformOption.java",

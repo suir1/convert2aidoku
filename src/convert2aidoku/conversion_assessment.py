@@ -9,6 +9,7 @@ from .errors import C2AError, UnsupportedSourceError
 from .generation_context import build_generation_context, build_settings_context
 from .listing_renderer import deterministic_search_listing_available
 from .models import Capability, SourceIR
+from .source_rules import PREFLIGHT_RULE_IDS, validate_rule_ids
 
 AssessmentStatus = Literal["ready", "caution", "blocked"]
 
@@ -50,6 +51,8 @@ class ConversionAssessment(BaseModel):
     strengths: list[str] = Field(default_factory=list)
     risks: list[str] = Field(default_factory=list)
     blockers: list[str] = Field(default_factory=list)
+    rule_ids: list[str] = Field(default_factory=list)
+    blocking_rule_ids: list[str] = Field(default_factory=list)
     token_budget: TokenBudgetEstimate | None = None
 
 
@@ -73,6 +76,13 @@ def assess_source_ir(ir: SourceIR) -> ConversionAssessment:
     strengths: list[str] = []
     risks: list[str] = []
     blockers: list[str] = []
+    rule_ids: list[str] = []
+    blocking_rule_ids: list[str] = []
+
+    def record(rule_id: str, *, blocking: bool = False) -> None:
+        rule_ids.append(rule_id)
+        if blocking:
+            blocking_rule_ids.append(rule_id)
 
     missing_core = [
         capability.value for capability in _CORE_CAPABILITIES if capability not in ir.capabilities
@@ -80,6 +90,7 @@ def assess_source_ir(ir: SourceIR) -> ConversionAssessment:
     if missing_core:
         score -= 22 * len(missing_core)
         blockers.append("missing core reading behavior: " + ", ".join(missing_core))
+        record("preflight_missing_core", blocking=True)
     else:
         strengths.append("details, chapters, and pages were recovered")
 
@@ -88,10 +99,12 @@ def assess_source_ir(ir: SourceIR) -> ConversionAssessment:
     else:
         score -= 18
         blockers.append("no search, popular, or latest listing entry point was recovered")
+        record("preflight_missing_listing", blocking=True)
 
     if not ir.files:
         score -= 35
         blockers.append("analysis produced no source evidence files")
+        record("preflight_missing_files", blocking=True)
 
     token_budget: TokenBudgetEstimate | None = None
     try:
@@ -111,29 +124,37 @@ def assess_source_ir(ir: SourceIR) -> ConversionAssessment:
             risks.append(
                 f"{len(budget_omissions)} source files exceed the bounded generation context"
             )
+            record("preflight_evidence_budget")
     except (C2AError, ValueError) as exc:
         score -= 35
         blockers.append(f"generation context cannot be constructed: {exc}")
+        record("preflight_generation_context", blocking=True)
 
     if ir.source_format == "decompiled_apk":
         score -= 5
         risks.append("APK behavior is recovered from JADX output and requires live validation")
+        record("preflight_decompiled_input")
     if ir.feature_scope == "public_only":
         score -= 2
         risks.append("authenticated and Android-only features are outside public-reading scope")
+        record("preflight_public_only")
     if ir.unsupported_features:
         score -= min(4, len(ir.unsupported_features))
         risks.append(f"{len(ir.unsupported_features)} optional features will be excluded")
+        record("preflight_excluded_features")
 
     if Capability.DYNAMIC_FILTERS in ir.capabilities:
         score -= 2
         risks.append("dynamic filters require an additional live endpoint")
+        record("preflight_dynamic_filters")
     if Capability.DYNAMIC_BASE_URLS in ir.capabilities:
         score -= 2
         risks.append("runtime domain selection must remain inside a recovered allowlist")
+        record("preflight_dynamic_base_urls")
     if Capability.IMAGE_HEADERS in ir.capabilities:
         score -= 2
         risks.append("page images require source-specific request behavior")
+        record("preflight_image_headers")
     crypto = [
         capability.value for capability in _CRYPTO_CAPABILITIES if capability in ir.capabilities
     ]
@@ -142,6 +163,7 @@ def assess_source_ir(ir: SourceIR) -> ConversionAssessment:
         risks.append(
             "supported cryptography still increases implementation risk: " + ", ".join(crypto)
         )
+        record("preflight_supported_crypto")
 
     if Capability.FILTERS in ir.capabilities and not ir.filter_specs:
         if Capability.DYNAMIC_FILTERS not in ir.capabilities:
@@ -149,6 +171,7 @@ def assess_source_ir(ir: SourceIR) -> ConversionAssessment:
             risks.append(
                 "filter capability was detected but no stable filter contract was recovered"
             )
+            record("preflight_missing_filter_contract")
     elif ir.filter_specs:
         strengths.append(f"{len(ir.filter_specs)} stable filter contracts were recovered")
 
@@ -157,16 +180,20 @@ def assess_source_ir(ir: SourceIR) -> ConversionAssessment:
         if not settings["settings_evidence"]:
             score -= 6
             risks.append("settings were detected but no focused settings evidence was recovered")
+            record("preflight_missing_settings_evidence")
         else:
             strengths.append("focused source-setting evidence was recovered")
 
     if deterministic_search_listing_available(ir):
         score += 6
         strengths.append("listing Rust can be rendered deterministically without AI")
+        record("preflight_deterministic_listing")
 
     score = max(0, min(100, score))
     if blockers:
         score = min(score, 49)
+    elif score < 60:
+        record("preflight_score_threshold", blocking=True)
     eligible = not blockers and score >= 60
     status: AssessmentStatus
     if not eligible:
@@ -175,6 +202,12 @@ def assess_source_ir(ir: SourceIR) -> ConversionAssessment:
         status = "ready"
     else:
         status = "caution"
+    rule_ids = validate_rule_ids(rule_ids, PREFLIGHT_RULE_IDS, domain="preflight")
+    blocking_rule_ids = validate_rule_ids(
+        blocking_rule_ids,
+        PREFLIGHT_RULE_IDS,
+        domain="preflight blocker",
+    )
     return ConversionAssessment(
         status=status,
         score=score,
@@ -182,6 +215,8 @@ def assess_source_ir(ir: SourceIR) -> ConversionAssessment:
         strengths=list(dict.fromkeys(strengths)),
         risks=list(dict.fromkeys(risks)),
         blockers=list(dict.fromkeys(blockers)),
+        rule_ids=rule_ids,
+        blocking_rule_ids=blocking_rule_ids,
         token_budget=token_budget,
     )
 
@@ -193,5 +228,6 @@ def require_ai_eligible(ir: SourceIR) -> ConversionAssessment:
     detail = "; ".join(assessment.blockers or assessment.risks)
     raise UnsupportedSourceError(
         f"conversion preflight blocked before any AI request (score {assessment.score}/100): "
-        + detail
+        + detail,
+        rule_ids=tuple(assessment.blocking_rule_ids),
     )

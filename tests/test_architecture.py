@@ -3,7 +3,15 @@ import re
 from pathlib import Path
 
 from convert2aidoku.manifest_contract import CONTRACT_RULE_IDS
+from convert2aidoku.models import Capability
 from convert2aidoku.scaffold import MANIFEST_PROJECTION_RULE_IDS
+from convert2aidoku.source_rules import (
+    CAPABILITY_RULE_IDS,
+    PREFLIGHT_RULE_IDS,
+    SOURCE_ANALYSIS_RULE_IDS,
+    SOURCE_BLOCK_RULE_IDS,
+    capability_rule_id,
+)
 
 _SOURCE_ID = re.compile(r"^[a-z]{2}\.[a-z][a-z0-9_-]+$")
 
@@ -39,6 +47,20 @@ def _literal_rule_ids(path: Path, function_name: str, *, prefix: str = "") -> se
     }
 
 
+def _literal_prefixed_strings(paths: list[Path], prefixes: tuple[str, ...]) -> set[str]:
+    values: set[str] = set()
+    for path in paths:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        values.update(
+            node.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and node.value.startswith(prefixes)
+        )
+    return values
+
+
 def test_manifest_rule_catalogs_match_every_call_site() -> None:
     package = Path(__file__).parents[1] / "src" / "convert2aidoku"
 
@@ -47,3 +69,20 @@ def test_manifest_rule_catalogs_match_every_call_site() -> None:
 
     assert contract_ids == CONTRACT_RULE_IDS
     assert projection_ids == MANIFEST_PROJECTION_RULE_IDS
+
+
+def test_source_rule_catalogs_match_capabilities_and_preflight_call_sites() -> None:
+    package = Path(__file__).parents[1] / "src" / "convert2aidoku"
+    preflight_ids = _literal_rule_ids(package / "conversion_assessment.py", "record")
+    analysis_paths = [package / "kotlin_analysis.py", package / "decompiled_analysis.py"]
+    blocker_paths = [*analysis_paths, package / "decompiled_input.py"]
+    extra_analysis_ids = _literal_prefixed_strings(
+        analysis_paths,
+        ("exclude_", "relative_", "warn_"),
+    )
+    blocker_ids = _literal_prefixed_strings(blocker_paths, ("unsupported_",))
+
+    assert {capability_rule_id(item) for item in Capability} == CAPABILITY_RULE_IDS
+    assert CAPABILITY_RULE_IDS | extra_analysis_ids == SOURCE_ANALYSIS_RULE_IDS
+    assert blocker_ids == SOURCE_BLOCK_RULE_IDS
+    assert preflight_ids == PREFLIGHT_RULE_IDS

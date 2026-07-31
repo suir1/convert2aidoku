@@ -25,6 +25,11 @@ from .public_only_scope import (
     public_only_filter_exclusion,
     public_only_setting_exclusions,
 )
+from .source_rules import (
+    SOURCE_ANALYSIS_RULE_IDS,
+    SOURCE_BLOCK_RULE_IDS,
+    validate_rule_ids,
+)
 
 
 def _java_string_array(content: str) -> list[str]:
@@ -265,23 +270,30 @@ def analyze_decompiled_source(resolved: ResolvedSource) -> SourceIR:
     allowed = {"HttpSource", "ConfigurableSource"}
     if any(parent not in allowed for parent in parents):
         raise UnsupportedSourceError(
-            "MVP supports only APK HttpSource classes without custom source interfaces"
+            "MVP supports only APK HttpSource classes without custom source interfaces",
+            rule_ids=("unsupported_custom_source_base",),
         )
     java = inspection.java
     request_header_profiles, shared_request_headers = _java_request_header_policy(java)
     recognition = recognize_input_capabilities(java, dialect="decompiled_java")
 
-    hard_unsupported: list[str] = []
+    hard_unsupported: dict[str, str] = {}
     if any(
         marker in java
         for marker in ("android.graphics.Bitmap", "Unscrambler", "descramble", "scrambleImage")
     ):
-        hard_unsupported.append("image decoding or scrambling")
+        hard_unsupported["unsupported_image_processing"] = "image decoding or scrambling"
     if recognition.unsupported_crypto:
-        hard_unsupported.append("cryptography")
+        hard_unsupported["unsupported_crypto"] = "cryptography"
     if hard_unsupported:
+        rule_ids = validate_rule_ids(
+            hard_unsupported,
+            SOURCE_BLOCK_RULE_IDS,
+            domain="source blocker",
+        )
         raise UnsupportedSourceError(
-            "source is outside the APK public-only scope: " + ", ".join(hard_unsupported)
+            "source is outside the APK public-only scope: " + ", ".join(hard_unsupported.values()),
+            rule_ids=tuple(rule_ids),
         )
 
     manifest = inspection.manifest
@@ -322,10 +334,13 @@ def analyze_decompiled_source(resolved: ResolvedSource) -> SourceIR:
         "APK conversion scope is public reading only; optional authenticated features are not "
         "required",
     ]
+    analysis_rule_ids = list(recognition.rule_ids)
     if "addInterceptor" in java:
         warnings.append("source uses OkHttp interceptors; generated headers require live review")
+        analysis_rule_ids.append("warn_okhttp_interceptor")
     if resolved.license_path is None:
         warnings.append("no input license was found beside the APK")
+        analysis_rule_ids.append("warn_missing_input_license")
 
     license_name, license_text = input_license(resolved)
     filter_specs = _java_filter_specs(java)
@@ -348,6 +363,16 @@ def analyze_decompiled_source(resolved: ResolvedSource) -> SourceIR:
             ]
         )
     )
+    if unsupported_features:
+        analysis_rule_ids.append("exclude_public_only_features")
+    relative_url_keys = "url2comicPath" in java or "setUrlWithoutDomain" in java
+    if relative_url_keys:
+        analysis_rule_ids.append("relative_url_keys")
+    analysis_rule_ids = validate_rule_ids(
+        analysis_rule_ids,
+        SOURCE_ANALYSIS_RULE_IDS,
+        domain="source analysis",
+    )
     return SourceIR(
         input_ref=resolved.input_ref,
         commit=resolved.commit,
@@ -369,7 +394,7 @@ def analyze_decompiled_source(resolved: ResolvedSource) -> SourceIR:
         header_names=list(inspection.header_names),
         request_header_profiles=request_header_profiles,
         shared_request_headers=shared_request_headers,
-        relative_url_keys=("url2comicPath" in java or "setUrlWithoutDomain" in java),
+        relative_url_keys=relative_url_keys,
         chapter_page_routes=_java_chapter_page_routes(java),
         image_url_policy=_java_image_url_policy(java),
         filter_specs=filter_specs,
@@ -378,4 +403,5 @@ def analyze_decompiled_source(resolved: ResolvedSource) -> SourceIR:
         license_text=license_text,
         warnings=warnings,
         unsupported_features=unsupported_features,
+        analysis_rule_ids=analysis_rule_ids,
     )

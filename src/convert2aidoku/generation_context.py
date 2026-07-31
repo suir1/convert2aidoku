@@ -45,6 +45,14 @@ class GenerationContext:
         }
 
 
+def source_ir_prompt_payload(ir: SourceIR) -> dict[str, Any]:
+    """Return source facts needed by the model without local-only audit data."""
+    return ir.model_dump(
+        mode="json",
+        exclude={"files", "license_text", "analysis_rule_ids"},
+    )
+
+
 def _evidence_priority(ir: SourceIR, source: SourceFile) -> int:
     path = source.path
     stem = PurePosixPath(path).stem
@@ -93,7 +101,7 @@ def build_generation_context(
     *,
     max_chars: int = DEFAULT_GENERATION_EVIDENCE_CHARS,
 ) -> GenerationContext:
-    source_ir = ir.model_dump(mode="json", exclude={"files", "license_text"})
+    source_ir = source_ir_prompt_payload(ir)
     original_chars = sum(len(source.content) for source in ir.files)
     if ir.source_format == "kotlin_module":
         return GenerationContext(
@@ -375,7 +383,7 @@ def build_settings_context(
         selected.append(evidence)
         total += size
     return {
-        "source": ir.model_dump(mode="json", exclude={"files", "license_text"}),
+        "source": source_ir_prompt_payload(ir),
         "settings_evidence": selected,
         "context_stats": {
             "evidence_files": len(selected),

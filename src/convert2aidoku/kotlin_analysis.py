@@ -15,6 +15,11 @@ from .models import (
     SourceIR,
     SourceMetadata,
 )
+from .source_rules import (
+    SOURCE_ANALYSIS_RULE_IDS,
+    SOURCE_BLOCK_RULE_IDS,
+    validate_rule_ids,
+)
 
 _KOTLIN_STRING = r'"(?:\\.|[^"\\])*"'
 
@@ -395,7 +400,10 @@ def _parse_main_class(kotlin: str) -> tuple[str, list[str]]:
         "",
     )
     if not candidate:
-        raise UnsupportedSourceError("MVP supports only standalone HttpSource or KeiSource modules")
+        raise UnsupportedSourceError(
+            "MVP supports only standalone HttpSource or KeiSource modules",
+            rule_ids=("unsupported_no_standalone_http_source",),
+        )
     name = match(r"(?:abstract\s+)?class\s+([A-Za-z_][A-Za-z0-9_]*)", candidate)
     if not name:
         raise InputError("unable to identify the main HttpSource class")
@@ -414,7 +422,8 @@ def _parse_main_class(kotlin: str) -> tuple[str, list[str]]:
     ):
         raise UnsupportedSourceError(
             "MVP supports only standalone HttpSource or KeiSource modules without custom "
-            "source bases"
+            "source bases",
+            rule_ids=("unsupported_custom_source_base",),
         )
     return name, parents
 
@@ -441,30 +450,33 @@ def _unsupported_features(
     build: str,
     kotlin: str,
     recognition: InputCapabilityRecognition,
-) -> list[str]:
+) -> dict[str, str]:
     checks = {
-        "multisrc/theme source": ("themePkg", "SourceFactory", "MultiSource"),
-        "login/authentication": ("LoginSource", "Authenticator", "WebView", "login("),
-        "image decoding or scrambling": (
-            "android.graphics",
-            "Bitmap",
-            "Unscrambler",
-            "descramble",
-            "scramble",
+        "unsupported_multisrc_theme": (
+            "multisrc/theme source",
+            ("themePkg", "SourceFactory", "MultiSource"),
         ),
-        "custom web or crypto processing": (
-            "Mac.getInstance",
-            "WebView",
-            "loadUrl(",
-            "decodeByteArray",
+        "unsupported_authentication": (
+            "login/authentication",
+            ("LoginSource", "Authenticator", "WebView", "login("),
+        ),
+        "unsupported_image_processing": (
+            "image decoding or scrambling",
+            ("android.graphics", "Bitmap", "Unscrambler", "descramble", "scramble"),
+        ),
+        "unsupported_custom_web_processing": (
+            "custom web or crypto processing",
+            ("Mac.getInstance", "loadUrl(", "decodeByteArray"),
         ),
     }
     combined = build + "\n" + kotlin
-    unsupported = [
-        name for name, markers in checks.items() if any(marker in combined for marker in markers)
-    ]
+    unsupported = {
+        rule_id: name
+        for rule_id, (name, markers) in checks.items()
+        if any(marker in combined for marker in markers)
+    }
     if recognition.unsupported_crypto:
-        unsupported.append("cryptography")
+        unsupported["unsupported_crypto"] = "cryptography"
     return unsupported
 
 
@@ -481,7 +493,11 @@ def analyze_kotlin_source(resolved: ResolvedSource) -> SourceIR:
     recognition = recognize_input_capabilities(kotlin, dialect="kotlin")
     unsupported = _unsupported_features(build_file.content, kotlin, recognition)
     if unsupported:
-        raise UnsupportedSourceError("source is outside the MVP scope: " + ", ".join(unsupported))
+        rule_ids = validate_rule_ids(unsupported, SOURCE_BLOCK_RULE_IDS, domain="source blocker")
+        raise UnsupportedSourceError(
+            "source is outside the MVP scope: " + ", ".join(unsupported.values()),
+            rule_ids=tuple(rule_ids),
+        )
 
     module_slug = re.sub(r"[^a-z0-9]+", "-", resolved.module_path.name.lower()).strip("-")
     language = match(r"\blang\s*=\s*['\"]([^'\"]+)['\"]", build_file.content)
@@ -521,10 +537,21 @@ def analyze_kotlin_source(resolved: ResolvedSource) -> SourceIR:
     header_names_set.update(shared_request_headers)
     header_names = sorted(header_names_set)
     warnings: list[str] = []
+    analysis_rule_ids = list(recognition.rule_ids)
     if "addInterceptor" in kotlin or "addNetworkInterceptor" in kotlin:
         warnings.append(
             "source uses OkHttp interceptors; generated behavior requires manual review"
         )
+        analysis_rule_ids.append("warn_okhttp_interceptor")
+
+    relative_url_keys = _uses_relative_url_keys(kotlin)
+    if relative_url_keys:
+        analysis_rule_ids.append("relative_url_keys")
+    analysis_rule_ids = validate_rule_ids(
+        analysis_rule_ids,
+        SOURCE_ANALYSIS_RULE_IDS,
+        domain="source analysis",
+    )
 
     license_name, license_text = input_license(resolved)
     metadata = SourceMetadata(
@@ -547,9 +574,10 @@ def analyze_kotlin_source(resolved: ResolvedSource) -> SourceIR:
         header_names=header_names,
         shared_request_headers=shared_request_headers,
         filter_specs=_kotlin_filter_specs(kotlin),
-        relative_url_keys=_uses_relative_url_keys(kotlin),
+        relative_url_keys=relative_url_keys,
         files=files,
         license_name=license_name,
         license_text=license_text,
         warnings=warnings,
+        analysis_rule_ids=analysis_rule_ids,
     )
