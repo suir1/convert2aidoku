@@ -25,6 +25,8 @@ from convert2aidoku.models import (
     GenerationManifest,
     RequestHeaderProfile,
     SourceFile,
+    SourceFilterOption,
+    SourceFilterSpec,
 )
 from tests.scenarios import minimal_source_ir
 
@@ -125,16 +127,38 @@ def _copymanga_listing_files() -> list[SourceFile]:
                     if (!query.isBlank()) {
                         builder = get(ApiRepo.INSTANCE.searchUrl(page)).newBuilder();
                         builder.addQueryParameter("q", query);
-                        builder.addQueryParameter("q_type", typeValue);
+                        builder.addQueryParameter(
+                            "q_type",
+                            FilterKt.getTypeFilter()[typeIndex].getPathWord()
+                        );
                     } else if (rank > 0) {
                         builder = get(ApiRepo.INSTANCE.comicRankUrl(page)).newBuilder();
-                        builder.addQueryParameter("date_type", rankValue);
-                        builder.addQueryParameter("audience_type", audienceValue);
+                        builder.addQueryParameter(
+                            "date_type",
+                            FilterKt.getRankFilter()[rankIndex].getPathWord()
+                        );
+                        builder.addQueryParameter(
+                            "audience_type",
+                            FilterKt.getAudienceFilter()[audienceIndex].getPathWord()
+                        );
                     } else {
                         builder = get(ApiRepo.INSTANCE.comicListUrl(page)).newBuilder();
-                        builder.addQueryParameter("top", regionValue);
-                        builder.addQueryParameter("theme", themeValue);
-                        builder.addQueryParameter("ordering", orderingValue);
+                        if (regionIndex > 0) {
+                            builder.addQueryParameter(
+                                "top",
+                                FilterKt.getRegionFilter()[regionIndex].getPathWord()
+                            );
+                        }
+                        if (themeIndex > 0) {
+                            builder.addQueryParameter(
+                                "theme",
+                                FilterKt.getThemeFilter()[themeIndex].getPathWord()
+                            );
+                        }
+                        builder.addQueryParameter(
+                            "ordering",
+                            FilterKt.getSortFilter()[sortIndex].getPathWord()
+                        );
                     }
                     builder.addQueryParameter("_update", "true");
                     return GET(builder.build());
@@ -390,14 +414,23 @@ def test_projects_copymanga_listing_contract_without_provider() -> None:
         parameter.name: parameter for parameter in endpoints["comicListUrl"].query_parameters
     }
     assert browse_parameters["offset"].value_template == "{offset}"
+    assert browse_parameters["top"].value_template == "{filter:region}"
+    assert not browse_parameters["top"].required
     assert browse_parameters["theme"].value_template == "{filter:theme}"
     assert not browse_parameters["theme"].required
+    assert browse_parameters["ordering"].value_template == "{filter:sort}"
+    assert browse_parameters["ordering"].required
     assert browse_parameters["_update"].value_template == "true"
     search_parameters = {
         parameter.name: parameter for parameter in endpoints["searchUrl"].query_parameters
     }
     assert search_parameters["q"].value_template == "{query}"
     assert search_parameters["q_type"].value_template == "{filter:type}"
+    rank_parameters = {
+        parameter.name: parameter for parameter in endpoints["comicRankUrl"].query_parameters
+    }
+    assert rank_parameters["date_type"].value_template == "{filter:rank}"
+    assert rank_parameters["audience_type"].value_template == "{filter:audience}"
     assert endpoints["searchUrl"].response_type == "SearchResult"
     assert endpoints["searchUrl"].response_evidence == "parser_path"
     assert endpoints["comicRankUrl"].response_type == "RankResult"
@@ -439,6 +472,72 @@ def test_projects_copymanga_listing_contract_without_provider() -> None:
         "RecommendResult",
         "SearchResult",
     }
+
+
+def test_unknown_query_binding_is_not_guessed_from_parameter_name() -> None:
+    files = _copymanga_listing_files()
+    source = next(file for file in files if file.path.endswith("CopyManga.java"))
+    source.content = source.content.replace(
+        "FilterKt.getTypeFilter()[typeIndex].getPathWord()", "unrelatedValue"
+    )
+    source.sha256 = hashlib.sha256(source.content.encode()).hexdigest()
+    ir = minimal_source_ir(
+        source_id="zh.copymanga",
+        source_format="decompiled_apk",
+        main_class="CopyManga",
+        files=files,
+    )
+
+    implementation = project_implementation_ir(ir)
+
+    assert implementation.listing is not None
+    search = next(
+        endpoint
+        for endpoint in implementation.listing.endpoints
+        if endpoint.source_method == "searchUrl"
+    )
+    q_type = next(parameter for parameter in search.query_parameters if parameter.name == "q_type")
+    assert q_type.source == "unknown"
+    assert q_type.value_template == "{unrelated_value}"
+    assert "listing query binding is unresolved for search.q_type" in (
+        implementation.unresolved_facts
+    )
+
+
+def test_query_bindings_follow_filter_and_control_flow_evidence() -> None:
+    files = _copymanga_listing_files()
+    source = next(file for file in files if file.path.endswith("CopyManga.java"))
+    source.content = source.content.replace(
+        '"q_type",\n                            FilterKt.getTypeFilter()[typeIndex].getPathWord()',
+        '"mode_code",\n                            categoryValue',
+    ).replace('"top",', '"area_code",')
+    source.sha256 = hashlib.sha256(source.content.encode()).hexdigest()
+    ir = minimal_source_ir(
+        source_id="zh.example",
+        source_format="decompiled_apk",
+        main_class="CopyManga",
+        files=files,
+        filter_specs=[
+            SourceFilterSpec(
+                source_class="CategoryFilter",
+                id="category",
+                title="Category",
+                kind="select",
+                options=[SourceFilterOption(title="All", value="")],
+            )
+        ],
+    )
+
+    implementation = project_implementation_ir(ir)
+
+    assert implementation.listing is not None
+    endpoints = {endpoint.source_method: endpoint for endpoint in implementation.listing.endpoints}
+    search = {parameter.name: parameter for parameter in endpoints["searchUrl"].query_parameters}
+    browse = {parameter.name: parameter for parameter in endpoints["comicListUrl"].query_parameters}
+    assert search["mode_code"].value_template == "{filter:category}"
+    assert search["mode_code"].required
+    assert browse["area_code"].value_template == "{filter:region}"
+    assert not browse["area_code"].required
 
 
 def test_projects_serializable_dtos_and_string_mappings_without_directory_assumptions() -> None:

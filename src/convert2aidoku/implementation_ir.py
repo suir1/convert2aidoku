@@ -10,7 +10,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .decompiled_input import DecompiledDtoShape, decompiled_dto_shapes
-from .models import SourceFile, SourceIR
+from .models import SourceFile, SourceFilterSpec, SourceIR
 
 
 class ListingRole(StrEnum):
@@ -468,27 +468,94 @@ def _query_parameters(query: str) -> list[QueryParameterIR]:
     return parameters
 
 
-def _query_binding_value(name: str, expression: str) -> tuple[str, str]:
+def _brace_depth(content: str, end: int) -> int:
+    depth = 0
+    quote: str | None = None
+    escaped = False
+    for char in content[:end]:
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in {'"', "'"}:
+            quote = char
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+    return depth
+
+
+def _filter_id_from_evidence(
+    expression: str,
+    *,
+    preceding: str,
+    filter_specs: tuple[SourceFilterSpec, ...],
+) -> str | None:
+    by_name: dict[str, str] = {}
+    for spec in filter_specs:
+        by_name[spec.id] = spec.id
+        by_name[_snake_case(spec.source_class.removesuffix("Filter"))] = spec.id
+
+    def accessor_id(content: str) -> str | None:
+        accessors = re.findall(r"\bget([A-Za-z_][A-Za-z0-9_]*)Filter\s*\(", content)
+        if not accessors:
+            return None
+        recovered = _snake_case(accessors[-1])
+        return by_name.get(recovered, recovered)
+
+    if recovered := accessor_id(expression):
+        return recovered
+
+    normalized_expression = _snake_case(expression.strip())
+    for suffix in ("_value", "_index", "_state"):
+        normalized_expression = normalized_expression.removesuffix(suffix)
+    if normalized_expression in by_name:
+        return by_name[normalized_expression]
+    for name, filter_id in by_name.items():
+        if re.search(rf"\b{re.escape(name)}\b", _snake_case(expression)):
+            return filter_id
+
+    if recovered := accessor_id(preceding):
+        return recovered
+
+    option_matches = {
+        spec.id
+        for spec in filter_specs
+        if any(option.value and f'"{option.value}"' in preceding for option in spec.options)
+    }
+    return next(iter(option_matches)) if len(option_matches) == 1 else None
+
+
+def _query_binding_value(
+    expression: str,
+    *,
+    preceding: str,
+    filter_specs: tuple[SourceFilterSpec, ...],
+) -> tuple[str, Literal["static", "query", "filter", "unknown"]]:
     literal = _string_literal(expression.strip())
     if literal is not None:
         return literal, "static"
     if expression.strip() == "query":
         return "{query}", "query"
-    filter_id = _snake_case(name)
-    if name == "q_type":
-        filter_id = "type"
-    elif name == "date_type":
-        filter_id = "rank"
-    elif name == "audience_type":
-        filter_id = "audience"
-    elif name == "top":
-        filter_id = "region"
-    elif name == "ordering":
-        filter_id = "sort"
-    return f"{{filter:{filter_id}}}", "filter"
+    filter_id = _filter_id_from_evidence(
+        expression,
+        preceding=preceding,
+        filter_specs=filter_specs,
+    )
+    if filter_id is not None:
+        return f"{{filter:{filter_id}}}", "filter"
+    return f"{{{_snake_case(expression.strip())}}}", "unknown"
 
 
-def _request_query_bindings(java: str) -> dict[str, list[QueryParameterIR]]:
+def _request_query_bindings(
+    java: str,
+    filter_specs: tuple[SourceFilterSpec, ...],
+) -> dict[str, list[QueryParameterIR]]:
     """Associate builder query additions with the API helper selected by each branch."""
     bindings: dict[str, list[QueryParameterIR]] = {}
     method = re.search(r"\bsearchMangaRequest\s*\([^)]*\)\s*\{", java)
@@ -503,25 +570,40 @@ def _request_query_bindings(java: str) -> dict[str, list[QueryParameterIR]]:
     for index, reference in enumerate(references):
         end = references[index + 1].start() if index + 1 < len(references) else len(block)
         segment = block[reference.end() : end]
+        reference_depth = _brace_depth(block, reference.start())
         values = bindings.setdefault(reference.group(1), [])
+        previous_binding_end = 0
         for found in re.finditer(
             r'\.addQueryParameter\(\s*"([^"]+)"\s*,\s*([^;]+?)\s*\)\s*;',
             segment,
         ):
-            value, source = _query_binding_value(found.group(1), found.group(2))
+            value, source = _query_binding_value(
+                found.group(2),
+                preceding=segment[previous_binding_end : found.start()],
+                filter_specs=filter_specs,
+            )
+            previous_binding_end = found.end()
             values.append(
                 QueryParameterIR(
                     name=found.group(1),
                     value_template=value,
                     source=source,
-                    required=found.group(1) not in {"top", "theme", "free_type"},
+                    required=(
+                        _brace_depth(block, reference.end() + found.start()) <= reference_depth
+                    ),
                 )
             )
     common = next(
         (
             QueryParameterIR(
                 name=found.group(1),
-                value_template=(value := _query_binding_value(found.group(1), found.group(2)))[0],
+                value_template=(
+                    value := _query_binding_value(
+                        found.group(2),
+                        preceding=block[: found.start()],
+                        filter_specs=filter_specs,
+                    )
+                )[0],
                 source=value[1],
             )
             for found in re.finditer(
@@ -575,13 +657,17 @@ def _pagination(
     return None
 
 
-def _listing_endpoints(java: str, base: ApiBaseIR) -> list[ListingEndpointIR]:
+def _listing_endpoints(
+    java: str,
+    base: ApiBaseIR,
+    filter_specs: tuple[SourceFilterSpec, ...],
+) -> list[ListingEndpointIR]:
     page_size_match = re.search(
         r"\b(?:pageSize|PAGE_SIZE)\s*=\s*(\d+)\s*;",
         java,
     )
     page_size = int(page_size_match.group(1)) if page_size_match else None
-    builder_bindings = _request_query_bindings(java)
+    builder_bindings = _request_query_bindings(java, filter_specs)
     endpoints: list[ListingEndpointIR] = []
     seen_ids: set[str] = set()
     for name, parameters, block in _java_string_methods(java):
@@ -1090,7 +1176,7 @@ def project_implementation_ir(ir: SourceIR) -> ImplementationIR:
     java = "\n\n".join(source.content for source in ir.files if source.path.endswith(".java"))
     shapes = decompiled_dto_shapes(ir.files)
     base = _api_base(ir, java)
-    endpoints = _listing_endpoints(java, base)
+    endpoints = _listing_endpoints(java, base, tuple(ir.filter_specs))
     envelope_path = (
         "results"
         if re.search(r"\bclass\s+ApiResponse\b[\s\S]{0,4000}?\bT\s+results\b", java)
@@ -1110,6 +1196,11 @@ def project_implementation_ir(ir: SourceIR) -> ImplementationIR:
             unresolved.append(
                 f"listing response container is unresolved for endpoint {endpoint.id}"
             )
+        for parameter in endpoint.query_parameters:
+            if parameter.source == "unknown":
+                unresolved.append(
+                    f"listing query binding is unresolved for {endpoint.id}.{parameter.name}"
+                )
     if not mappings:
         unresolved.append("no deterministic manga field mapping was recovered")
     mapped_types = {mapping.item_type for mapping in mappings}
