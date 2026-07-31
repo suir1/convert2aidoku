@@ -37,6 +37,17 @@ def test_blocked_validation_never_repairs_even_with_contract_gaps() -> None:
     assert not repair_required(validation, ["relative URL gap"], live=True)
 
 
+def test_successful_toolchain_fact_does_not_hide_compiler_repair() -> None:
+    validation = ValidationResult(
+        stages=[
+            ValidationStage(name="toolchain-ready", kind=StageKind.TOOLCHAIN, ok=True),
+            ValidationStage(name="renamed-check", kind=StageKind.CHECK, ok=False),
+        ]
+    )
+
+    assert repair_required(validation, [], live=True)
+
+
 def test_compile_and_contract_repairs_are_capped_at_two_rounds() -> None:
     compiler_failure = ValidationResult(
         stages=[ValidationStage(name="cargo-check", kind="check", ok=False, output="error")]
@@ -303,6 +314,7 @@ def test_targeted_repair_applies_compiler_patch_without_loading_history(tmp_path
         result = repair.request(client)
 
     assert result.value.files[0].content == "let title = Some(title);\n"
+    assert result.repair_mode == "compiler_patch"
     assert calls.repair_patch == 1
     assert calls.repair == 0
 
@@ -445,6 +457,40 @@ def test_compiler_patch_precedes_targetable_contract_repair(tmp_path: Path) -> N
             ]
         ),
         contract=UnexpectedContract(),  # type: ignore[arg-type]
+    )
+
+    request = repair._patch_request(repair.validation.diagnostics)
+
+    assert request is not None
+    assert request.scope == "compiler"
+
+
+def test_compiler_patch_routes_by_stage_kind_not_stage_name(tmp_path: Path) -> None:
+    store = CheckpointStore(tmp_path / "workspace")
+    source = store.project / "src"
+    source.mkdir(parents=True)
+    (source / "lib.rs").write_text("fn broken() { old(); }\n", encoding="utf-8")
+    repair = TargetedRepair(
+        ir=minimal_source_ir(),
+        store=store,
+        checkpoint=ConversionCheckpoint(
+            input_ref="fixture",
+            output="generated/en.example",
+            provider_base_url="http://local/v1",
+            model="test",
+        ),
+        manifest=generation_manifest("fn broken() { old(); }\n"),
+        validation=ValidationResult(
+            stages=[
+                ValidationStage(
+                    name="future-renamed-compiler-stage",
+                    kind=StageKind.CHECK,
+                    ok=False,
+                    output="error\n  --> src/lib.rs:1:15",
+                )
+            ]
+        ),
+        contract=ContractEvaluation(()),
     )
 
     request = repair._patch_request(repair.validation.diagnostics)

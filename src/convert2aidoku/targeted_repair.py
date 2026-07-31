@@ -16,8 +16,10 @@ from .models import (
     ConversionCheckpoint,
     GeneratedFile,
     GenerationManifest,
+    RepairMode,
     RepairPatch,
     SourceIR,
+    StageKind,
     ValidationResult,
 )
 from .normalization_trace import NormalizationTrace
@@ -37,6 +39,15 @@ _RUST_DIAGNOSTIC_NAMED_TYPE = re.compile(
     r"(?:struct|enum|union)\s+([A-Za-z_][A-Za-z0-9_]*)\b",
     re.MULTILINE,
 )
+_COMPILER_REPAIR_KINDS = frozenset(
+    {
+        StageKind.FORMAT,
+        StageKind.CHECK,
+        StageKind.CLIPPY,
+    }
+)
+MAX_BUILD_REPAIR_ROUNDS = 2
+MAX_REPEATED_REPAIR_STATES = 2
 
 
 def diagnostic_file_excerpts(
@@ -169,7 +180,7 @@ def repair_required(
     *,
     live: bool,
 ) -> bool:
-    if any(stage.kind.value == "toolchain" for stage in validation.stages):
+    if any(not stage.ok and stage.kind is StageKind.TOOLCHAIN for stage in validation.stages):
         return False
     if validation.blocked:
         return False
@@ -192,9 +203,15 @@ def repair_round_limit(
         bool(capability_gaps)
         or not validation.build_ok
         or not validation.package_ok
-        or any(not stage.ok and stage.kind.value != "live_test" for stage in validation.stages)
+        or any(
+            not stage.ok and stage.kind is not StageKind.LIVE_TEST for stage in validation.stages
+        )
     )
-    return min(configured_limit, 2) if build_or_contract_failure else configured_limit
+    return (
+        min(configured_limit, MAX_BUILD_REPAIR_ROUNDS)
+        if build_or_contract_failure
+        else configured_limit
+    )
 
 
 def repair_state_signature(
@@ -269,16 +286,8 @@ class TargetedRepair:
 
     def _patch_request(self, diagnostics: str) -> _PatchRequest | None:
         excerpts = diagnostic_file_excerpts(self.store.project, diagnostics)
-        failed_stages = {stage.name for stage in self.validation.stages if not stage.ok}
-        compiler_stages = {
-            "format",
-            "cargo-check",
-            "clippy",
-            "clippy-fix",
-            "format-after-clippy-fix",
-            "format-after-clippy-fix-2",
-        }
-        if excerpts and failed_stages and failed_stages <= compiler_stages:
+        failed_kinds = {stage.kind for stage in self.validation.stages if not stage.ok}
+        if excerpts and failed_kinds and failed_kinds <= _COMPILER_REPAIR_KINDS:
             return _PatchRequest("compiler", excerpts, diagnostics)
         contract_repair = self.contract.repair(self.store.project)
         if contract_repair is not None:
@@ -308,18 +317,23 @@ class TargetedRepair:
                 patch_request.excerpts,
                 trace=trace,
             )
+            repair_mode: RepairMode = (
+                "compiler_patch" if patch_request.scope == "compiler" else "contract_patch"
+            )
             return patch_result.with_value(
                 patched_manifest,
                 normalization_rewrites=trace.counts,
+                repair_mode=repair_mode,
             )
 
         diagnostics = repair_diagnostics(
             self.validation,
             self.contract.messages,
         )[-MAX_AI_DIAGNOSTIC_CHARS:]
-        return client.repair(
+        result = client.repair(
             self.ir,
             current_files=current_files,
             diagnostics=diagnostics,
             manifest_history=self._history(),
         )
+        return result.with_value(result.value, repair_mode="full")

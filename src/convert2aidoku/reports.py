@@ -60,10 +60,18 @@ def write_report(project: Path, report: ConversionReport) -> None:
     )
     normalization_rewrites: Counter[str] = Counter()
     contract_rules: Counter[str] = Counter()
+    repair_modes: Counter[str] = Counter()
+    repair_rounds = 0
     for round_result in report.ai_rounds:
         normalization_rewrites.update(round_result.normalization_rewrites)
         normalization_rewrites.update(round_result.projection_rewrites)
         contract_rules.update(round_result.contract_rule_ids)
+        if round_result.purpose == "repair":
+            repair_rounds += 1
+        if round_result.repair_mode is not None:
+            repair_modes[round_result.repair_mode] += 1
+    targeted_repairs = sum(count for mode, count in repair_modes.items() if mode.endswith("_patch"))
+    unclassified_repairs = repair_rounds - sum(repair_modes.values())
     lines = [
         f"# Conversion report: {report.source_id}",
         "",
@@ -71,6 +79,9 @@ def write_report(project: Path, report: ConversionReport) -> None:
         f"- Input: `{report.input_ref}`",
         f"- Model: `{report.model or 'not used'}`",
         f"- AI rounds: {len(report.ai_rounds)}",
+        "- Repair rounds: "
+        f"{repair_rounds} ({targeted_repairs} targeted, {repair_modes['full']} full, "
+        f"{unclassified_repairs} unclassified)",
         f"- Normalizer rewrite hits: {sum(normalization_rewrites.values())}",
         f"- Contract rule triggers: {sum(contract_rules.values())}",
         f"- Source analysis rules: {len(report.source_analysis_rule_ids)}",

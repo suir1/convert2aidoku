@@ -204,6 +204,11 @@ def test_repair_stops_after_two_attempts_with_the_same_validation_state(
     assert outcome.report.status is ConversionStatus.FAILED
     assert ai_calls.repair == 2
     assert len(outcome.report.ai_rounds) == 3
+    assert [round_.repair_mode for round_ in outcome.report.ai_rounds] == [
+        None,
+        "full",
+        "full",
+    ]
     assert any("unchanged validation state" in warning for warning in outcome.report.warnings)
     assert any("Repair stopped" in message for message in progress)
 

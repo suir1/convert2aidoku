@@ -133,6 +133,7 @@ def test_report_aggregates_deterministic_rewrites_across_ai_rounds(tmp_path: Pat
             {
                 "round": 2,
                 "purpose": "repair",
+                "repair_mode": "compiler_patch",
                 "structured_output": True,
                 "normalization_rewrites": {"safe_std_paths": 1},
                 "contract_rule_ids": ["missing_retry"],
@@ -147,6 +148,7 @@ def test_report_aggregates_deterministic_rewrites_across_ai_rounds(tmp_path: Pat
 
     markdown = (tmp_path / "report.md").read_text(encoding="utf-8")
     assert "Normalizer rewrite hits: 6" in markdown
+    assert "Repair rounds: 1 (1 targeted, 0 full, 0 unclassified)" in markdown
     assert "Contract rule triggers: 3" in markdown
     assert "Source analysis rules: 2" in markdown
     assert "Preflight rules: 1" in markdown

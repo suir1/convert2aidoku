@@ -877,9 +877,13 @@ class AIUsage(BaseModel):
     total_tokens: int | None = None
 
 
+type RepairMode = Literal["compiler_patch", "contract_patch", "full"]
+
+
 class AIRound(BaseModel):
     round: int
     purpose: Literal["generate", "repair"]
+    repair_mode: RepairMode | None = None
     structured_output: bool
     reasoning_effort: Literal["auto", "off", "low", "medium", "high"] | None = None
     usage: AIUsage | None = None

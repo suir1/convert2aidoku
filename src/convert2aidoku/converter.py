@@ -35,6 +35,7 @@ from .normalization_trace import NormalizationTrace
 from .reports import classify_status, write_report
 from .scaffold import apply_generation_manifest, normalize_generation_manifest
 from .targeted_repair import (
+    MAX_REPEATED_REPAIR_STATES,
     TargetedRepair,
     repair_required,
     repair_round_limit,
@@ -195,12 +196,21 @@ class _ConversionRoundRunner:
                 if repair_number >= round_limit:
                     break
                 signature = repair_state_signature(self.validation, self.capability_gaps)
-                if self.checkpoint.repair_attempt_signatures.count(signature) >= 2:
-                    warning = "repair stopped after two attempts with an unchanged validation state"
+                if (
+                    self.checkpoint.repair_attempt_signatures.count(signature)
+                    >= MAX_REPEATED_REPAIR_STATES
+                ):
+                    warning = (
+                        f"repair stopped after {MAX_REPEATED_REPAIR_STATES} attempts with an "
+                        "unchanged validation state"
+                    )
                     if warning not in self.checkpoint.warnings:
                         self.checkpoint.warnings.append(warning)
                     self.store.commit(checkpoint=self.checkpoint)
-                    self.progress("Repair stopped: unchanged validation state repeated twice")
+                    self.progress(
+                        "Repair stopped: unchanged validation state repeated "
+                        f"{MAX_REPEATED_REPAIR_STATES} times"
+                    )
                     break
                 self.checkpoint.repair_attempt_signatures.append(signature)
                 self.store.commit(checkpoint=self.checkpoint)

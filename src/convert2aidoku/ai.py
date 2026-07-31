@@ -51,6 +51,7 @@ from .models import (
     GeneratedResources,
     GenerationManifest,
     OptionalTrait,
+    RepairMode,
     RepairPatch,
     SourceIR,
     validate_generated_path,
@@ -131,6 +132,7 @@ class AIResult[T: BaseModel]:
     structured_output: bool
     reasoning_effort: ReasoningEffort | None = None
     usage: AIUsage | None = None
+    repair_mode: RepairMode | None = None
     warnings: list[str] = field(default_factory=list)
     normalization_rewrites: dict[str, int] = field(default_factory=dict)
 
@@ -139,6 +141,7 @@ class AIResult[T: BaseModel]:
         value: TOther,
         *,
         normalization_rewrites: Mapping[str, int] | None = None,
+        repair_mode: RepairMode | None = None,
     ) -> AIResult[TOther]:
         trace = NormalizationTrace()
         trace.merge(self.normalization_rewrites)
@@ -148,6 +151,7 @@ class AIResult[T: BaseModel]:
             structured_output=self.structured_output,
             reasoning_effort=self.reasoning_effort,
             usage=self.usage,
+            repair_mode=repair_mode if repair_mode is not None else self.repair_mode,
             warnings=list(self.warnings),
             normalization_rewrites=trace.counts,
         )
@@ -917,6 +921,7 @@ def ai_round[T: BaseModel](number: int, purpose: str, result: AIResult[T]) -> AI
     return AIRound(
         round=number,
         purpose=purpose,  # type: ignore[arg-type]
+        repair_mode=result.repair_mode,
         structured_output=result.structured_output,
         reasoning_effort=result.reasoning_effort,
         usage=result.usage,
