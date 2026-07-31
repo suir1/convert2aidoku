@@ -5,11 +5,11 @@ import pytest
 
 from convert2aidoku.command_execution import CommandResult, command_environment
 from convert2aidoku.errors import InputError
-from convert2aidoku.models import StageKind, ValidationStage
+from convert2aidoku.models import StageKind, ValidationBlocker, ValidationStage
+from convert2aidoku.validation_policy import RunnerFailureKind, assess_runner_failure
 from convert2aidoku.validator import (
     _blocked_site_probe,
     _generated_safety_stage,
-    _is_runner_network_failure,
     _network_environment,
     _resolve_proxy,
     _run_stage,
@@ -25,7 +25,14 @@ def test_blocked_site_probe_confirms_http_403(tmp_path: Path, monkeypatch) -> No
         lambda *_args, **_kwargs: httpx.Response(403, text="challenge"),
     )
 
-    assert _blocked_site_probe(tmp_path) == (
+    evidence = _blocked_site_probe(
+        tmp_path,
+        failure=assess_runner_failure("first image returned HTTP 403"),
+    )
+
+    assert evidence is not None
+    assert evidence.blocker is ValidationBlocker.SITE_HTTP_BLOCK
+    assert evidence.diagnostic == (
         "runner-network probe returned HTTP 403 for https://example.com; this validation process "
         "does not share a browser session, so the result does not prove the site is unavailable "
         "in a normal browser"
@@ -45,7 +52,13 @@ def test_site_probe_does_not_block_normal_cloudflare_cdn_reference(
         ),
     )
 
-    assert _blocked_site_probe(tmp_path) is None
+    assert (
+        _blocked_site_probe(
+            tmp_path,
+            failure=assess_runner_failure("Cloudflare response"),
+        )
+        is None
+    )
 
 
 def test_site_probe_detects_explicit_challenge_page(tmp_path: Path, monkeypatch) -> None:
@@ -58,7 +71,14 @@ def test_site_probe_detects_explicit_challenge_page(tmp_path: Path, monkeypatch)
         ),
     )
 
-    assert "browser-challenge content" in (_blocked_site_probe(tmp_path) or "")
+    evidence = _blocked_site_probe(
+        tmp_path,
+        failure=assess_runner_failure("Cloudflare response"),
+    )
+
+    assert evidence is not None
+    assert evidence.blocker is ValidationBlocker.SITE_BROWSER_CHALLENGE
+    assert "browser-challenge content" in evidence.diagnostic
 
 
 def test_site_probe_distinguishes_runner_fingerprint_from_browser_like_httpx(
@@ -77,10 +97,15 @@ def test_site_probe_distinguishes_runner_fingerprint_from_browser_like_httpx(
         lambda *_args, **_kwargs: next(responses),
     )
 
-    diagnostic = _blocked_site_probe(tmp_path) or ""
+    evidence = _blocked_site_probe(
+        tmp_path,
+        failure=assess_runner_failure("first image returned HTTP 403"),
+    )
 
-    assert "browser-like HTTPX preflight returned HTTP 200" in diagnostic
-    assert "TLS/HTTP fingerprint" in diagnostic
+    assert evidence is not None
+    assert evidence.blocker is ValidationBlocker.RUNNER_FINGERPRINT
+    assert "browser-like HTTPX preflight returned HTTP 200" in evidence.diagnostic
+    assert "TLS/HTTP fingerprint" in evidence.diagnostic
 
 
 @pytest.mark.parametrize(
@@ -101,16 +126,15 @@ def test_site_probe_classifies_runner_request_error_when_httpx_succeeds(
         lambda *_args, **_kwargs: httpx.Response(200, text="<main>Comics</main>"),
     )
 
-    diagnostic = (
-        _blocked_site_probe(
-            tmp_path,
-            runner_output=runner_output,
-        )
-        or ""
+    evidence = _blocked_site_probe(
+        tmp_path,
+        failure=assess_runner_failure(runner_output),
     )
 
-    assert "network RequestError" in diagnostic
-    assert "proxy/TLS compatibility problem" in diagnostic
+    assert evidence is not None
+    assert evidence.blocker is ValidationBlocker.RUNNER_TRANSPORT
+    assert "network RequestError" in evidence.diagnostic
+    assert "proxy/TLS compatibility problem" in evidence.diagnostic
 
 
 def test_site_probe_classifies_generated_json_api_challenge(tmp_path: Path, monkeypatch) -> None:
@@ -137,25 +161,210 @@ def test_site_probe_classifies_generated_json_api_challenge(tmp_path: Path, monk
         lambda *_args, **_kwargs: next(responses),
     )
 
-    diagnostic = _blocked_site_probe(
+    evidence = _blocked_site_probe(
         tmp_path,
-        runner_output='JsonParseError(Error("expected value", line: 1, column: 1))',
+        failure=assess_runner_failure(
+            'JsonParseError(Error("expected value", line: 1, column: 1))'
+        ),
     )
 
-    assert diagnostic is not None
-    assert "generated JSON API probe returned HTTP 567" in diagnostic
-    assert "api.example.com/api/v1/search/items" in diagnostic
+    assert evidence is not None
+    assert evidence.blocker is ValidationBlocker.API_HTTP_BLOCK
+    assert "generated JSON API probe returned HTTP 567" in evidence.diagnostic
+    assert "api.example.com/api/v1/search/items" in evidence.diagnostic
 
 
-def test_runner_assertion_failure_is_not_misclassified_as_network_failure() -> None:
-    assert not _is_runner_network_failure(
-        "panicked at src/generated_smoke.rs:94: chapter date is missing"
+def test_generated_json_api_browser_challenge_has_explicit_evidence(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source_metadata_project(tmp_path)
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "source.rs").write_text(
+        'const API_URL: &str = "https://api.example.com";\n'
+        'fn search() { let _ = "/api/v1/search"; }\n',
+        encoding="utf-8",
     )
-    assert _is_runner_network_failure("request failed: RequestError(RequestError)")
-    assert _is_runner_network_failure("first image returned HTTP 403")
-    assert _is_runner_network_failure("popular listing returned no manga")
-    assert _is_runner_network_failure('JsonParseError(Error("expected value", line: 1, column: 1))')
-    assert _is_runner_network_failure('errorResponse: {"message":"初始化失败"}')
+    responses = iter(
+        [
+            httpx.Response(200, text="<main>Site</main>"),
+            httpx.Response(
+                200,
+                text='<script src="/cdn-cgi/challenge-platform/run.js"></script>',
+                headers={"content-type": "text/html"},
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        "convert2aidoku.validator.httpx.get",
+        lambda *_args, **_kwargs: next(responses),
+    )
+
+    evidence = _blocked_site_probe(
+        tmp_path,
+        failure=assess_runner_failure(
+            'JsonParseError(Error("expected value", line: 1, column: 1))'
+        ),
+    )
+
+    assert evidence is not None
+    assert evidence.blocker is ValidationBlocker.API_BROWSER_CHALLENGE
+
+
+def test_generated_json_api_404_remains_repairable(tmp_path: Path, monkeypatch) -> None:
+    source_metadata_project(tmp_path)
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "source.rs").write_text(
+        'const API_URL: &str = "https://api.example.com";\n'
+        'fn search() { let _ = "/api/v1/stale"; }\n',
+        encoding="utf-8",
+    )
+    responses = iter(
+        [
+            httpx.Response(200, text="<main>Site</main>"),
+            httpx.Response(404, text="<html>Not found</html>"),
+        ]
+    )
+    monkeypatch.setattr(
+        "convert2aidoku.validator.httpx.get",
+        lambda *_args, **_kwargs: next(responses),
+    )
+
+    evidence = _blocked_site_probe(
+        tmp_path,
+        failure=assess_runner_failure(
+            'JsonParseError(Error("expected value", line: 1, column: 1))'
+        ),
+    )
+
+    assert evidence is None
+
+
+def test_site_probe_network_error_has_explicit_evidence(tmp_path: Path, monkeypatch) -> None:
+    source_metadata_project(tmp_path)
+
+    def fail_get(*_args: object, **_kwargs: object) -> httpx.Response:
+        request = httpx.Request("GET", "https://example.com")
+        raise httpx.ConnectError("connection refused", request=request)
+
+    monkeypatch.setattr("convert2aidoku.validator.httpx.get", fail_get)
+
+    evidence = _blocked_site_probe(
+        tmp_path,
+        failure=assess_runner_failure("connection refused"),
+    )
+
+    assert evidence is not None
+    assert evidence.blocker is ValidationBlocker.SITE_NETWORK_ERROR
+
+
+@pytest.mark.parametrize(
+    ("output", "kind"),
+    [
+        ("chapter date is missing", RunnerFailureKind.UNKNOWN),
+        ("request failed: RequestError(RequestError)", RunnerFailureKind.TRANSPORT),
+        ("first image returned HTTP 403", RunnerFailureKind.REMOTE_RESPONSE),
+        ("popular listing returned no manga", RunnerFailureKind.EMPTY_LISTING),
+        (
+            'JsonParseError(Error("expected value", line: 1, column: 1))',
+            RunnerFailureKind.JSON_RESPONSE,
+        ),
+        ('errorResponse: {"message":"初始化失败"}', RunnerFailureKind.ANONYMOUS_INITIALIZATION),
+        ("connection reset", RunnerFailureKind.NETWORK_CANDIDATE),
+    ],
+)
+def test_runner_failure_policy_classifies_probe_candidates(
+    output: str,
+    kind: RunnerFailureKind,
+) -> None:
+    assert assess_runner_failure(output).kind is kind
+
+
+def test_anonymous_initialization_is_the_only_direct_text_blocker() -> None:
+    direct = assess_runner_failure('errorResponse: {"message":"初始化失败"}')
+    http_status = assess_runner_failure("first image returned HTTP 403")
+
+    assert direct.direct_blocker is ValidationBlocker.ANONYMOUS_INITIALIZATION
+    assert not direct.requires_probe
+    assert http_status.direct_blocker is None
+    assert http_status.requires_probe
+
+
+def _validate_live_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    output: str,
+):
+    source_metadata_project(tmp_path)
+    (tmp_path / "Cargo.lock").write_text("locked", encoding="utf-8")
+    test_wasm = tmp_path / "target" / "test.wasm"
+
+    def fake_run_stage(name: str, kind: StageKind, *_args: object) -> ValidationStage:
+        if name == "aidoku-package":
+            (tmp_path / "package.aix").write_bytes(b"package")
+        if name == "core-live-smoke":
+            return ValidationStage(name=name, kind=kind, ok=False, output=output)
+        return ValidationStage(name=name, kind=kind, ok=True)
+
+    monkeypatch.setattr("convert2aidoku.validator.find_tool", lambda name: f"/{name}")
+    monkeypatch.setattr("convert2aidoku.validator._run_stage", fake_run_stage)
+    monkeypatch.setattr("convert2aidoku.validator._test_wasm", lambda _project: test_wasm)
+    return validate_project(tmp_path, live=True)
+
+
+def test_validation_plan_propagates_anonymous_initialization_blocker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = _validate_live_failure(
+        tmp_path,
+        monkeypatch,
+        'errorResponse: {"message":"初始化失败"}',
+    )
+
+    assert result.blocked
+    assert result.blocker_reason is ValidationBlocker.ANONYMOUS_INITIALIZATION
+    assert result.stages[-1].blocker_reason is ValidationBlocker.ANONYMOUS_INITIALIZATION
+
+
+def test_validation_plan_keeps_endpoint_403_repairable_when_site_is_reachable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "convert2aidoku.validator.httpx.get",
+        lambda *_args, **_kwargs: httpx.Response(200, text="<main>Comics</main>"),
+    )
+
+    result = _validate_live_failure(
+        tmp_path,
+        monkeypatch,
+        "first image returned HTTP 403",
+    )
+
+    assert not result.blocked
+    assert result.blocker_reason is None
+    assert not result.live_ok
+
+
+def test_generated_endpoint_403_remains_repairable_when_site_probe_succeeds(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source_metadata_project(tmp_path)
+    monkeypatch.setattr(
+        "convert2aidoku.validator.httpx.get",
+        lambda *_args, **_kwargs: httpx.Response(200, text="<main>Comics</main>"),
+    )
+
+    evidence = _blocked_site_probe(
+        tmp_path,
+        failure=assess_runner_failure("first image returned HTTP 403"),
+    )
+
+    assert evidence is None
 
 
 def test_proxy_is_passed_to_probe_without_being_reported(tmp_path: Path, monkeypatch) -> None:
@@ -169,8 +378,14 @@ def test_proxy_is_passed_to_probe_without_being_reported(tmp_path: Path, monkeyp
     monkeypatch.setattr("convert2aidoku.validator.httpx.get", fake_get)
     proxy = "http://user:password@127.0.0.1:7890"
 
-    diagnostic = _blocked_site_probe(tmp_path, proxy=proxy) or ""
+    evidence = _blocked_site_probe(
+        tmp_path,
+        proxy=proxy,
+        failure=assess_runner_failure("first image returned HTTP 403"),
+    )
 
+    assert evidence is not None
+    diagnostic = evidence.diagnostic
     assert captured["proxy"] == proxy
     assert "via configured proxy" in diagnostic
     assert proxy not in diagnostic

@@ -4,6 +4,7 @@ from convert2aidoku.models import (
     ConversionReport,
     ConversionStatus,
     StageKind,
+    ValidationBlocker,
     ValidationResult,
     ValidationStage,
 )
@@ -66,6 +67,7 @@ def test_blocked_report_describes_anonymous_initialization_requirement(tmp_path:
         source_id="zh.manhuaren",
         validation=ValidationResult(
             blocked=True,
+            blocker_reason=ValidationBlocker.ANONYMOUS_INITIALIZATION,
             stages=[
                 ValidationStage(
                     name="core-live-smoke",
@@ -73,6 +75,7 @@ def test_blocked_report_describes_anonymous_initialization_requirement(tmp_path:
                     ok=False,
                     output='errorResponse: {"message":"初始化失败"}',
                     blocked=True,
+                    blocker_reason=ValidationBlocker.ANONYMOUS_INITIALIZATION,
                 )
             ],
         ),
@@ -83,6 +86,7 @@ def test_blocked_report_describes_anonymous_initialization_requirement(tmp_path:
     markdown = (tmp_path / "report.md").read_text(encoding="utf-8")
     assert "remote API rejected anonymous-device initialization" in markdown
     assert "valid User ID and Token" in markdown
+    assert "Validation blocker: anonymous_initialization" in markdown
 
 
 def test_report_lists_template_matches(tmp_path: Path) -> None:

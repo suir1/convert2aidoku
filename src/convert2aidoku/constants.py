@@ -17,18 +17,3 @@ MAX_GENERATED_TOTAL_CHARS = 2_000_000
 # Aidoku's networking runtime negotiates and decodes response compression. Forwarding this
 # source-client header can leave get_html/get_json_owned with raw compressed bytes.
 AIDOKU_RUNTIME_MANAGED_REQUEST_HEADERS = frozenset({"accept-encoding"})
-
-BLOCKED_OUTPUT_MARKERS = (
-    "http 403",
-    "status code: 403",
-    "cloudflare",
-    "captcha",
-    "cf-chl",
-    "connection refused",
-    "connection reset",
-    "dns error",
-    "timed out",
-    "timeout",
-    "site unavailable",
-    "初始化失败",
-)

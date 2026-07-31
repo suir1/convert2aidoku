@@ -3,7 +3,13 @@ from __future__ import annotations
 from collections import Counter
 from pathlib import Path
 
-from .models import ConversionReport, ConversionStatus, StageKind, ValidationResult
+from .models import (
+    ConversionReport,
+    ConversionStatus,
+    StageKind,
+    ValidationBlocker,
+    ValidationResult,
+)
 
 
 def classify_status(validation: ValidationResult, *, live_requested: bool) -> ConversionStatus:
@@ -26,12 +32,15 @@ def classify_status(validation: ValidationResult, *, live_requested: bool) -> Co
 
 
 def _blocked_status_context(report: ConversionReport) -> str:
-    live_output = "\n".join(
-        stage.output
-        for stage in report.validation.stages
-        if stage.kind is StageKind.LIVE_TEST and not stage.ok
+    blocker = report.validation.blocker_reason or next(
+        (
+            stage.blocker_reason
+            for stage in report.validation.stages
+            if stage.blocker_reason is not None
+        ),
+        None,
     )
-    if "初始化失败" in live_output:
+    if blocker is ValidationBlocker.ANONYMOUS_INITIALIZATION:
         return (
             "`blocked` means the remote API rejected anonymous-device initialization. The "
             "source built and packaged successfully, but live reading requires a valid User ID "
@@ -66,6 +75,7 @@ def write_report(project: Path, report: ConversionReport) -> None:
         f"- Contract rule triggers: {sum(contract_rules.values())}",
         f"- Source analysis rules: {len(report.source_analysis_rule_ids)}",
         f"- Preflight rules: {len(report.preflight_rule_ids)}",
+        f"- Validation blocker: {report.validation.blocker_reason or 'none'}",
         f"- Failed AI exchanges: {len(report.failed_ai_exchanges)}",
         "",
     ]

@@ -826,6 +826,17 @@ class StageKind(StrEnum):
     VERIFY = "verify"
 
 
+class ValidationBlocker(StrEnum):
+    ANONYMOUS_INITIALIZATION = "anonymous_initialization"
+    SITE_NETWORK_ERROR = "site_network_error"
+    SITE_HTTP_BLOCK = "site_http_block"
+    SITE_BROWSER_CHALLENGE = "site_browser_challenge"
+    RUNNER_FINGERPRINT = "runner_fingerprint"
+    RUNNER_TRANSPORT = "runner_transport"
+    API_HTTP_BLOCK = "api_http_block"
+    API_BROWSER_CHALLENGE = "api_browser_challenge"
+
+
 class ValidationStage(BaseModel):
     name: str
     kind: StageKind
@@ -835,6 +846,7 @@ class ValidationStage(BaseModel):
     duration_seconds: float = 0.0
     skipped: bool = False
     blocked: bool = False
+    blocker_reason: ValidationBlocker | None = None
 
 
 class ValidationResult(BaseModel):
@@ -843,6 +855,7 @@ class ValidationResult(BaseModel):
     package_ok: bool = False
     live_ok: bool = False
     blocked: bool = False
+    blocker_reason: ValidationBlocker | None = None
     contract_ok: bool = True
 
     @property

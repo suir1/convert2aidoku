@@ -3,7 +3,7 @@ import re
 from pathlib import Path
 
 from convert2aidoku.manifest_contract import CONTRACT_RULE_IDS
-from convert2aidoku.models import Capability
+from convert2aidoku.models import Capability, ValidationBlocker
 from convert2aidoku.scaffold import MANIFEST_PROJECTION_RULE_IDS
 from convert2aidoku.source_rules import (
     CAPABILITY_RULE_IDS,
@@ -61,6 +61,20 @@ def _literal_prefixed_strings(paths: list[Path], prefixes: tuple[str, ...]) -> s
     return values
 
 
+def _referenced_enum_members(paths: list[Path], enum_name: str) -> set[str]:
+    members: set[str] = set()
+    for path in paths:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        members.update(
+            node.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == enum_name
+        )
+    return members
+
+
 def test_manifest_rule_catalogs_match_every_call_site() -> None:
     package = Path(__file__).parents[1] / "src" / "convert2aidoku"
 
@@ -86,3 +100,13 @@ def test_source_rule_catalogs_match_capabilities_and_preflight_call_sites() -> N
     assert CAPABILITY_RULE_IDS | extra_analysis_ids == SOURCE_ANALYSIS_RULE_IDS
     assert blocker_ids == SOURCE_BLOCK_RULE_IDS
     assert preflight_ids == PREFLIGHT_RULE_IDS
+
+
+def test_validation_blocker_catalog_matches_policy_call_sites() -> None:
+    package = Path(__file__).parents[1] / "src" / "convert2aidoku"
+    policy_members = _referenced_enum_members(
+        [package / "validation_policy.py", package / "validator.py"],
+        "ValidationBlocker",
+    )
+
+    assert policy_members == {blocker.name for blocker in ValidationBlocker}

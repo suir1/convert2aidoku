@@ -12,25 +12,20 @@ from urllib.parse import urlsplit
 import httpx
 
 from .command_execution import command_environment, execute_command
-from .constants import BLOCKED_OUTPUT_MARKERS
 from .errors import InputError, SecurityError
 from .generated_source_metadata import GeneratedSourceMetadata
-from .models import StageKind, ValidationResult, ValidationStage
+from .models import StageKind, ValidationBlocker, ValidationResult, ValidationStage
 from .scaffold import read_generated_files, validate_generated_content
 from .toolchain import find_tool
-
-_BLOCKED_HTTP_STATUSES = {403, 429, 503, 521, 522, 523, 524, 567}
-_CHALLENGE_BODY_MARKERS = (
-    "/cdn-cgi/challenge-platform/",
-    "cf-chl-",
-    "cf-turnstile",
-    "checking your browser",
-    "just a moment...",
-    "attention required! | cloudflare",
-    "verify you are human",
-    "g-recaptcha",
-    "hcaptcha",
+from .validation_policy import (
+    BlockerEvidence,
+    RunnerFailureAssessment,
+    RunnerFailureKind,
+    assess_runner_failure,
+    is_blocked_http_status,
+    is_browser_challenge,
 )
+
 _BROWSER_PROBE_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -46,21 +41,6 @@ _BROWSER_PROBE_HEADERS = {
     "Sec-CH-UA-Mobile": "?0",
     "Sec-CH-UA-Platform": '"macOS"',
 }
-_RUNNER_NETWORK_FAILURE_MARKERS = (
-    "requesterror",
-    "networkerror",
-    "request failed",
-    "connection error",
-    "connection refused",
-    "connection reset",
-    "dns error",
-    "search/list returned no manga",
-    "popular listing returned no manga",
-    "latest listing returned no manga",
-    "timed out",
-    "timeout",
-    'jsonparseerror(error("expected value", line: 1, column: 1))',
-)
 type _StageRunner = Callable[
     [str, StageKind, list[str], Path, int, dict[str, str] | None], ValidationStage
 ]
@@ -70,23 +50,6 @@ def _trim_output(value: str, limit: int = 40_000) -> str:
     if len(value) <= limit:
         return value
     return value[: limit // 2] + "\n... output truncated ...\n" + value[-limit // 2 :]
-
-
-def _is_blocked(output: str) -> bool:
-    lowered = output.lower()
-    return any(marker in lowered for marker in BLOCKED_OUTPUT_MARKERS)
-
-
-def _is_browser_challenge(body: str) -> bool:
-    lowered = body.lower()
-    return any(marker in lowered for marker in _CHALLENGE_BODY_MARKERS)
-
-
-def _is_runner_network_failure(output: str) -> bool:
-    lowered = output.lower()
-    return _is_blocked(output) or any(
-        marker in lowered for marker in _RUNNER_NETWORK_FAILURE_MARKERS
-    )
 
 
 def _resolve_proxy(proxy: str | None) -> str | None:
@@ -134,7 +97,6 @@ def _run_stage(
         command=command,
         output=output,
         duration_seconds=result.duration_seconds,
-        blocked=not result.ok and name == "core-live-smoke" and _is_blocked(output),
     )
 
 
@@ -205,11 +167,7 @@ def _generated_json_api_blocker(
     project: Path,
     *,
     proxy: str | None,
-    runner_output: str,
-) -> str | None:
-    lowered = runner_output.lower()
-    if "jsonparseerror" not in lowered or "expected value" not in lowered:
-        return None
+) -> BlockerEvidence | None:
     route = " via configured proxy" if proxy else ""
     for url in _generated_json_api_probe_urls(project):
         try:
@@ -231,19 +189,19 @@ def _generated_json_api_blocker(
         html_response = content_type == "text/html" or body.lstrip().lower().startswith(
             ("<!doctype html", "<html")
         )
-        if response.status_code in _BLOCKED_HTTP_STATUSES or (
-            response.status_code == 404 and html_response
-        ):
-            return (
+        if is_blocked_http_status(response.status_code):
+            return BlockerEvidence(
+                ValidationBlocker.API_HTTP_BLOCK,
                 f"generated JSON API probe{route} returned HTTP {response.status_code} "
-                f"{content_type or 'unknown content'} for {url}; the endpoint is challenged, "
-                "unavailable, or stale, so AI source repair is disabled until connectivity or "
-                "the input source changes"
+                f"{content_type or 'unknown content'} for {url}; the endpoint is challenged or "
+                "temporarily unavailable, so AI source repair is disabled until connectivity "
+                "changes",
             )
-        if html_response and _is_browser_challenge(body):
-            return (
+        if html_response and is_browser_challenge(body):
+            return BlockerEvidence(
+                ValidationBlocker.API_BROWSER_CHALLENGE,
                 f"generated JSON API probe{route} received browser-challenge HTML for {url}; "
-                "AI source repair is disabled until connectivity changes"
+                "AI source repair is disabled until connectivity changes",
             )
     return None
 
@@ -252,8 +210,8 @@ def _blocked_site_probe(
     project: Path,
     *,
     proxy: str | None = None,
-    runner_output: str = "",
-) -> str | None:
+    failure: RunnerFailureAssessment,
+) -> BlockerEvidence | None:
     """Check whether the non-browser validator network is blocked by the site."""
     try:
         url = GeneratedSourceMetadata.load(project).site_url
@@ -278,15 +236,16 @@ def _blocked_site_probe(
         if any(
             marker in detail for marker in ("connection refused", "dns", "timed out", "timeout")
         ):
-            return (
+            return BlockerEvidence(
+                ValidationBlocker.SITE_NETWORK_ERROR,
                 "runner-network probe failed: "
                 f"{type(exc).__name__}: {exc}; this does not prove the site is unavailable "
-                "in a normal browser"
+                "in a normal browser",
             )
         return None
     body = response.text[:20_000]
     route = " via configured proxy" if proxy else ""
-    if response.status_code in _BLOCKED_HTTP_STATUSES:
+    if is_blocked_http_status(response.status_code):
         try:
             browser_response = httpx.get(
                 url,
@@ -301,37 +260,38 @@ def _blocked_site_probe(
         if (
             browser_response is not None
             and 200 <= browser_response.status_code < 400
-            and not _is_browser_challenge(browser_response.text[:20_000])
+            and not is_browser_challenge(browser_response.text[:20_000])
         ):
-            return (
+            return BlockerEvidence(
+                ValidationBlocker.RUNNER_FINGERPRINT,
                 f"runner-network probe{route} returned HTTP {response.status_code} for {url}, "
                 f"but browser-like HTTPX preflight returned HTTP {browser_response.status_code}; "
                 "this points to the Aidoku runner's TLS/HTTP fingerprint being challenged, not "
-                "the source parser or site-wide unavailability"
+                "the source parser or site-wide unavailability",
             )
-        return (
+        return BlockerEvidence(
+            ValidationBlocker.SITE_HTTP_BLOCK,
             f"runner-network probe{route} returned HTTP {response.status_code} for {url}; "
             "this validation process does not share a browser session, so the result does not "
-            "prove the site is unavailable in a normal browser"
+            "prove the site is unavailable in a normal browser",
         )
-    if _is_browser_challenge(body):
-        return (
+    if is_browser_challenge(body):
+        return BlockerEvidence(
+            ValidationBlocker.SITE_BROWSER_CHALLENGE,
             f"runner-network probe{route} received browser-challenge content for {url} "
             f"with HTTP {response.status_code}; this validation process does not share a browser "
-            "session, so the result does not prove the site is unavailable in a normal browser"
+            "session, so the result does not prove the site is unavailable in a normal browser",
         )
-    api_blocker = _generated_json_api_blocker(
-        project,
-        proxy=proxy,
-        runner_output=runner_output,
-    )
-    if api_blocker is not None:
-        return api_blocker
-    if "requesterror" in runner_output.lower():
-        return (
+    if failure.kind is RunnerFailureKind.JSON_RESPONSE:
+        api_blocker = _generated_json_api_blocker(project, proxy=proxy)
+        if api_blocker is not None:
+            return api_blocker
+    if failure.kind is RunnerFailureKind.TRANSPORT:
+        return BlockerEvidence(
+            ValidationBlocker.RUNNER_TRANSPORT,
             "Aidoku runner returned a network RequestError while the independent HTTPX probe"
             f"{route} reached {url} with HTTP {response.status_code}; this points to a runner "
-            "proxy/TLS compatibility problem rather than a source parser failure"
+            "proxy/TLS compatibility problem rather than a source parser failure",
         )
     return None
 
@@ -505,20 +465,22 @@ def validate_project(
             900,
             environment=_network_environment(proxy),
         )
-        if (
-            not live_stage.ok
-            and not live_stage.blocked
-            and _is_runner_network_failure(live_stage.output)
-        ):
-            probe = _blocked_site_probe(
-                project,
-                proxy=proxy,
-                runner_output=live_stage.output,
-            )
-            if probe:
+        if not live_stage.ok:
+            failure = assess_runner_failure(live_stage.output)
+            direct_blocker = failure.direct_blocker
+            if direct_blocker is not None:
                 live_stage.blocked = True
-                live_stage.output = _trim_output(f"{live_stage.output}\n\n{probe}".strip())
+                live_stage.blocker_reason = direct_blocker
+            elif failure.requires_probe:
+                probe = _blocked_site_probe(project, proxy=proxy, failure=failure)
+                if probe is not None:
+                    live_stage.blocked = True
+                    live_stage.blocker_reason = probe.blocker
+                    live_stage.output = _trim_output(
+                        f"{live_stage.output}\n\n{probe.diagnostic}".strip()
+                    )
         result.blocked = live_stage.blocked
+        result.blocker_reason = live_stage.blocker_reason
         if not live_stage.ok:
             return result
         result.live_ok = True
