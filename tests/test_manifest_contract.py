@@ -381,6 +381,69 @@ def test_settings_contract_lists_keys_not_consumed_by_generated_rust() -> None:
     assert "POPULAR_MANGA_DISPLAY" not in gap
 
 
+def test_settings_contract_tracks_constant_through_defaults_wrapper() -> None:
+    ir = minimal_source_ir(capabilities=[Capability.SETTINGS])
+    manifest = _manifest(
+        """
+        const RESOLUTION_KEY: &str = "v2.pref.resolution";
+        fn setting(key: &str, default: &str) -> String {
+            defaults_get::<String>(key).unwrap_or_else(|| String::from(default))
+        }
+        fn resolution() -> String { setting(RESOLUTION_KEY, "resolution.r1500") }
+        """
+    )
+    manifest.files.append(
+        GeneratedFile(
+            path="res/settings.json",
+            content="""[
+                {"type":"group","title":"Source","items":[
+                    {"type":"select","key":"v2.pref.resolution","title":"Resolution",
+                     "titles":["1500"],"values":["resolution.r1500"],
+                     "default":"resolution.r1500"}
+                ]}
+            ]""",
+        )
+    )
+
+    evaluation = evaluate_manifest_contract(ir, manifest)
+
+    assert "unread_settings" not in evaluation.rule_ids
+
+
+def test_settings_contract_does_not_conflate_same_named_functions() -> None:
+    ir = minimal_source_ir(capabilities=[Capability.SETTINGS])
+    manifest = _manifest(
+        """
+        const RESOLUTION_KEY: &str = "v2.pref.resolution";
+        fn setting(key: &str, default: &str) -> String {
+            defaults_get::<String>(key).unwrap_or_else(|| String::from(default))
+        }
+        mod unrelated {
+            pub fn setting(_key: &str, default: &str) -> String { String::from(default) }
+        }
+        fn resolution() -> String {
+            unrelated::setting(RESOLUTION_KEY, "resolution.r1500")
+        }
+        """
+    )
+    manifest.files.append(
+        GeneratedFile(
+            path="res/settings.json",
+            content="""[
+                {"type":"group","title":"Source","items":[
+                    {"type":"select","key":"v2.pref.resolution","title":"Resolution",
+                     "titles":["1500"],"values":["resolution.r1500"],
+                     "default":"resolution.r1500"}
+                ]}
+            ]""",
+        )
+    )
+
+    evaluation = evaluate_manifest_contract(ir, manifest)
+
+    assert "unread_settings" in evaluation.rule_ids
+
+
 def test_static_filter_and_setting_capabilities_require_resource_files() -> None:
     filters = evaluate_manifest_contract(
         minimal_source_ir(capabilities=[Capability.FILTERS]),

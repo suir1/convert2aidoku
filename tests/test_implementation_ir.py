@@ -804,6 +804,51 @@ def test_projects_serializable_dtos_and_string_mappings_without_directory_assump
     assert "let has_next_page = result.items.len() >= 20;" in page_sized.content
 
 
+def test_projects_kotlin_data_class_join_to_string_exactly() -> None:
+    files = _serializable_listing_files()
+    item = next(file for file in files if file.path.endswith("ComicItem.java"))
+    item.content = item.content.replace(
+        "private final List<String> typeNames;",
+        "private final List<ThemeInfo> themes;",
+    ).replace(
+        "join(this.typeNames)",
+        "CollectionsKt.joinToString$default(this.themes, null, null, null, 0, null, "
+        "(Function1) null, 63, (Object) null)",
+    )
+    item.sha256 = hashlib.sha256(item.content.encode()).hexdigest()
+    files.append(
+        _file(
+            "sources/example/ThemeInfo.java",
+            """
+            // C2A compacted JADX DTO: generated constructors and value methods removed.
+            public final /* data */ class ThemeInfo {
+                private final String name;
+                private final String pathWord;
+            }
+            """,
+        )
+    )
+    ir = minimal_source_ir(
+        source_id="en.example",
+        source_format="decompiled_apk",
+        main_class="Example",
+        files=files,
+    )
+
+    implementation = project_implementation_ir(ir)
+    rendered = render_search_listing(ir, implementation)
+
+    assert implementation.listing is not None
+    mapping = implementation.listing.manga_mappings[0]
+    assert mapping.tags_path == "themes[]"
+    assert mapping.tags_item_projection == "kotlin_data_to_string"
+    assert mapping.unresolved_fields == []
+    assert (
+        'format!("ThemeInfo(name={}, pathWord={})", value.name, value.path_word)'
+        in rendered.content
+    )
+
+
 def test_manga_key_projection_preserves_complete_concatenation() -> None:
     files = _serializable_listing_files()
     item = next(file for file in files if file.path.endswith("ComicItem.java"))
@@ -1406,6 +1451,39 @@ def test_effective_manifest_owns_listing_module_and_source_delegation() -> None:
                 path="src/c2a_listing.rs",
                 content='compile_error!("provider must not own this file");',
             ),
+            GeneratedFile(
+                path="src/api.rs",
+                content="""
+                impl ListingProvider for CopyManga {
+                    fn get_manga_list(
+                        &self,
+                        listing: Listing,
+                        page: i32,
+                    ) -> Result<MangaPageResult> {
+                        panic!("provider-owned duplicate")
+                    }
+                }
+                """,
+            ),
+            GeneratedFile(
+                path="res/settings.json",
+                content="""[
+                    {
+                        "type": "group",
+                        "title": "Settings",
+                        "items": [
+                            {
+                                "type": "select",
+                                "key": "v2.pref.platform",
+                                "title": "Platform",
+                                "values": ["platform.none", "platform.one", "platform.two"],
+                                "titles": ["None", "1", "2"],
+                                "default": "platform.one"
+                            }
+                        ]
+                    }
+                ]""",
+            ),
         ],
     )
 
@@ -1420,10 +1498,16 @@ def test_effective_manifest_owns_listing_module_and_source_delegation() -> None:
     assert "impl aidoku::ListingProvider for CopyManga" in files["src/source.rs"]
     assert "crate::c2a_listing::get_manga_list(listing, page)" in files["src/source.rs"]
     assert "provider-owned popular/latest" not in files["src/source.rs"]
+    assert "provider-owned duplicate" not in files["src/api.rs"]
+    assert "impl ListingProvider for CopyManga" not in files["src/api.rs"]
     assert "get_manga_list(aidoku, aidoku)" not in files["src/source.rs"]
     assert "ListingProvider" in effective.implemented_traits
     assert "ListingProvider" in files["src/lib.rs"]
     assert "mod c2a_listing;" in files["src/lib.rs"]
+    assert 'defaults_get::<String>("v2.pref.platform")' in files["src/c2a_listing.rs"]
+    assert 'Some("platform.none") => None' in files["src/c2a_listing.rs"]
+    assert 'Some("platform.one") => Some("1")' in files["src/c2a_listing.rs"]
+    assert 'request = request.header("platform", platform);' in files["src/c2a_listing.rs"]
     assert any(
         dependency.name == "serde" and "derive" in dependency.features
         for dependency in effective.dependencies

@@ -4,6 +4,7 @@ import json
 import re
 from dataclasses import dataclass
 from importlib.resources import files as resource_files
+from typing import Literal
 
 from jinja2 import Environment, StrictUndefined
 
@@ -22,13 +23,14 @@ from .models import (
     Capability,
     DependencyRequest,
     GeneratedFile,
+    GeneratedResources,
     GenerationManifest,
     RequestHeaderProfile,
     SourceFilterSpec,
     SourceIR,
 )
 from .rust_inspection import RustInspection
-from .scaffold import render_generated_lib_rs
+from .scaffold import _PLATFORM_PROTOCOL_VALUES, render_generated_lib_rs
 
 
 @dataclass(frozen=True)
@@ -49,6 +51,12 @@ class _RustStruct:
 
 
 @dataclass(frozen=True)
+class _DataClassStringView:
+    format_string: str
+    fields: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class _MappingView:
     type_name: str
     function_name: str
@@ -58,9 +66,11 @@ class _MappingView:
     authors_field: str | None
     authors_name_field: str | None
     authors_is_collection: bool
+    authors_item_string: _DataClassStringView | None
     tags_field: str | None
     tags_name_field: str | None
     tags_is_collection: bool
+    tags_item_string: _DataClassStringView | None
     description_field: str | None
 
 
@@ -90,6 +100,13 @@ class _ConditionalRouteView:
 class _HeaderProfileView:
     domains: tuple[str, ...]
     headers: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
+class _PlatformHeaderView:
+    key: str
+    values: tuple[tuple[str, str | None], ...]
+    default: str | None
 
 
 @dataclass(frozen=True)
@@ -397,6 +414,30 @@ def _mapping_view(mapping: MangaMappingIR, shapes: dict[str, DataShapeIR]) -> _M
             is_collection,
         )
 
+    def data_class_string(
+        path: str | None,
+        projection: Literal["kotlin_data_to_string"] | None,
+    ) -> _DataClassStringView | None:
+        if projection is None:
+            return None
+        if path is None or not path.endswith("[]"):
+            raise ValueError(f"manga mapping {mapping.item_type} has invalid item projection")
+        root = path.removesuffix("[]")
+        root_field = _mapping_field(shape, root)
+        nested_type = _inner_list_type(root_field.source_type)
+        nested_shape = shapes.get(nested_type or "")
+        if nested_type is None or nested_shape is None:
+            raise ValueError(f"manga mapping {mapping.item_type} has invalid item projection")
+        format_string = (
+            f"{nested_type}("
+            + ", ".join(f"{field.name}={{}}" for field in nested_shape.fields)
+            + ")"
+        )
+        return _DataClassStringView(
+            format_string=format_string,
+            fields=tuple(_rust_identifier(field.serialized_name) for field in nested_shape.fields),
+        )
+
     authors_field, authors_name, authors_is_collection = nested(mapping.authors_path)
     tags_field, tags_name, tags_is_collection = nested(mapping.tags_path)
     return _MappingView(
@@ -412,9 +453,17 @@ def _mapping_view(mapping: MangaMappingIR, shapes: dict[str, DataShapeIR]) -> _M
         authors_field=authors_field,
         authors_name_field=authors_name,
         authors_is_collection=authors_is_collection,
+        authors_item_string=data_class_string(
+            mapping.authors_path,
+            mapping.authors_item_projection,
+        ),
         tags_field=tags_field,
         tags_name_field=tags_name,
         tags_is_collection=tags_is_collection,
+        tags_item_string=data_class_string(
+            mapping.tags_path,
+            mapping.tags_item_projection,
+        ),
         description_field=(
             _rust_identifier(_mapping_field(shape, mapping.description_path).serialized_name)
             if mapping.description_path
@@ -476,13 +525,21 @@ def _required_structs(
             mapping.tags_path,
             mapping.description_path,
         )
-        for nested_path in (mapping.authors_path, mapping.tags_path):
-            if not nested_path or "[]." not in nested_path:
+        for nested_path, item_projection in (
+            (mapping.authors_path, mapping.authors_item_projection),
+            (mapping.tags_path, mapping.tags_item_projection),
+        ):
+            if not nested_path:
                 continue
-            root, child = nested_path.split("[].", 1)
+            root, separator, child = nested_path.partition("[].")
+            if not separator:
+                root = nested_path.removesuffix("[]")
             root_field = _mapping_field(shapes[mapping.item_type], root)
             nested_type = _inner_list_type(root_field.source_type)
-            if nested_type:
+            if nested_type and item_projection == "kotlin_data_to_string":
+                nested_shape = shapes[nested_type]
+                add_mapping(nested_type, *(field.name for field in nested_shape.fields))
+            elif nested_type and separator:
                 add_mapping(nested_type, child)
 
     structs = []
@@ -590,9 +647,31 @@ def _header_views(
     )
 
 
+def _platform_header_view(resources: GeneratedResources | None) -> _PlatformHeaderView | None:
+    if resources is None:
+        return None
+    defaults = resources.setting_defaults()
+    for key, values in resources.setting_values().items():
+        if (
+            key.rsplit(".", 1)[-1] != "platform"
+            or "platform.one" not in values
+            or not set(values).issubset(_PLATFORM_PROTOCOL_VALUES)
+        ):
+            continue
+        default = _PLATFORM_PROTOCOL_VALUES.get(defaults.get(key, "platform.one"), "1")
+        return _PlatformHeaderView(
+            key=key,
+            values=tuple((value, _PLATFORM_PROTOCOL_VALUES[value]) for value in values),
+            default=default,
+        )
+    return None
+
+
 def render_search_listing(
     ir: SourceIR,
     implementation: ImplementationIR | None = None,
+    *,
+    resources: GeneratedResources | None = None,
 ) -> GeneratedFile:
     """Render the Source search/rank/browse vertical slice without generated Rust input."""
     implementation = implementation or project_implementation_ir(ir)
@@ -694,6 +773,7 @@ def render_search_listing(
             global_headers=global_headers,
             default_profile=default_profile,
             conditional_profiles=conditional_profiles,
+            platform_header=_platform_header_view(resources),
         )
     )
     return GeneratedFile(path="src/c2a_listing.rs", content=content)
@@ -817,6 +897,23 @@ def _with_listing_provider_delegate(content: str, source_struct: str) -> str:
     return content.rstrip() + implementation
 
 
+def _without_listing_provider_impl(content: str, source_struct: str) -> str:
+    edits: list[tuple[int, int]] = []
+    for implementation in RustInspection.from_content(content).nodes("impl_item"):
+        trait = implementation.child_by_field_name("trait")
+        target = implementation.child_by_field_name("type")
+        if trait is None or target is None:
+            continue
+        trait_name = trait.text.decode("utf-8", errors="replace").rsplit("::", 1)[-1]
+        target_name = target.text.decode("utf-8", errors="replace").rsplit("::", 1)[-1]
+        if trait_name == "ListingProvider" and target_name == source_struct:
+            edits.append((implementation.start_byte, implementation.end_byte))
+    encoded = content.encode("utf-8")
+    for begin, end in sorted(edits, reverse=True):
+        encoded = encoded[:begin] + encoded[end:]
+    return encoded.decode("utf-8")
+
+
 def _with_serde_derive(dependencies: list[DependencyRequest]) -> list[DependencyRequest]:
     result = list(dependencies)
     for index, dependency in enumerate(result):
@@ -842,7 +939,11 @@ def with_deterministic_search_listing(
     """Own the search-listing Rust file and Source delegation in an effective manifest."""
     try:
         implementation = project_implementation_ir(ir)
-        rendered = render_search_listing(ir, implementation)
+        rendered = render_search_listing(
+            ir,
+            implementation,
+            resources=GeneratedResources(manifest),
+        )
     except (KeyError, ValueError):
         return manifest
     provider_owned = _provider_is_complete(ir, implementation)
@@ -855,6 +956,8 @@ def with_deterministic_search_listing(
         if generated.path == rendered.path:
             continue
         content = generated.content
+        if provider_owned and generated.path.endswith(".rs"):
+            content = _without_listing_provider_impl(content, manifest.source_struct)
         if not delegated and generated.path.endswith(".rs"):
             replacement = _delegate_search_function(content)
             if replacement is not None:

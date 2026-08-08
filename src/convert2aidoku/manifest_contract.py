@@ -548,6 +548,41 @@ def _settings_not_read(resources: GeneratedResources, rust_content: str) -> list
             consumed.add(json.loads(argument))
         elif argument in constants:
             consumed.add(constants[argument])
+    inspection = RustInspection.from_content(rust_content)
+    wrapper_definitions: dict[str, list[set[int]]] = {}
+    for function in inspection.functions:
+        parameter_indexes: set[int] = set()
+        for index, parameter in enumerate(function.parameter_names):
+            if re.search(
+                r"(?:aidoku::imports::defaults::)?defaults_get\s*"
+                r"(?:::\s*<[^;{}()]+>)?\s*\(\s*"
+                rf"{re.escape(parameter)}\s*\)",
+                function.text,
+            ):
+                parameter_indexes.add(index)
+        wrapper_definitions.setdefault(function.name, []).append(parameter_indexes)
+    wrappers = {
+        name: set.intersection(*definitions)
+        for name, definitions in wrapper_definitions.items()
+        if definitions and all(definitions)
+    }
+    for call in inspection.nodes("call_expression"):
+        target = call.child_by_field_name("function")
+        call_arguments = call.child_by_field_name("arguments")
+        if target is None or call_arguments is None:
+            continue
+        name = re.split(
+            r"::|\.",
+            target.text.decode("utf-8", errors="replace"),
+        )[-1]
+        for index in wrappers.get(name, ()):
+            if index >= len(call_arguments.named_children):
+                continue
+            argument = call_arguments.named_children[index].text.decode("utf-8", errors="replace")
+            if argument.startswith('"'):
+                consumed.add(json.loads(argument))
+            elif argument in constants:
+                consumed.add(constants[argument])
     return [key for key in keys if key not in consumed]
 
 

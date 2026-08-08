@@ -2,10 +2,58 @@ use super::{{ source_struct }};
 use aidoku::{PageContent, Source, alloc::{String, Vec{% if static_filter_cases or dynamic_filters %}, vec{% endif %}}{% if static_filter_cases or dynamic_filters %}, FilterValue{% endif %}{% if listing_provider %}, Listing, ListingProvider{% endif %}{% if dynamic_filters %}, DynamicFilters, FilterKind{% endif %}{% if deep_link_handler %}, DeepLinkHandler{% endif %}{% if not image_request_provider %}, imports::net::Request{% endif %}};
 use aidoku_test::aidoku_test;
 {% if image_request_provider %}use aidoku::ImageRequestProvider;{% endif %}
+{% if api_domain_setting %}use aidoku::imports::defaults::{DefaultValue, defaults_set};
+
+fn select_readable_api_domain(source: &{{ source_struct }}) {
+	let candidates = [{% for domain in api_domain_setting.candidates %}{{ domain | tojson }}{% if not loop.last %}, {% endif %}{% endfor %}];
+	for domain in candidates {
+		defaults_set({{ api_domain_setting.key | tojson }}, DefaultValue::String(domain.into()));
+		let Ok(result) = source.get_search_manga_list({{ query_expression }}, 1, Vec::new()) else {
+			continue;
+		};
+		let Some(candidate) = result.entries.into_iter().next() else {
+			continue;
+		};
+		let Ok(updated) = source.get_manga_update(candidate, true, true) else {
+			continue;
+		};
+		let Some(chapter) = updated
+			.chapters
+			.as_ref()
+			.and_then(|chapters| chapters.first())
+			.cloned()
+		else {
+			continue;
+		};
+		if !updated.title.is_empty()
+			&& matches!(source.get_page_list(updated, chapter), Ok(pages) if !pages.is_empty())
+		{
+			return;
+		}
+	}
+	panic!("no configured API domain produced readable manga");
+}
+
+fn select_listing_api_domain(source: &{{ source_struct }}) {
+	let candidates = [{% for domain in api_domain_setting.candidates %}{{ domain | tojson }}{% if not loop.last %}, {% endif %}{% endfor %}];
+	for domain in candidates {
+		defaults_set({{ api_domain_setting.key | tojson }}, DefaultValue::String(domain.into()));
+		if matches!(
+			source.get_search_manga_list(None, 1, Vec::new()),
+			Ok(result) if !result.entries.is_empty()
+		) {
+			return;
+		}
+	}
+	panic!("no configured API domain produced a manga list");
+}
+{% endif %}
 
 #[aidoku_test]
 fn generated_core_live_smoke() {
 	let source = {{ source_struct }}::new();
+	{% if api_domain_setting %}select_readable_api_domain(&source);
+	{% endif %}
 	{% if dynamic_filters %}
 	let dynamic_filters = source
 		.get_dynamic_filters()
@@ -202,6 +250,8 @@ fn generated_core_live_smoke() {
 #[aidoku_test]
 fn generated_static_filters_live_smoke() {
 	let source = {{ source_struct }}::new();
+	{% if api_domain_setting %}select_listing_api_domain(&source);
+	{% endif %}
 	let cases: Vec<(&str, Vec<FilterValue>)> = vec![
 		{% for case in static_filter_cases %}
 		({{ case.id | tojson }}, vec![

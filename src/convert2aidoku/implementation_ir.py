@@ -132,6 +132,8 @@ class MangaMappingIR(BaseModel):
     cover_path: str | None = None
     authors_path: str | None = None
     tags_path: str | None = None
+    authors_item_projection: Literal["kotlin_data_to_string"] | None = None
+    tags_item_projection: Literal["kotlin_data_to_string"] | None = None
     description_path: str | None = None
     unresolved_fields: list[Literal["key", "title", "cover", "authors", "tags", "description"]] = (
         Field(default_factory=list)
@@ -1445,26 +1447,27 @@ def _string_template(argument: str, shape: DecompiledDtoShape) -> str | None:
     return result if has_field and result.startswith("/") and "://" not in result else None
 
 
-def _setter_collection_path(
+def _setter_collection_projection(
     block: str,
     shape: DecompiledDtoShape,
     setter: str,
     shapes: dict[str, DecompiledDtoShape],
+    kotlin_data_classes: frozenset[str],
     allowed_wrapper_variables: frozenset[str] = frozenset(),
-) -> str | None:
+) -> tuple[str | None, Literal["kotlin_data_to_string"] | None]:
     argument = _setter_argument(block, setter)
     if argument is None:
-        return None
+        return None, None
     fields = set(re.findall(r"\bthis\.([A-Za-z_][A-Za-z0-9_]*)", argument))
     if len(fields) != 1:
-        return None
+        return None, None
     java_name = next(iter(fields))
     field = next((item for item in shape.fields if item.name == java_name), None)
     if field is None:
-        return None
+        return None, None
     item_type = _list_item_type(field.java_type) if field is not None else None
     if item_type is None:
-        return (
+        path = (
             java_name
             if field.java_type in {"String", "java.lang.String"}
             and _setter_projection_field(
@@ -1475,17 +1478,18 @@ def _setter_collection_path(
             == java_name
             else None
         )
+        return path, None
     if not re.match(
         r"\s*(?:(?:[A-Za-z_][A-Za-z0-9_$]*)\.)*"
         r"(?:join|joinToString(?:\$default)?)\s*\(",
         argument,
     ):
-        return None
+        return None, None
     if item_type in {"String", "java.lang.String"}:
-        return f"{java_name}[]"
+        return f"{java_name}[]", None
     item_shape = shapes.get(item_type)
     if item_shape is None:
-        return None
+        return None, None
     getter_fields = set()
     for _variable, getter in re.findall(
         r"\b([A-Za-z_][A-Za-z0-9_]*)\s*->\s*\1\.get"
@@ -1520,9 +1524,22 @@ def _setter_collection_path(
                 if re.search(rf"\b{re.escape(item_type)}\s+{re.escape(variable)}\b", argument):
                     getter_fields.add(getter[:1].lower() + getter[1:])
     children = [field for field in item_shape.fields if field.name in getter_fields]
-    if len(children) != 1:
-        return None
-    return f"{java_name}[].{children[0].name}"
+    if len(children) == 1:
+        return f"{java_name}[].{children[0].name}", None
+    implicit_data_to_string = (
+        not getter_fields
+        and item_type in kotlin_data_classes
+        and item_shape.fields
+        and all(child.java_type in {"String", "java.lang.String"} for child in item_shape.fields)
+        and re.search(
+            r"\(\s*(?:(?:[A-Za-z_][A-Za-z0-9_$]*)\.)*Function1\s*\)\s*null\b",
+            argument,
+        )
+        is not None
+    )
+    if implicit_data_to_string:
+        return f"{java_name}[]", "kotlin_data_to_string"
+    return None, None
 
 
 def _manga_mappings(
@@ -1533,9 +1550,16 @@ def _manga_mappings(
     allow_script_conversion_fallback: bool,
     preserve_cover_urls: bool,
 ) -> list[MangaMappingIR]:
+    source_files = tuple(files)
     by_name = {shape.name: shape for shape in shapes}
+    kotlin_data_classes = frozenset(
+        PurePosixPath(source.path).stem
+        for source in source_files
+        if source.path.endswith(".java")
+        and re.search(r"\bfinal\s+/\*\s*data\s*\*/\s+class\b", source.content)
+    )
     mappings: list[MangaMappingIR] = []
-    for source in files:
+    for source in source_files:
         if not source.path.endswith(".java") or "toSManga" not in source.content:
             continue
         type_name = PurePosixPath(source.path).stem
@@ -1561,6 +1585,22 @@ def _manga_mappings(
         )
         url_argument = _setter_argument(block, "setUrl")
         key_template = _string_template(url_argument, shape) if url_argument else None
+        authors_path, authors_item_projection = _setter_collection_projection(
+            block,
+            shape,
+            "setAuthor",
+            by_name,
+            kotlin_data_classes,
+            wrapper_variables,
+        )
+        tags_path, tags_item_projection = _setter_collection_projection(
+            block,
+            shape,
+            "setGenre",
+            by_name,
+            kotlin_data_classes,
+            wrapper_variables,
+        )
         projections = {
             "title": _setter_path(
                 block,
@@ -1574,20 +1614,8 @@ def _manga_mappings(
                 "setThumbnail_url",
                 allow_wrapper=preserve_cover_urls,
             ),
-            "authors": _setter_collection_path(
-                block,
-                shape,
-                "setAuthor",
-                by_name,
-                wrapper_variables,
-            ),
-            "tags": _setter_collection_path(
-                block,
-                shape,
-                "setGenre",
-                by_name,
-                wrapper_variables,
-            ),
+            "authors": authors_path,
+            "tags": tags_path,
             "description": _setter_path(
                 block,
                 shape,
@@ -1620,6 +1648,8 @@ def _manga_mappings(
                 cover_path=projections["cover"],
                 authors_path=projections["authors"],
                 tags_path=projections["tags"],
+                authors_item_projection=authors_item_projection,
+                tags_item_projection=tags_item_projection,
                 description_path=projections["description"],
                 unresolved_fields=unresolved_fields,
             )

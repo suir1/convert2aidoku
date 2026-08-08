@@ -401,6 +401,41 @@ def _normalize_pinned_model_shapes(content: str) -> str:
     return content
 
 
+def _enclosing_impl(node: Any) -> Any | None:
+    parent = node.parent
+    while parent is not None:
+        if parent.type == "impl_item":
+            return parent
+        parent = parent.parent
+    return None
+
+
+def _normalize_pinned_trait_impls(content: str) -> str:
+    """Pin generated optional-trait receivers to the selected Aidoku revision."""
+    edits: list[tuple[int, int, bytes]] = []
+    inspection = RustInspection.from_content(content)
+    for function in inspection.named("get_manga_list"):
+        implementation = _enclosing_impl(function.node)
+        trait = implementation.child_by_field_name("trait") if implementation is not None else None
+        if _last_rust_identifier(trait) != "ListingProvider":
+            continue
+        parameters = function.node.child_by_field_name("parameters")
+        receiver = next(
+            (
+                parameter
+                for parameter in (parameters.named_children if parameters is not None else ())
+                if parameter.type == "self_parameter"
+            ),
+            None,
+        )
+        if receiver is not None and RustInspection.compact_node(receiver) == "&mutself":
+            edits.append((receiver.start_byte, receiver.end_byte, b"&self"))
+    encoded = content.encode("utf-8")
+    for begin, end, replacement in sorted(edits, reverse=True):
+        encoded = encoded[:begin] + replacement + encoded[end:]
+    return encoded.decode("utf-8")
+
+
 def _normalize_optional_model_shorthand(content: str) -> str:
     optional = {
         "Manga": {"url", "cover", "description"},
@@ -620,11 +655,26 @@ def _normalize_nested_optional_model_fields(content: str) -> str:
         ):
             continue
         argument = arguments.named_children[0]
-        if argument.type != "field_expression":
+        field_expression = argument
+        if argument.type == "call_expression":
+            method = argument.child_by_field_name("function")
+            method_arguments = argument.child_by_field_name("arguments")
+            method_name = method.child_by_field_name("field") if method is not None else None
+            if (
+                method is None
+                or method.type != "field_expression"
+                or method_name is None
+                or method_name.text != b"clone"
+                or method_arguments is None
+                or method_arguments.named_children
+            ):
+                continue
+            field_expression = method.child_by_field_name("value")
+        if field_expression is None or field_expression.type != "field_expression":
             continue
-        source = argument.child_by_field_name("value")
-        field = argument.child_by_field_name("field")
-        if source is None or field is None or source.type != "identifier":
+        source = field_expression.child_by_field_name("value")
+        field = field_expression.child_by_field_name("field")
+        if source is None or field is None or source.type not in {"identifier", "self"}:
             continue
 
         owner = call
@@ -649,7 +699,14 @@ def _normalize_nested_optional_model_fields(content: str) -> str:
         if not model_target or function_node is None:
             continue
         source_name = source.text.decode("utf-8", errors="replace")
-        source_type = parameter_types.get(function_node.start_byte, {}).get(source_name)
+        if source.type == "self":
+            implementation = _enclosing_impl(function_node)
+            type_node = (
+                implementation.child_by_field_name("type") if implementation is not None else None
+            )
+            source_type = _last_rust_identifier(type_node)
+        else:
+            source_type = parameter_types.get(function_node.start_byte, {}).get(source_name)
         field_name = field.text.decode("utf-8", errors="replace")
         field_type = inspection.struct_field_type(source_type or "", field_name)
         if field_type is None or re.match(r"(?:core::option::)?Option\s*<", field_type) is None:
@@ -3630,6 +3687,31 @@ def _normalize_boolean_let_some_alternatives(content: str) -> str:
     return _BOOLEAN_LET_SOME_ALTERNATIVE.sub(replace, content)
 
 
+def _normalize_index_length_guards(content: str) -> str:
+    """Require one element beyond an index that is read inside the guarded branch."""
+    edits: list[tuple[int, int, bytes]] = []
+    for branch in RustInspection.from_content(content).nodes("if_expression"):
+        condition = branch.child_by_field_name("condition")
+        consequence = branch.child_by_field_name("consequence")
+        if condition is None or consequence is None:
+            continue
+        match = re.fullmatch(
+            r"(?P<value>[A-Za-z_]\w*)\.len\(\)>=(?P<index>[0-9]+)",
+            RustInspection.compact_node(condition),
+        )
+        if match is None:
+            continue
+        indexed = f"{match.group('value')}.as_bytes()[{match.group('index')}]"
+        if indexed not in RustInspection.compact_node(consequence):
+            continue
+        replacement = condition.text.decode("utf-8", errors="replace").replace(">=", ">", 1)
+        edits.append((condition.start_byte, condition.end_byte, replacement.encode()))
+    encoded = content.encode("utf-8")
+    for begin, end, replacement in sorted(edits, reverse=True):
+        encoded = encoded[:begin] + replacement + encoded[end:]
+    return encoded.decode("utf-8")
+
+
 def normalize_pinned_aidoku_rust(
     content: str,
     *,
@@ -3667,6 +3749,7 @@ def normalize_pinned_aidoku_rust(
     apply(_normalize_graphql_body_fragment)
     apply(_normalize_html_element_text)
     apply(_normalize_utf8_slice_loops)
+    apply(_normalize_index_length_guards)
     apply(_normalize_graphql_manga_update_projection)
     apply(_normalize_image_request_result)
     apply(_normalize_result_request_tails)
@@ -3715,6 +3798,7 @@ def normalize_pinned_aidoku_rust(
     )
     record("chapter_route_double_slash", before)
     apply(_normalize_idempotent_get_retry)
+    apply(_normalize_pinned_trait_impls)
     apply(_normalize_pinned_model_shapes)
     apply(_normalize_optional_model_shorthand)
     apply(_normalize_pinned_model_fields)
@@ -5354,6 +5438,22 @@ def _dependency_context(names: set[str]) -> Mapping[str, PinnedDependency]:
     return evaluation.cargo_dependencies
 
 
+def _live_api_domain_setting(resources: GeneratedResources) -> dict[str, object] | None:
+    defaults = resources.setting_defaults()
+    for key, values in resources.setting_values().items():
+        if key.rsplit(".", 1)[-1] != "api_domain":
+            continue
+        default = defaults.get(key)
+        candidates = [
+            value
+            for value in dict.fromkeys([default, *values])
+            if value and value.casefold() != "custom"
+        ]
+        if len(candidates) > 1:
+            return {"key": key, "candidates": tuple(candidates)}
+    return None
+
+
 def _write_cargo(
     destination: Path,
     ir: SourceIR,
@@ -5481,6 +5581,7 @@ def apply_generation_manifest(
     smoke_module = "#[cfg(test)]\nmod generated_smoke;"
     lib_path.write_text(lib.rstrip() + "\n\n" + smoke_module + "\n", encoding="utf-8")
 
+    live_resources = GeneratedResources(manifest)
     smoke = (
         _environment()
         .get_template("smoke.rs.j2")
@@ -5495,7 +5596,8 @@ def apply_generation_manifest(
             query_expression=(
                 f"Some({json.dumps(query, ensure_ascii=False)}.into())" if query else "None"
             ),
-            static_filter_cases=GeneratedResources(manifest).static_filter_cases(),
+            static_filter_cases=live_resources.static_filter_cases(),
+            api_domain_setting=_live_api_domain_setting(live_resources),
         )
     )
     (destination / "src" / "generated_smoke.rs").write_text(smoke, encoding="utf-8")

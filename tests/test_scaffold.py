@@ -123,6 +123,42 @@ def test_smoke_query_uses_valid_rust_unicode_literal(tmp_path: Path) -> None:
     assert "\\u6f2b" not in smoke
 
 
+def test_live_smoke_can_probe_non_custom_api_domain_settings(tmp_path: Path) -> None:
+    manifest = _manifest()
+    manifest.files.append(
+        GeneratedFile(
+            path="res/settings.json",
+            content="""[
+                {
+                    "type": "group",
+                    "title": "Settings",
+                    "items": [
+                        {
+                            "type": "select",
+                            "key": "v2.pref.api_domain",
+                            "title": "API Domain",
+                            "values": ["api.alt.example", "api.default.example", "custom"],
+                            "titles": ["Alternative", "Default", "Custom"],
+                            "default": "api.default.example"
+                        }
+                    ]
+                }
+            ]""",
+        )
+    )
+    project, ir = scaffold_project(tmp_path)
+
+    apply_generation_manifest(project, ir, manifest, query="manga")
+    smoke = (project / "src" / "generated_smoke.rs").read_text()
+
+    assert 'defaults_set("v2.pref.api_domain"' in smoke
+    assert '"api.default.example", "api.alt.example"' in smoke
+    assert "DefaultValue::String(domain.into())" in smoke
+    assert '"custom"' not in smoke
+    assert "select_readable_api_domain(&source)" in smoke
+    assert "source.get_page_list(updated, chapter)" in smoke
+
+
 def test_scaffold_rejects_unapproved_dependency(tmp_path: Path) -> None:
     project, ir = scaffold_project(tmp_path)
     with pytest.raises(SecurityError, match="disallowed dependency"):
@@ -1187,6 +1223,73 @@ fn update(manga: &mut Manga, dto: MangaDto) {
     assert "description: dto.description" in normalized
     assert "manga.cover = dto.cover_img_url;" in normalized
     assert "manga.description = dto.description;" in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
+def test_normalizer_does_not_double_wrap_optional_self_model_fields() -> None:
+    content = """
+struct ComicDetail {
+    brief: Option<String>,
+    cover: Option<String>,
+}
+impl ComicDetail {
+    fn manga(&self) -> Manga {
+        Manga {
+            description: Some(self.brief.clone()),
+            cover: Some(self.cover.clone()),
+            ..Default::default()
+        }
+    }
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "description: self.brief.clone()" in normalized
+    assert "cover: self.cover.clone()" in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
+def test_normalizer_pins_listing_provider_receiver() -> None:
+    content = """
+impl ListingProvider for CopyManga {
+    fn get_manga_list(
+        &mut self,
+        _listing: Listing,
+        _page: i32,
+    ) -> Result<MangaPageResult> {
+        Ok(MangaPageResult::default())
+    }
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "&mut self" not in normalized
+    assert "&self" in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
+def test_normalizer_repairs_exact_length_index_guard() -> None:
+    content = """
+fn normalize(value: &str) -> String {
+    let mut normalized = String::from(value);
+    if normalized.len() >= 10 {
+        if normalized.as_bytes()[10] == b'T' {
+            normalized.replace_range(10..11, " ");
+        }
+    }
+    if normalized.len() >= 20 {
+        normalized.push('!');
+    }
+    normalized
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "if normalized.len() > 10" in normalized
+    assert "if normalized.len() >= 20" in normalized
     assert normalize_pinned_aidoku_rust(normalized) == normalized
 
 

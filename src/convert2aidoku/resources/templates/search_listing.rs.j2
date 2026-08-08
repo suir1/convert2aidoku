@@ -90,6 +90,17 @@ fn request(url: String) -> Result<Request> {
     request = request.header({{ name | rust_string }}, {{ value | rust_string }});
 {% endfor %}
 {% endif %}
+{% if platform_header %}
+    let platform: Option<&str> = match defaults_get::<String>({{ platform_header.key | rust_string }}).as_deref() {
+{% for stored, protocol in platform_header.values %}
+        Some({{ stored | rust_string }}) => {% if protocol is none %}None{% else %}Some({{ protocol | rust_string }}){% endif %},
+{% endfor %}
+        _ => {% if platform_header.default is none %}None{% else %}Some({{ platform_header.default | rust_string }}){% endif %},
+    };
+    if let Some(platform) = platform {
+        request = request.header("platform", platform);
+    }
+{% endif %}
     Ok(request)
 }
 
@@ -105,7 +116,12 @@ fn get_json<T: for<'a> Deserialize<'a>>(url: String) -> Result<T> {
 fn {{ mapping.function_name }}(item: {{ mapping.type_name }}) -> Manga {
 {% if mapping.authors_field %}
 {% if mapping.authors_is_collection %}
-{% if mapping.authors_name_field %}
+{% if mapping.authors_item_string %}
+    let authors: Vec<String> = item.{{ mapping.authors_field }}
+        .into_iter()
+        .map(|value| format!({{ mapping.authors_item_string.format_string | rust_string }}{% for field in mapping.authors_item_string.fields %}, value.{{ field }}{% endfor %}))
+        .collect();
+{% elif mapping.authors_name_field %}
     let authors: Vec<String> = item.{{ mapping.authors_field }}
         .into_iter()
         .map(|value| value.{{ mapping.authors_name_field }})
@@ -123,7 +139,12 @@ fn {{ mapping.function_name }}(item: {{ mapping.type_name }}) -> Manga {
 {% endif %}
 {% if mapping.tags_field %}
 {% if mapping.tags_is_collection %}
-{% if mapping.tags_name_field %}
+{% if mapping.tags_item_string %}
+    let tags: Vec<String> = item.{{ mapping.tags_field }}
+        .into_iter()
+        .map(|value| format!({{ mapping.tags_item_string.format_string | rust_string }}{% for field in mapping.tags_item_string.fields %}, value.{{ field }}{% endfor %}))
+        .collect();
+{% elif mapping.tags_name_field %}
     let tags: Vec<String> = item.{{ mapping.tags_field }}
         .into_iter()
         .map(|value| value.{{ mapping.tags_name_field }})
