@@ -23,6 +23,7 @@ from convert2aidoku.models import (
     Capability,
     GeneratedFile,
     GenerationManifest,
+    ImageUrlPolicy,
     RequestHeaderProfile,
     SourceFile,
     SourceFilterOption,
@@ -229,7 +230,7 @@ def _copymanga_listing_files() -> list[SourceFile]:
                 public final SManga toSManga() {
                     SManga manga = SManga.create();
                     manga.setUrl("/comic/" + this.pathWord);
-                    manga.setTitle(translate(this.name));
+                    manga.setTitle(this.name);
                     manga.setAuthor(join(this.author, value -> value.getName()));
                     manga.setDescription("");
                     manga.setGenre("");
@@ -399,7 +400,7 @@ def _serializable_listing_files() -> list[SourceFile]:
                     manga.setUrl("/comic/" + this.comicId);
                     manga.setTitle(this.name);
                     manga.setThumbnail_url(this.cover);
-                    manga.setAuthor(translate(this.author));
+                    manga.setAuthor(this.author);
                     manga.setGenre(join(this.typeNames));
                     return manga;
                 }
@@ -530,7 +531,7 @@ def test_projects_copymanga_listing_contract_without_provider() -> None:
     assert containers["RankResult"].manga_item_type == "ComicSummary"
 
     mapping = next(item for item in listing.manga_mappings if item.item_type == "ComicSummary")
-    assert mapping.key_template == "/comic/{path_word}"
+    assert mapping.key_template == "/comic/{pathWord}"
     assert mapping.title_path == "name"
     assert mapping.cover_path == "cover"
     assert mapping.authors_path == "author[].name"
@@ -825,10 +826,14 @@ def test_manga_key_projection_preserves_complete_concatenation() -> None:
     assert mapping.key_template == "/comic/{comicId}/view"
 
 
-def test_manga_key_helper_is_left_unresolved() -> None:
+@pytest.mark.parametrize(
+    "expression",
+    ["buildUrl(this.comicId)", '"https://example.com/comic/" + this.comicId'],
+)
+def test_unsupported_manga_key_is_left_unresolved(expression: str) -> None:
     files = _serializable_listing_files()
     item = next(file for file in files if file.path.endswith("ComicItem.java"))
-    item.content = item.content.replace('"/comic/" + this.comicId', "buildUrl(this.comicId)")
+    item.content = item.content.replace('"/comic/" + this.comicId', expression)
     item.sha256 = hashlib.sha256(item.content.encode()).hexdigest()
     ir = minimal_source_ir(
         source_id="en.example",
@@ -842,7 +847,7 @@ def test_manga_key_helper_is_left_unresolved() -> None:
     assert "listing manga key mapping is unresolved for ComicItem" in (
         implementation.unresolved_facts
     )
-    with pytest.raises(ValueError, match="lacks key or title"):
+    with pytest.raises(ValueError, match="unresolved fields: key"):
         render_search_listing(ir, implementation)
 
 
@@ -866,6 +871,112 @@ def test_multifield_title_is_not_reduced_to_first_field() -> None:
     assert "listing manga title mapping is unresolved for ComicItem" in (
         implementation.unresolved_facts
     )
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "manga.setTitle(decrypt(this.name));",
+        "manga.setTitle(this.name); manga.setTitle(this.cover);",
+        "if (enabled) { manga.setTitle(this.name); }",
+    ],
+)
+def test_nonidentity_or_nonunique_title_setter_is_unresolved(statement: str) -> None:
+    files = _serializable_listing_files()
+    item = next(file for file in files if file.path.endswith("ComicItem.java"))
+    item.content = item.content.replace("manga.setTitle(this.name);", statement)
+    item.sha256 = hashlib.sha256(item.content.encode()).hexdigest()
+    ir = minimal_source_ir(
+        source_id="en.example",
+        source_format="decompiled_apk",
+        main_class="Example",
+        files=files,
+    )
+
+    implementation = project_implementation_ir(ir)
+
+    assert "listing manga title mapping is unresolved for ComicItem" in (
+        implementation.unresolved_facts
+    )
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "field"),
+    [
+        ("this.cover", "cdn(this.cover)", "cover"),
+        ("join(this.typeNames)", "first(this.typeNames)", "tags"),
+    ],
+)
+def test_unsupported_optional_projection_blocks_ownership(
+    old: str,
+    new: str,
+    field: str,
+) -> None:
+    files = _serializable_listing_files()
+    item = next(file for file in files if file.path.endswith("ComicItem.java"))
+    item.content = item.content.replace(old, new)
+    item.sha256 = hashlib.sha256(item.content.encode()).hexdigest()
+    ir = minimal_source_ir(
+        source_id="en.example",
+        source_format="decompiled_apk",
+        main_class="Example",
+        files=files,
+    )
+
+    implementation = project_implementation_ir(ir)
+
+    assert f"listing manga {field} mapping is unresolved for ComicItem" in (
+        implementation.unresolved_facts
+    )
+    with pytest.raises(ValueError, match=f"unresolved fields: {field}"):
+        render_search_listing(ir, implementation)
+
+
+def test_public_scope_can_project_explicitly_excluded_presentation_wrappers() -> None:
+    files = _copymanga_listing_files()
+    summary = next(file for file in files if file.path.endswith("ComicSummary.java"))
+    summary.content = (
+        summary.content.replace(
+            "toSManga()",
+            "toSManga(CCOption language, String resolution)",
+        )
+        .replace(
+            "setTitle(this.name)",
+            "setTitle(convert(this.name, language))",
+        )
+        .replace(
+            "setThumbnail_url(this.cover)",
+            "setThumbnail_url(resize(this.cover, resolution))",
+        )
+        .replace(
+            "value -> value.getName()",
+            "value -> convert(value.getName(), language)",
+        )
+    )
+    summary.sha256 = hashlib.sha256(summary.content.encode()).hexdigest()
+    ir = minimal_source_ir(
+        source_id="zh.example",
+        source_format="decompiled_apk",
+        feature_scope="public_only",
+        main_class="CopyManga",
+        files=files,
+        filter_specs=_copymanga_filter_specs(),
+        image_url_policy=ImageUrlPolicy(preserve_cover_urls=True),
+        unsupported_features=[
+            "Android ChineseUtils script conversion setting (excluded by public-only APK scope)"
+        ],
+    )
+
+    implementation = project_implementation_ir(ir)
+
+    assert implementation.listing is not None
+    mapping = next(
+        item for item in implementation.listing.manga_mappings if item.item_type == "ComicSummary"
+    )
+    assert mapping.unresolved_fields == []
+    assert mapping.title_path == "name"
+    assert mapping.cover_path == "cover"
+    assert mapping.authors_path == "author[].name"
 
 
 def test_object_collection_child_comes_from_setter_getter() -> None:
@@ -918,6 +1029,29 @@ def test_object_collection_without_getter_is_not_guessed_as_name() -> None:
     assert mapping.authors_path is None
 
 
+def test_wrapped_object_collection_getter_is_unresolved() -> None:
+    files = _copymanga_listing_files()
+    summary = next(file for file in files if file.path.endswith("ComicSummary.java"))
+    summary.content = summary.content.replace(
+        "value -> value.getName()",
+        "value -> normalize(value.getName())",
+    )
+    summary.sha256 = hashlib.sha256(summary.content.encode()).hexdigest()
+    ir = minimal_source_ir(
+        source_id="zh.example",
+        source_format="decompiled_apk",
+        main_class="CopyManga",
+        files=files,
+        filter_specs=_copymanga_filter_specs(),
+    )
+
+    implementation = project_implementation_ir(ir)
+
+    assert "listing manga authors mapping is unresolved for ComicSummary" in (
+        implementation.unresolved_facts
+    )
+
+
 def test_scalar_object_is_not_rendered_as_string_metadata() -> None:
     files = _serializable_listing_files()
     item = next(file for file in files if file.path.endswith("ComicItem.java"))
@@ -934,6 +1068,71 @@ def test_scalar_object_is_not_rendered_as_string_metadata() -> None:
 
     assert implementation.listing is not None
     assert implementation.listing.manga_mappings[0].authors_path is None
+
+
+def test_mapping_field_identity_is_not_confused_with_serialized_name() -> None:
+    files = _serializable_listing_files()
+    item = next(file for file in files if file.path.endswith("ComicItem.java"))
+    item.content = (
+        item.content.replace(
+            "public final class ComicItem {",
+            '''public final class ComicItem {
+                // Serialized field names:
+                // comicId -> "slug"
+                // alias -> "comicId"''',
+        )
+        .replace(
+            "private final String comicId;",
+            "private final String comicId; private final String alias;",
+        )
+        .replace("this.comicId", "this.alias")
+    )
+    item.sha256 = hashlib.sha256(item.content.encode()).hexdigest()
+    ir = minimal_source_ir(
+        source_id="en.example",
+        source_format="decompiled_apk",
+        main_class="Example",
+        files=files,
+    )
+
+    implementation = project_implementation_ir(ir)
+    rendered = render_search_listing(ir, implementation)
+
+    assert implementation.listing is not None
+    assert implementation.listing.manga_mappings[0].key_template == "/comic/{alias}"
+    assert 'format!("/comic/{}", item.comic_id)' in rendered.content
+    assert 'format!("/comic/{}", item.slug)' not in rendered.content
+
+
+def test_nested_mapping_field_uses_java_identity_before_serialized_name() -> None:
+    files = _copymanga_listing_files()
+    author = next(file for file in files if file.path.endswith("AuthorInfo.java"))
+    author.content = author.content.replace(
+        "public final class AuthorInfo { private final String name; }",
+        """public final class AuthorInfo {
+            // Serialized field names:
+            // name -> "label"
+            // alias -> "name"
+            private final String name;
+            private final String alias;
+        }""",
+    )
+    author.sha256 = hashlib.sha256(author.content.encode()).hexdigest()
+    ir = minimal_source_ir(
+        source_id="zh.example",
+        source_format="decompiled_apk",
+        main_class="CopyManga",
+        files=files,
+        filter_specs=_copymanga_filter_specs(),
+    )
+
+    implementation = project_implementation_ir(ir)
+    rendered = render_search_listing(ir, implementation)
+
+    assert ".map(|value| value.label)" in rendered.content
+    author_struct = rendered.content.split("struct AuthorInfo {", 1)[1].split("}\n", 1)[0]
+    assert "    label: String," in author_struct
+    assert "    name: String," not in author_struct
 
 
 def test_non_string_next_field_does_not_emit_string_cursor_logic() -> None:

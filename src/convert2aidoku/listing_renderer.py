@@ -98,6 +98,18 @@ class SearchListingOwnership:
     dto_types: frozenset[str]
 
 
+def _provider_endpoint_ids(provider: ListingProviderIR | None) -> tuple[str, ...]:
+    if provider is None:
+        return ()
+    endpoint_ids: list[str] = []
+    if provider.popular_endpoint_id is not None:
+        endpoint_ids.append(provider.popular_endpoint_id)
+    if provider.latest is not None:
+        endpoint_ids.extend(provider.latest.endpoint_ids_by_setting_value.values())
+        endpoint_ids.append(provider.latest.default_endpoint_id)
+    return tuple(dict.fromkeys(endpoint_ids))
+
+
 def _provider_is_complete(ir: SourceIR, implementation: ImplementationIR) -> bool:
     listing = implementation.listing
     provider = listing.provider if listing is not None else None
@@ -107,7 +119,25 @@ def _provider_is_complete(ir: SourceIR, implementation: ImplementationIR) -> boo
         return False
     if Capability.LATEST in ir.capabilities and provider.latest is None:
         return False
-    return Capability.POPULAR in ir.capabilities or Capability.LATEST in ir.capabilities
+    if not (Capability.POPULAR in ir.capabilities or Capability.LATEST in ir.capabilities):
+        return False
+    endpoints = {endpoint.id: endpoint for endpoint in listing.endpoints}
+    containers = {container.type_name: container for container in listing.containers}
+    mappings = {mapping.item_type: mapping for mapping in listing.manga_mappings}
+    for endpoint_id in _provider_endpoint_ids(provider):
+        endpoint = endpoints.get(endpoint_id)
+        container = containers.get(endpoint.response_type) if endpoint is not None else None
+        mapping = mappings.get(container.manga_item_type) if container is not None else None
+        if (
+            endpoint is None
+            or endpoint.response_evidence == "name_match"
+            or mapping is None
+            or mapping.key_template is None
+            or mapping.title_path is None
+            or mapping.unresolved_fields
+        ):
+            return False
+    return True
 
 
 def _selected_endpoint_ids(
@@ -117,20 +147,13 @@ def _selected_endpoint_ids(
     dispatch = listing.search_dispatch
     if dispatch is None:
         raise ValueError("Implementation IR has no deterministic search dispatch")
-    provider_ids: list[str] = []
-    if provider is not None:
-        if provider.popular_endpoint_id is not None:
-            provider_ids.append(provider.popular_endpoint_id)
-        if provider.latest is not None:
-            provider_ids.extend(provider.latest.endpoint_ids_by_setting_value.values())
-            provider_ids.append(provider.latest.default_endpoint_id)
     return tuple(
         dict.fromkeys(
             [
                 dispatch.query_endpoint_id,
                 *(route.endpoint_id for route in dispatch.conditional_routes),
                 dispatch.default_endpoint_id,
-                *provider_ids,
+                *_provider_endpoint_ids(provider),
             ]
         )
     )
@@ -239,6 +262,14 @@ def _field(shape: DataShapeIR, path: str) -> DataFieldIR:
     return found
 
 
+def _mapping_field(shape: DataShapeIR, path: str) -> DataFieldIR:
+    root = path.split("[]", 1)[0]
+    found = next((field for field in shape.fields if field.name == root), None)
+    if found is None:
+        raise ValueError(f"data shape {shape.name} has no Java field {root}")
+    return found
+
+
 def _filter_default(spec: SourceFilterSpec | None) -> str:
     return spec.options[spec.default_index].value if spec is not None else ""
 
@@ -322,6 +353,11 @@ def _query_lines(
 
 def _mapping_view(mapping: MangaMappingIR, shapes: dict[str, DataShapeIR]) -> _MappingView:
     shape = shapes[mapping.item_type]
+    if mapping.unresolved_fields:
+        raise ValueError(
+            f"manga mapping {mapping.item_type} has unresolved fields: "
+            + ", ".join(mapping.unresolved_fields)
+        )
     if mapping.key_template is None or mapping.title_path is None:
         raise ValueError(f"manga mapping {mapping.item_type} lacks key or title")
     placeholders = re.findall(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", mapping.key_template)
@@ -330,7 +366,8 @@ def _mapping_view(mapping: MangaMappingIR, shapes: dict[str, DataShapeIR]) -> _M
     if "{" in literal_format or "}" in literal_format or not placeholders:
         raise ValueError(f"manga mapping {mapping.item_type} has an invalid key template")
     arguments = ", ".join(
-        f"item.{_rust_identifier(_field(shape, name).serialized_name)}" for name in placeholders
+        f"item.{_rust_identifier(_mapping_field(shape, name).serialized_name)}"
+        for name in placeholders
     )
 
     def nested(path: str | None) -> tuple[str | None, str | None, bool]:
@@ -347,9 +384,16 @@ def _mapping_view(mapping: MangaMappingIR, shapes: dict[str, DataShapeIR]) -> _M
             root = path
             child = ""
             is_collection = False
+        root_field = _mapping_field(shape, root)
+        child_field = None
+        if child:
+            nested_type = _inner_list_type(root_field.source_type)
+            if nested_type is None or nested_type not in shapes:
+                raise ValueError(f"manga mapping {mapping.item_type} has invalid nested path")
+            child_field = _mapping_field(shapes[nested_type], child)
         return (
-            _rust_identifier(_field(shape, root).serialized_name),
-            (_rust_identifier(child) if child else None),
+            _rust_identifier(root_field.serialized_name),
+            (_rust_identifier(child_field.serialized_name) if child_field else None),
             is_collection,
         )
 
@@ -359,9 +403,9 @@ def _mapping_view(mapping: MangaMappingIR, shapes: dict[str, DataShapeIR]) -> _M
         type_name=mapping.item_type,
         function_name=f"manga_from_{_snake_case(mapping.item_type)}",
         key_expression=f"format!({_quoted(format_string)}, {arguments})",
-        title_field=_rust_identifier(_field(shape, mapping.title_path).serialized_name),
+        title_field=_rust_identifier(_mapping_field(shape, mapping.title_path).serialized_name),
         cover_field=(
-            _rust_identifier(_field(shape, mapping.cover_path).serialized_name)
+            _rust_identifier(_mapping_field(shape, mapping.cover_path).serialized_name)
             if mapping.cover_path
             else None
         ),
@@ -372,7 +416,7 @@ def _mapping_view(mapping: MangaMappingIR, shapes: dict[str, DataShapeIR]) -> _M
         tags_name_field=tags_name,
         tags_is_collection=tags_is_collection,
         description_field=(
-            _rust_identifier(_field(shape, mapping.description_path).serialized_name)
+            _rust_identifier(_mapping_field(shape, mapping.description_path).serialized_name)
             if mapping.description_path
             else None
         ),
@@ -396,6 +440,15 @@ def _required_structs(
             if path:
                 fields.add(_field(shape, path).serialized_name)
 
+    def add_mapping(type_name: str, *paths: str | None) -> None:
+        shape = shapes.get(type_name)
+        if shape is None:
+            raise ValueError(f"Implementation IR has no data shape for {type_name}")
+        fields = required.setdefault(type_name, set())
+        for path in paths:
+            if path:
+                fields.add(_mapping_field(shape, path).serialized_name)
+
     for endpoint in endpoints:
         if endpoint.response_type is None:
             raise ValueError(f"endpoint {endpoint.id} has no response type")
@@ -414,7 +467,7 @@ def _required_structs(
             raise ValueError(
                 f"Implementation IR has no manga mapping for {container.manga_item_type}"
             )
-        add(
+        add_mapping(
             mapping.item_type,
             *re.findall(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", mapping.key_template or ""),
             mapping.title_path,
@@ -427,10 +480,10 @@ def _required_structs(
             if not nested_path or "[]." not in nested_path:
                 continue
             root, child = nested_path.split("[].", 1)
-            root_field = _field(shapes[mapping.item_type], root)
+            root_field = _mapping_field(shapes[mapping.item_type], root)
             nested_type = _inner_list_type(root_field.source_type)
             if nested_type:
-                add(nested_type, child)
+                add_mapping(nested_type, child)
 
     structs = []
     for shape in shapes.values():

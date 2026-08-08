@@ -133,6 +133,9 @@ class MangaMappingIR(BaseModel):
     authors_path: str | None = None
     tags_path: str | None = None
     description_path: str | None = None
+    unresolved_fields: list[Literal["key", "title", "cover", "authors", "tags", "description"]] = (
+        Field(default_factory=list)
+    )
 
 
 class ListingSelectionIR(BaseModel):
@@ -1340,10 +1343,10 @@ def _serialized_field(shape: DecompiledDtoShape, java_name: str) -> str:
 
 
 def _setter_argument(block: str, setter: str) -> str | None:
-    call = re.search(rf"\b{re.escape(setter)}\s*\(", block)
-    if call is None:
+    calls = list(re.finditer(rf"\b{re.escape(setter)}\s*\(", block))
+    if len(calls) != 1 or _brace_depth(block, calls[0].start()) != 1:
         return None
-    opening = block.find("(", call.start())
+    opening = block.find("(", calls[0].start())
     depth = 0
     quote: str | None = None
     escaped = False
@@ -1371,17 +1374,51 @@ def _setter_argument(block: str, setter: str) -> str | None:
 
 def _setter_field(block: str, setter: str) -> str | None:
     argument = _setter_argument(block, setter)
+    found = re.fullmatch(r"\s*this\.([A-Za-z_][A-Za-z0-9_]*)\s*", argument or "")
+    return found.group(1) if found else None
+
+
+def _setter_projection_field(
+    block: str,
+    setter: str,
+    *,
+    allowed_wrapper_variables: frozenset[str] = frozenset(),
+    allow_wrapper: bool = False,
+) -> str | None:
+    direct = _setter_field(block, setter)
+    if direct is not None:
+        return direct
+    argument = _setter_argument(block, setter)
     if argument is None or len(_split_java_concatenation(argument)) != 1:
         return None
     fields = set(re.findall(r"\bthis\.([A-Za-z_][A-Za-z0-9_]*)", argument))
-    return next(iter(fields)) if len(fields) == 1 else None
+    has_evidence_variable = any(
+        re.search(rf"\b{re.escape(variable)}\b", argument) for variable in allowed_wrapper_variables
+    )
+    return (
+        next(iter(fields))
+        if len(fields) == 1 and (allow_wrapper or has_evidence_variable)
+        else None
+    )
 
 
-def _setter_path(block: str, shape: DecompiledDtoShape, setter: str) -> str | None:
-    field = _setter_field(block, setter)
+def _setter_path(
+    block: str,
+    shape: DecompiledDtoShape,
+    setter: str,
+    *,
+    allowed_wrapper_variables: frozenset[str] = frozenset(),
+    allow_wrapper: bool = False,
+) -> str | None:
+    field = _setter_projection_field(
+        block,
+        setter,
+        allowed_wrapper_variables=allowed_wrapper_variables,
+        allow_wrapper=allow_wrapper,
+    )
     if field is None or not any(item.name == field for item in shape.fields):
         return None
-    return _serialized_field(shape, field)
+    return field
 
 
 def _string_template(argument: str, shape: DecompiledDtoShape) -> str | None:
@@ -1403,9 +1440,9 @@ def _string_template(argument: str, shape: DecompiledDtoShape) -> str | None:
         )
         if field is None:
             return None
-        result += f"{{{field.serialized_name}}}"
+        result += f"{{{field.name}}}"
         has_field = True
-    return result if has_field else None
+    return result if has_field and result.startswith("/") and "://" not in result else None
 
 
 def _setter_collection_path(
@@ -1413,41 +1450,79 @@ def _setter_collection_path(
     shape: DecompiledDtoShape,
     setter: str,
     shapes: dict[str, DecompiledDtoShape],
+    allowed_wrapper_variables: frozenset[str] = frozenset(),
 ) -> str | None:
     argument = _setter_argument(block, setter)
-    java_name = _setter_field(block, setter)
-    if argument is None or java_name is None:
+    if argument is None:
         return None
-    serialized = _serialized_field(shape, java_name)
+    fields = set(re.findall(r"\bthis\.([A-Za-z_][A-Za-z0-9_]*)", argument))
+    if len(fields) != 1:
+        return None
+    java_name = next(iter(fields))
     field = next((item for item in shape.fields if item.name == java_name), None)
+    if field is None:
+        return None
     item_type = _list_item_type(field.java_type) if field is not None else None
     if item_type is None:
         return (
-            serialized
-            if field is not None and field.java_type in {"String", "java.lang.String"}
+            java_name
+            if field.java_type in {"String", "java.lang.String"}
+            and _setter_projection_field(
+                block,
+                setter,
+                allowed_wrapper_variables=allowed_wrapper_variables,
+            )
+            == java_name
             else None
         )
+    if not re.match(
+        r"\s*(?:(?:[A-Za-z_][A-Za-z0-9_$]*)\.)*"
+        r"(?:join|joinToString(?:\$default)?)\s*\(",
+        argument,
+    ):
+        return None
     if item_type in {"String", "java.lang.String"}:
-        return f"{serialized}[]"
+        return f"{java_name}[]"
     item_shape = shapes.get(item_type)
     if item_shape is None:
         return None
     getter_fields = set()
-    for variable, getter in re.findall(
-        r"\b([A-Za-z_][A-Za-z0-9_]*)\.get([A-Z][A-Za-z0-9_]*)\s*\(",
+    for _variable, getter in re.findall(
+        r"\b([A-Za-z_][A-Za-z0-9_]*)\s*->\s*\1\.get"
+        r"([A-Z][A-Za-z0-9_]*)\s*\(\s*\)",
         argument,
     ):
-        is_item_binding = re.search(
-            rf"(?:\b{re.escape(item_type)}\s+{re.escape(variable)}\b|"
-            rf"\b{re.escape(variable)}\s*->)",
-            argument,
-        )
-        if is_item_binding:
+        getter_fields.add(getter[:1].lower() + getter[1:])
+    for variable, getter in re.findall(
+        r"\breturn\s+([A-Za-z_][A-Za-z0-9_]*)\.get"
+        r"([A-Z][A-Za-z0-9_]*)\s*\(\s*\)\s*;",
+        argument,
+    ):
+        if re.search(rf"\b{re.escape(item_type)}\s+{re.escape(variable)}\b", argument):
             getter_fields.add(getter[:1].lower() + getter[1:])
+    if allowed_wrapper_variables:
+        has_evidence_variable = any(
+            re.search(rf"\b{re.escape(variable)}\b", argument)
+            for variable in allowed_wrapper_variables
+        )
+        if has_evidence_variable:
+            for _variable, getter in re.findall(
+                r"\b([A-Za-z_][A-Za-z0-9_]*)\s*->[^;{}]*?"
+                r"\b\1\.get([A-Z][A-Za-z0-9_]*)\s*\(\s*\)",
+                argument,
+            ):
+                getter_fields.add(getter[:1].lower() + getter[1:])
+            for variable, getter in re.findall(
+                r"\b([A-Za-z_][A-Za-z0-9_]*)\.get"
+                r"([A-Z][A-Za-z0-9_]*)\s*\(\s*\)",
+                argument,
+            ):
+                if re.search(rf"\b{re.escape(item_type)}\s+{re.escape(variable)}\b", argument):
+                    getter_fields.add(getter[:1].lower() + getter[1:])
     children = [field for field in item_shape.fields if field.name in getter_fields]
     if len(children) != 1:
         return None
-    return f"{serialized}[].{children[0].serialized_name}"
+    return f"{java_name}[].{children[0].name}"
 
 
 def _manga_mappings(
@@ -1455,6 +1530,8 @@ def _manga_mappings(
     shapes: tuple[DecompiledDtoShape, ...],
     *,
     allowed_types: set[str],
+    allow_script_conversion_fallback: bool,
+    preserve_cover_urls: bool,
 ) -> list[MangaMappingIR]:
     by_name = {shape.name: shape for shape in shapes}
     mappings: list[MangaMappingIR] = []
@@ -1467,22 +1544,84 @@ def _manga_mappings(
         shape = by_name.get(type_name)
         if shape is None:
             continue
-        found = re.search(r"\btoSManga\s*\([^)]*\)\s*\{", source.content)
+        found = re.search(r"\btoSManga\s*\(([^)]*)\)\s*\{", source.content)
         if found is None:
             continue
         block = _brace_block(source.content, found.start())
+        wrapper_variables = (
+            frozenset(
+                match.group(1)
+                for match in re.finditer(
+                    r"\bCCOption\s+([A-Za-z_][A-Za-z0-9_]*)",
+                    found.group(1),
+                )
+            )
+            if allow_script_conversion_fallback
+            else frozenset()
+        )
         url_argument = _setter_argument(block, "setUrl")
         key_template = _string_template(url_argument, shape) if url_argument else None
+        projections = {
+            "title": _setter_path(
+                block,
+                shape,
+                "setTitle",
+                allowed_wrapper_variables=wrapper_variables,
+            ),
+            "cover": _setter_path(
+                block,
+                shape,
+                "setThumbnail_url",
+                allow_wrapper=preserve_cover_urls,
+            ),
+            "authors": _setter_collection_path(
+                block,
+                shape,
+                "setAuthor",
+                by_name,
+                wrapper_variables,
+            ),
+            "tags": _setter_collection_path(
+                block,
+                shape,
+                "setGenre",
+                by_name,
+                wrapper_variables,
+            ),
+            "description": _setter_path(
+                block,
+                shape,
+                "setDescription",
+                allowed_wrapper_variables=wrapper_variables,
+            ),
+        }
+        setters = {
+            "key": "setUrl",
+            "title": "setTitle",
+            "cover": "setThumbnail_url",
+            "authors": "setAuthor",
+            "tags": "setGenre",
+            "description": "setDescription",
+        }
+        unresolved_fields = []
+        for field_name, setter in setters.items():
+            projection = key_template if field_name == "key" else projections[field_name]
+            calls = re.findall(rf"\b{re.escape(setter)}\s*\(", block)
+            argument = _setter_argument(block, setter)
+            is_empty = argument is not None and _string_literal(argument.strip()) == ""
+            if calls and projection is None and not is_empty:
+                unresolved_fields.append(field_name)
 
         mappings.append(
             MangaMappingIR(
                 item_type=type_name,
                 key_template=key_template,
-                title_path=_setter_path(block, shape, "setTitle"),
-                cover_path=_setter_path(block, shape, "setThumbnail_url"),
-                authors_path=_setter_collection_path(block, shape, "setAuthor", by_name),
-                tags_path=_setter_collection_path(block, shape, "setGenre", by_name),
-                description_path=_setter_path(block, shape, "setDescription"),
+                title_path=projections["title"],
+                cover_path=projections["cover"],
+                authors_path=projections["authors"],
+                tags_path=projections["tags"],
+                description_path=projections["description"],
+                unresolved_fields=unresolved_fields,
             )
         )
     return mappings
@@ -1539,7 +1678,20 @@ def project_implementation_ir(ir: SourceIR) -> ImplementationIR:
         search_dispatch,
     )
     manga_item_types = {container.manga_item_type for container in containers}
-    mappings = _manga_mappings(ir.files, shapes, allowed_types=manga_item_types)
+    mappings = _manga_mappings(
+        ir.files,
+        shapes,
+        allowed_types=manga_item_types,
+        allow_script_conversion_fallback=(
+            ir.feature_scope == "public_only"
+            and any(
+                "ChineseUtils script conversion" in feature for feature in ir.unsupported_features
+            )
+        ),
+        preserve_cover_urls=(
+            ir.image_url_policy is not None and ir.image_url_policy.preserve_cover_urls
+        ),
+    )
     unresolved: list[str] = []
     filter_ids = {spec.id for spec in ir.filter_specs}
     if not endpoints:
@@ -1578,10 +1730,10 @@ def project_implementation_ir(ir: SourceIR) -> ImplementationIR:
     for item_type in sorted(manga_item_types - mapped_types):
         unresolved.append(f"listing manga field mapping is unresolved for {item_type}")
     for mapping in mappings:
-        if mapping.key_template is None:
-            unresolved.append(f"listing manga key mapping is unresolved for {mapping.item_type}")
-        if mapping.title_path is None:
-            unresolved.append(f"listing manga title mapping is unresolved for {mapping.item_type}")
+        for field in mapping.unresolved_fields:
+            unresolved.append(
+                f"listing manga {field} mapping is unresolved for {mapping.item_type}"
+            )
     return ImplementationIR(
         source_id=ir.metadata.source_id,
         listing=ListingImplementationIR(
