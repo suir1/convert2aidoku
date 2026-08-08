@@ -230,7 +230,7 @@ def _copymanga_listing_files() -> list[SourceFile]:
                     SManga manga = SManga.create();
                     manga.setUrl("/comic/" + this.pathWord);
                     manga.setTitle(translate(this.name));
-                    manga.setAuthor(join(this.author));
+                    manga.setAuthor(join(this.author, value -> value.getName()));
                     manga.setDescription("");
                     manga.setGenre("");
                     manga.setThumbnail_url(this.cover);
@@ -801,6 +801,139 @@ def test_projects_serializable_dtos_and_string_mappings_without_directory_assump
     page_sized = render_search_listing(ir, without_cursor)
 
     assert "let has_next_page = result.items.len() >= 20;" in page_sized.content
+
+
+def test_manga_key_projection_preserves_complete_concatenation() -> None:
+    files = _serializable_listing_files()
+    item = next(file for file in files if file.path.endswith("ComicItem.java"))
+    item.content = item.content.replace(
+        '"/comic/" + this.comicId',
+        '"/comic/" + this.comicId + "/view"',
+    )
+    item.sha256 = hashlib.sha256(item.content.encode()).hexdigest()
+    ir = minimal_source_ir(
+        source_id="en.example",
+        source_format="decompiled_apk",
+        main_class="Example",
+        files=files,
+    )
+
+    implementation = project_implementation_ir(ir)
+
+    assert implementation.listing is not None
+    mapping = implementation.listing.manga_mappings[0]
+    assert mapping.key_template == "/comic/{comicId}/view"
+
+
+def test_manga_key_helper_is_left_unresolved() -> None:
+    files = _serializable_listing_files()
+    item = next(file for file in files if file.path.endswith("ComicItem.java"))
+    item.content = item.content.replace('"/comic/" + this.comicId', "buildUrl(this.comicId)")
+    item.sha256 = hashlib.sha256(item.content.encode()).hexdigest()
+    ir = minimal_source_ir(
+        source_id="en.example",
+        source_format="decompiled_apk",
+        main_class="Example",
+        files=files,
+    )
+
+    implementation = project_implementation_ir(ir)
+
+    assert "listing manga key mapping is unresolved for ComicItem" in (
+        implementation.unresolved_facts
+    )
+    with pytest.raises(ValueError, match="lacks key or title"):
+        render_search_listing(ir, implementation)
+
+
+def test_multifield_title_is_not_reduced_to_first_field() -> None:
+    files = _serializable_listing_files()
+    item = next(file for file in files if file.path.endswith("ComicItem.java"))
+    item.content = item.content.replace(
+        "private final String name;",
+        "private final String name; private final String subtitle;",
+    ).replace("setTitle(this.name)", "setTitle(this.name + this.subtitle)")
+    item.sha256 = hashlib.sha256(item.content.encode()).hexdigest()
+    ir = minimal_source_ir(
+        source_id="en.example",
+        source_format="decompiled_apk",
+        main_class="Example",
+        files=files,
+    )
+
+    implementation = project_implementation_ir(ir)
+
+    assert "listing manga title mapping is unresolved for ComicItem" in (
+        implementation.unresolved_facts
+    )
+
+
+def test_object_collection_child_comes_from_setter_getter() -> None:
+    files = _copymanga_listing_files()
+    for source in files:
+        if source.path.endswith("ComicSummary.java"):
+            source.content = source.content.replace("getName()", "getLabel()")
+        elif source.path.endswith("AuthorInfo.java"):
+            source.content = source.content.replace("String name", "String label")
+        source.sha256 = hashlib.sha256(source.content.encode()).hexdigest()
+    ir = minimal_source_ir(
+        source_id="zh.example",
+        source_format="decompiled_apk",
+        main_class="CopyManga",
+        files=files,
+        filter_specs=_copymanga_filter_specs(),
+    )
+
+    implementation = project_implementation_ir(ir)
+
+    assert implementation.listing is not None
+    mapping = next(
+        item for item in implementation.listing.manga_mappings if item.item_type == "ComicSummary"
+    )
+    assert mapping.authors_path == "author[].label"
+
+
+def test_object_collection_without_getter_is_not_guessed_as_name() -> None:
+    files = _copymanga_listing_files()
+    summary = next(file for file in files if file.path.endswith("ComicSummary.java"))
+    summary.content = summary.content.replace(
+        "join(this.author, value -> value.getName())",
+        "join(this.author)",
+    )
+    summary.sha256 = hashlib.sha256(summary.content.encode()).hexdigest()
+    ir = minimal_source_ir(
+        source_id="zh.example",
+        source_format="decompiled_apk",
+        main_class="CopyManga",
+        files=files,
+        filter_specs=_copymanga_filter_specs(),
+    )
+
+    implementation = project_implementation_ir(ir)
+
+    assert implementation.listing is not None
+    mapping = next(
+        item for item in implementation.listing.manga_mappings if item.item_type == "ComicSummary"
+    )
+    assert mapping.authors_path is None
+
+
+def test_scalar_object_is_not_rendered_as_string_metadata() -> None:
+    files = _serializable_listing_files()
+    item = next(file for file in files if file.path.endswith("ComicItem.java"))
+    item.content = item.content.replace("String author", "AuthorInfo author")
+    item.sha256 = hashlib.sha256(item.content.encode()).hexdigest()
+    ir = minimal_source_ir(
+        source_id="en.example",
+        source_format="decompiled_apk",
+        main_class="Example",
+        files=files,
+    )
+
+    implementation = project_implementation_ir(ir)
+
+    assert implementation.listing is not None
+    assert implementation.listing.manga_mappings[0].authors_path is None
 
 
 def test_non_string_next_field_does_not_emit_string_cursor_logic() -> None:

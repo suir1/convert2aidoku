@@ -1339,7 +1339,7 @@ def _serialized_field(shape: DecompiledDtoShape, java_name: str) -> str:
     return field.serialized_name if field is not None else java_name
 
 
-def _setter_field(block: str, setter: str) -> str | None:
+def _setter_argument(block: str, setter: str) -> str | None:
     call = re.search(rf"\b{re.escape(setter)}\s*\(", block)
     if call is None:
         return None
@@ -1366,31 +1366,88 @@ def _setter_field(block: str, setter: str) -> str | None:
             if depth == 0:
                 argument = block[opening + 1 : index]
                 break
-    found = re.search(r"\bthis\.([A-Za-z_][A-Za-z0-9_]*)", argument)
-    return found.group(1) if found else None
+    return argument or None
+
+
+def _setter_field(block: str, setter: str) -> str | None:
+    argument = _setter_argument(block, setter)
+    if argument is None or len(_split_java_concatenation(argument)) != 1:
+        return None
+    fields = set(re.findall(r"\bthis\.([A-Za-z_][A-Za-z0-9_]*)", argument))
+    return next(iter(fields)) if len(fields) == 1 else None
 
 
 def _setter_path(block: str, shape: DecompiledDtoShape, setter: str) -> str | None:
     field = _setter_field(block, setter)
-    return _serialized_field(shape, field) if field else None
+    if field is None or not any(item.name == field for item in shape.fields):
+        return None
+    return _serialized_field(shape, field)
+
+
+def _string_template(argument: str, shape: DecompiledDtoShape) -> str | None:
+    result = ""
+    has_field = False
+    for token in _split_java_concatenation(argument):
+        literal = _string_literal(token)
+        if literal is not None:
+            if "{" in literal or "}" in literal:
+                return None
+            result += literal
+            continue
+        field_match = re.fullmatch(r"\s*this\.([A-Za-z_][A-Za-z0-9_]*)\s*", token)
+        if field_match is None:
+            return None
+        field = next(
+            (item for item in shape.fields if item.name == field_match.group(1)),
+            None,
+        )
+        if field is None:
+            return None
+        result += f"{{{field.serialized_name}}}"
+        has_field = True
+    return result if has_field else None
 
 
 def _setter_collection_path(
     block: str,
     shape: DecompiledDtoShape,
     setter: str,
+    shapes: dict[str, DecompiledDtoShape],
 ) -> str | None:
+    argument = _setter_argument(block, setter)
     java_name = _setter_field(block, setter)
-    if java_name is None:
+    if argument is None or java_name is None:
         return None
     serialized = _serialized_field(shape, java_name)
     field = next((item for item in shape.fields if item.name == java_name), None)
     item_type = _list_item_type(field.java_type) if field is not None else None
     if item_type is None:
-        return serialized
+        return (
+            serialized
+            if field is not None and field.java_type in {"String", "java.lang.String"}
+            else None
+        )
     if item_type in {"String", "java.lang.String"}:
         return f"{serialized}[]"
-    return f"{serialized}[].name"
+    item_shape = shapes.get(item_type)
+    if item_shape is None:
+        return None
+    getter_fields = set()
+    for variable, getter in re.findall(
+        r"\b([A-Za-z_][A-Za-z0-9_]*)\.get([A-Z][A-Za-z0-9_]*)\s*\(",
+        argument,
+    ):
+        is_item_binding = re.search(
+            rf"(?:\b{re.escape(item_type)}\s+{re.escape(variable)}\b|"
+            rf"\b{re.escape(variable)}\s*->)",
+            argument,
+        )
+        if is_item_binding:
+            getter_fields.add(getter[:1].lower() + getter[1:])
+    children = [field for field in item_shape.fields if field.name in getter_fields]
+    if len(children) != 1:
+        return None
+    return f"{serialized}[].{children[0].serialized_name}"
 
 
 def _manga_mappings(
@@ -1414,15 +1471,8 @@ def _manga_mappings(
         if found is None:
             continue
         block = _brace_block(source.content, found.start())
-        url_field = _setter_field(block, "setUrl")
-        key_template = None
-        if url_field is not None:
-            url_call = re.search(r"\bsetUrl\s*\(([\s\S]{0,500}?)\)\s*;", block)
-            prefix = ""
-            if url_call:
-                literal = re.search(r'"((?:\\.|[^"\\])*)"', url_call.group(1))
-                prefix = _decode_java_string(literal.group(1)) if literal else ""
-            key_template = f"{prefix}{{{_serialized_field(shape, url_field)}}}"
+        url_argument = _setter_argument(block, "setUrl")
+        key_template = _string_template(url_argument, shape) if url_argument else None
 
         mappings.append(
             MangaMappingIR(
@@ -1430,8 +1480,8 @@ def _manga_mappings(
                 key_template=key_template,
                 title_path=_setter_path(block, shape, "setTitle"),
                 cover_path=_setter_path(block, shape, "setThumbnail_url"),
-                authors_path=_setter_collection_path(block, shape, "setAuthor"),
-                tags_path=_setter_collection_path(block, shape, "setGenre"),
+                authors_path=_setter_collection_path(block, shape, "setAuthor", by_name),
+                tags_path=_setter_collection_path(block, shape, "setGenre", by_name),
                 description_path=_setter_path(block, shape, "setDescription"),
             )
         )
@@ -1527,6 +1577,11 @@ def project_implementation_ir(ir: SourceIR) -> ImplementationIR:
     mapped_types = {mapping.item_type for mapping in mappings}
     for item_type in sorted(manga_item_types - mapped_types):
         unresolved.append(f"listing manga field mapping is unresolved for {item_type}")
+    for mapping in mappings:
+        if mapping.key_template is None:
+            unresolved.append(f"listing manga key mapping is unresolved for {mapping.item_type}")
+        if mapping.title_path is None:
+            unresolved.append(f"listing manga title mapping is unresolved for {mapping.item_type}")
     return ImplementationIR(
         source_id=ir.metadata.source_id,
         listing=ListingImplementationIR(
