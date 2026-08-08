@@ -4077,8 +4077,8 @@ def _normalize_user_agent_setting(
         f"({json.dumps(key)}).unwrap_or_default();\n"
         "    match user_agent.as_str() {\n"
         '        "none" => request,\n'
-        '        "" | "reset" | "desktop" | "mobile" | "app" => '\
-        f"request.header(\"User-Agent\", {json.dumps(DEFAULT_BROWSER_USER_AGENT)}),\n"
+        '        "" | "reset" | "desktop" | "mobile" | "app" => '
+        f'request.header("User-Agent", {json.dumps(DEFAULT_BROWSER_USER_AGENT)}),\n'
         '        _ => request.header("User-Agent", &user_agent),\n'
         "    }\n"
         "}"
