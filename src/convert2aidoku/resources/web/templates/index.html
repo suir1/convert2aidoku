@@ -131,13 +131,19 @@
               <div class="option-grid">
                 <label>首轮推理
                   <select id="generation-reasoning">
-                    <option value="auto">自动</option><option value="off">关闭</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option>
+                    <option value="off">关闭（省 Token）</option><option value="low">低</option><option value="auto">自动</option><option value="medium">中</option><option value="high">高</option>
                   </select>
                 </label>
                 <label>修复推理
                   <select id="repair-reasoning">
                     <option value="low">低</option><option value="off">关闭</option><option value="auto">自动</option><option value="medium">中</option><option value="high">高</option>
                   </select>
+                </label>
+                <label>首轮输出上限
+                  <input id="generation-max-tokens" type="number" min="256" max="131072" value="24000">
+                </label>
+                <label>修复输出上限
+                  <input id="repair-max-tokens" type="number" min="256" max="131072" value="12000">
                 </label>
                 <label class="check"><input id="live" type="checkbox" checked><span>执行实站验证</span></label>
                 <label class="check"><input id="force" type="checkbox"><span>覆盖已有输出</span></label>

@@ -102,8 +102,10 @@ base_url = "http://localhost:50048/v1"
 model = "your-model-id"
 max_repair_rounds = 2
 timeout_seconds = 300
-generation_reasoning_effort = "auto"
+generation_reasoning_effort = "off"
 repair_reasoning_effort = "low"
+generation_max_tokens = 24000
+repair_max_tokens = 12000
 ```
 
 ```bash
@@ -112,18 +114,28 @@ uv run c2a ai-check
 ```
 
 Reasoning effort accepts `auto`, `off`, `low`, `medium`, or `high`. Initial generation defaults to
-provider-controlled `auto`; targeted and full repairs default to `low`; `ai-check` disables
-thinking. Providers that
+`off` to prevent provider-default thinking from consuming most of the completion budget; targeted
+and full repairs default to `low`; `ai-check` and settings extraction disable thinking. Providers that
 reject reasoning controls automatically fall back to their default behavior without consuming a
 manifest validation retry. Environment overrides use `C2A_GENERATION_REASONING_EFFORT` and
 `C2A_REPAIR_REASONING_EFFORT`; `convert` also accepts `--generation-reasoning` and
 `--repair-reasoning`.
 
+Generation and repair completions are capped independently. Configure them with
+`generation_max_tokens` / `repair_max_tokens`, `C2A_GENERATION_MAX_TOKENS` /
+`C2A_REPAIR_MAX_TOKENS`, or the matching `convert` options. The client prefers the current
+`max_completion_tokens` parameter, falls back to legacy `max_tokens`, and removes the limit only
+when a compatible provider explicitly rejects both. If a reasoning response reaches the cap, C2A
+retries once with thinking disabled; a second truncation stops instead of repeating the same full
+prompt.
+
 The client first requests JSON-Schema structured output. Providers that reject that feature fall
 back to JSON Object mode and then plain JSON, both still validated locally with Pydantic.
 
 For decompiled APKs, the initial prompt uses deterministic Java behavior slices instead of JADX
-boilerplate; Kotlin modules still send their complete selected source files. The primary AI call
+boilerplate; Android preference UI/listener bodies are kept in the focused settings request and
+omitted from Rust evidence. Settings are extracted first and passed to Rust generation as a compact
+contract. Kotlin modules still send their complete selected source files. The primary AI call
 returns Rust files only. Static filters are generated deterministically from `SourceIR`, while
 settings use a separate bounded evidence prompt whose response contains real JSON objects rather
 than JSON text nested inside a manifest string. Rust format, compiler, and Clippy repairs first use

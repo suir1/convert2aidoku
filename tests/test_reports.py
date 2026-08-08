@@ -126,6 +126,13 @@ def test_report_aggregates_deterministic_rewrites_across_ai_rounds(tmp_path: Pat
                 "round": 1,
                 "purpose": "generate",
                 "structured_output": True,
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 50,
+                    "total_tokens": 150,
+                    "reasoning_tokens": 30,
+                    "cached_prompt_tokens": 40,
+                },
                 "normalization_rewrites": {"safe_std_paths": 2, "allow_dead_code": 1},
                 "projection_rewrites": {"setting_defaults": 2},
                 "contract_rule_ids": ["missing_retry", "missing_settings"],
@@ -135,12 +142,32 @@ def test_report_aggregates_deterministic_rewrites_across_ai_rounds(tmp_path: Pat
                 "purpose": "repair",
                 "repair_mode": "compiler_patch",
                 "structured_output": True,
+                "usage": {
+                    "prompt_tokens": 20,
+                    "completion_tokens": 10,
+                    "total_tokens": 30,
+                    "reasoning_tokens": 5,
+                    "cached_prompt_tokens": 10,
+                },
                 "normalization_rewrites": {"safe_std_paths": 1},
                 "contract_rule_ids": ["missing_retry"],
             },
         ],
         source_analysis_rule_ids=["capability_search", "relative_url_keys"],
         preflight_rule_ids=["preflight_deterministic_listing"],
+        failed_ai_exchanges=[
+            {
+                "purpose": "repair",
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "total_tokens": 15,
+                    "reasoning_tokens": 4,
+                    "cached_prompt_tokens": 3,
+                },
+                "diagnostics": ["invalid patch"],
+            }
+        ],
         validation=ValidationResult(),
     )
 
@@ -148,6 +175,10 @@ def test_report_aggregates_deterministic_rewrites_across_ai_rounds(tmp_path: Pat
 
     markdown = (tmp_path / "report.md").read_text(encoding="utf-8")
     assert "Normalizer rewrite hits: 6" in markdown
+    assert (
+        "AI tokens: 195 total (130 prompt, 65 completion, 39 reasoning, 53 cached prompt)"
+        in markdown
+    )
     assert "Repair rounds: 1 (1 targeted, 0 full, 0 unclassified)" in markdown
     assert "Contract rule triggers: 3" in markdown
     assert "Source analysis rules: 2" in markdown

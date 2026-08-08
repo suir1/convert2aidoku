@@ -15,6 +15,24 @@ _SETTING_EXCLUSIONS = (
         (".hide_default_continuous_chapter",),
         "library-update chapter hiding setting (excluded by public-only APK scope)",
     ),
+    (
+        (
+            ".show_manga_comments",
+            ".show_chapter_comments",
+            ".chapter_comment_perform",
+            ".chapter_comment_perform_mode",
+            ".reserve_chapter_comments",
+            ".chapter_comment_api_domain",
+            ".chapter_comment_api_domain_custom",
+            ".comment_api_domain",
+            ".comment_api_domain_custom",
+        ),
+        "chapter comments (excluded by public-only APK scope)",
+    ),
+    (
+        (".extension_update_link", ".only_update_link"),
+        "Android extension information preference (excluded by public-only APK scope)",
+    ),
 )
 _AUTHENTICATED_FILTER_MARKERS = (
     "login",

@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Default initial generation to disabled thinking and cap generation/repair completion budgets,
+  with provider-compatible parameter fallback and reasoning/cache token reporting.
+- Split decompiled Android settings evidence from Rust behavior generation and remove audit-only
+  hashes and omission details from provider prompts.
+- Fall back from rejected exact patches to full controlled repair without relaxing generated-file,
+  dependency, or manifest validation boundaries.
+- Normalize additional pinned Aidoku/Rust compatibility errors and make dynamic-domain live smoke
+  recreate source instances, sample readable listings, and report per-domain failure stages.
+- Copymanga reached `verified` with `deepseek-v4-flash`; its measured initial generation fell from
+  227,881 to 49,858 tokens in the regression run.
+
 ## 0.1.0b1 — 2026-07-31
 
 First public preview of `convert2aidoku`.

@@ -544,6 +544,7 @@ def project_java_behavior(
     main: bool,
     public_only: bool,
     excluded_methods: frozenset[str] = frozenset(),
+    excluded_method_prefixes: tuple[str, ...] = (),
 ) -> str:
     raw = content.encode("utf-8")
     root = get_parser("java").parse(raw).root_node
@@ -569,7 +570,11 @@ def project_java_behavior(
             continue
         if node.type == "method_declaration":
             name = _method_name(node)
-            if _generated_method(name) or name in excluded_methods:
+            if (
+                _generated_method(name)
+                or name in excluded_methods
+                or name.startswith(excluded_method_prefixes)
+            ):
                 continue
             if (
                 main

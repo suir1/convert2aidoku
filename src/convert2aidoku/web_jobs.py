@@ -39,6 +39,8 @@ class WebConversionRequest(BaseModel):
     max_repairs: int | None = Field(default=None, ge=0, le=8)
     generation_reasoning: ReasoningEffort | None = None
     repair_reasoning: ReasoningEffort | None = None
+    generation_max_tokens: int | None = Field(default=None, ge=256, le=131_072)
+    repair_max_tokens: int | None = Field(default=None, ge=256, le=131_072)
     live: bool = True
     force: bool = False
     resume: bool = False
@@ -86,6 +88,12 @@ class _WebJob:
         report_tokens = sum(
             item.usage.total_tokens or 0 for item in rounds if item.usage is not None
         )
+        if report is not None:
+            report_tokens += sum(
+                item.usage.total_tokens or 0
+                for item in getattr(report, "failed_ai_exchanges", [])
+                if item.usage is not None
+            )
         ai_rounds = max(len(rounds), len(self.ai_usage_by_round))
         total_tokens = report_tokens or sum(self.ai_usage_by_round.values())
         artifacts: dict[str, str] = {}
@@ -218,6 +226,8 @@ class WebJobManager:
                 max_repair_rounds=request.max_repairs,
                 generation_reasoning_effort=request.generation_reasoning,
                 repair_reasoning_effort=request.repair_reasoning,
+                generation_max_tokens=request.generation_max_tokens,
+                repair_max_tokens=request.repair_max_tokens,
             )
             output = Path(request.output).expanduser()
             if not output.is_absolute():

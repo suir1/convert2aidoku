@@ -113,6 +113,133 @@ def test_structured_manifest_response() -> None:
     assert result.usage and result.usage.total_tokens == 12
 
 
+def test_usage_records_reasoning_and_cached_prompt_tokens() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": json.dumps(_manifest())}}],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 50,
+                    "total_tokens": 150,
+                    "prompt_tokens_details": {"cached_tokens": 40},
+                    "completion_tokens_details": {"reasoning_tokens": 30},
+                },
+            },
+        )
+
+    with OpenAICompatibleClient(
+        provider_settings(), transport=httpx.MockTransport(handler)
+    ) as client:
+        result = client._request_manifest([{"role": "user", "content": "test"}])
+
+    assert result.usage == AIUsage(
+        prompt_tokens=100,
+        completion_tokens=50,
+        total_tokens=150,
+        reasoning_tokens=30,
+        cached_prompt_tokens=40,
+    )
+
+
+def test_output_limit_parameter_falls_back_without_spending_validation_attempt() -> None:
+    calls = 0
+    token_controls: list[tuple[int | None, int | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        payload = json.loads(request.content)
+        token_controls.append((payload.get("max_completion_tokens"), payload.get("max_tokens")))
+        if calls == 1:
+            return httpx.Response(400, text="unknown parameter max_completion_tokens")
+        if calls == 2:
+            return httpx.Response(400, text="unknown parameter max_tokens")
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(_manifest())}}]},
+        )
+
+    with OpenAICompatibleClient(
+        provider_settings(), transport=httpx.MockTransport(handler)
+    ) as client:
+        result = client._request_manifest([{"role": "user", "content": "test"}])
+
+    assert result.value.source_struct == "Example"
+    assert token_controls == [(12_000, None), (None, 12_000), (None, None)]
+
+
+def test_length_limited_reasoning_retries_once_with_thinking_disabled() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        payload = json.loads(request.content)
+        if calls == 1:
+            assert payload["reasoning_effort"] == "low"
+            response = {
+                "choices": [
+                    {"message": {"content": '{"source_struct":'}, "finish_reason": "length"}
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
+            }
+        else:
+            assert payload["thinking"] == {"type": "disabled"}
+            response = {
+                "choices": [
+                    {"message": {"content": json.dumps(_manifest())}, "finish_reason": "stop"}
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            }
+        return httpx.Response(200, json=response)
+
+    with OpenAICompatibleClient(
+        provider_settings(), transport=httpx.MockTransport(handler)
+    ) as client:
+        result = client._request_model(
+            [{"role": "user", "content": "test"}],
+            GenerationManifest,
+            reasoning_effort=ReasoningEffort.LOW,
+            max_output_tokens=1_000,
+        )
+
+    assert calls == 2
+    assert result.reasoning_effort is ReasoningEffort.OFF
+    assert result.usage and result.usage.total_tokens == 45
+    assert any("output-token limit" in warning for warning in result.warnings)
+
+
+def test_truncated_json_with_thinking_disabled_is_not_repeated() -> None:
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": '{"source_struct":"Example'}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            },
+        )
+
+    with (
+        OpenAICompatibleClient(
+            provider_settings(), transport=httpx.MockTransport(handler)
+        ) as client,
+        pytest.raises(AIProviderError, match="truncated generation manifest"),
+    ):
+        client._request_model(
+            [{"role": "user", "content": "test"}],
+            GenerationManifest,
+            reasoning_effort=ReasoningEffort.OFF,
+        )
+
+    assert calls == 1
+
+
 def test_falls_back_when_json_schema_is_rejected() -> None:
     calls = 0
 
@@ -601,10 +728,19 @@ def test_initial_generation_normalizes_safe_std_allocations_without_retry() -> N
 
 def test_initial_generation_stops_after_two_unsafe_full_outputs() -> None:
     calls = 0
+    request_sizes: list[int] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
+        request_sizes.append(len(request.content))
+        payload = json.loads(request.content)
+        if calls == 2:
+            assert "Repair an invalid rust generation manifest" in payload["messages"][0]["content"]
+            retry = json.loads(payload["messages"][1]["content"])
+            assert "use std::fs;" in retry["invalid_response"]
+            assert "generated Rust uses std" in retry["validation_errors"][0]
+            assert "class Example" not in request.content.decode()
         manifest = _manifest()
         manifest["files"][0]["content"] = "use std::fs;"
         return httpx.Response(
@@ -627,6 +763,7 @@ def test_initial_generation_stops_after_two_unsafe_full_outputs() -> None:
         client.generate(ir)
 
     assert calls == 2
+    assert request_sizes[1] < request_sizes[0] / 2
     assert raised.value.usage == AIUsage(
         prompt_tokens=20,
         completion_tokens=10,
@@ -707,8 +844,10 @@ def test_generate_sends_deterministic_source_evidence_instead_of_raw_files() -> 
         assert "Option<&'a str>" in system_prompt
         assert "Cargo.toml is forbidden" in payload["messages"][1]["content"]
         assert "reasoning_effort" not in payload
-        assert "thinking" not in payload
+        assert payload["thinking"] == {"type": "disabled"}
+        assert payload["max_completion_tokens"] == 24_000
         assert "source_files" not in generation_payload
+        assert "sha256" not in generation_payload["source_evidence"][0]
         assert generation_payload["source_evidence"][0]["path"] == "src/Example.kt"
         assert generation_payload["context_stats"]["mode"] == "complete_kotlin_source"
         return httpx.Response(
@@ -725,7 +864,7 @@ def test_generate_sends_deterministic_source_evidence_instead_of_raw_files() -> 
         result = client.generate(ir)
 
     assert result.value.source_struct == "Example"
-    assert result.reasoning_effort == ReasoningEffort.AUTO
+    assert result.reasoning_effort == ReasoningEffort.OFF
 
 
 def test_generate_reserves_tool_owned_search_listing_module(
@@ -771,7 +910,8 @@ def test_generate_structures_settings_and_owns_static_filters() -> None:
             response = _manifest()
             usage = {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}
         else:
-            assert payload["reasoning_effort"] == "low"
+            assert payload["thinking"] == {"type": "disabled"}
+            assert payload["max_completion_tokens"] == 12_000
             assert "unrelated-settings-test-marker" not in request.content.decode()
             response = {
                 "groups": [
@@ -843,6 +983,91 @@ def test_generate_structures_settings_and_owns_static_filters() -> None:
         "ascending": True,
     }
     assert json.loads(resources["res/settings.json"])[0]["items"][0]["default"] == "1"
+
+
+def test_decompiled_generation_extracts_settings_before_rust_and_supplies_contract() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        payload = json.loads(request.content)
+        if calls == 1:
+            assert "Extract public Aidoku source settings" in payload["messages"][0]["content"]
+            assert payload["thinking"] == {"type": "disabled"}
+            response = {
+                "groups": [
+                    {
+                        "type": "group",
+                        "title": "Network",
+                        "items": [
+                            {
+                                "type": "text",
+                                "key": "api_domain",
+                                "title": "API domain",
+                                "default": "api.example.com",
+                            }
+                        ],
+                    }
+                ]
+            }
+        else:
+            generation_payload = json.loads(payload["messages"][1]["content"].split("\n\n", 1)[1])
+            assert generation_payload["source_settings"]["groups"][0]["items"][0] == {
+                "type": "text",
+                "key": "api_domain",
+                "title": "API domain",
+                "default": "api.example.com",
+            }
+            evidence = {
+                item["path"]: item["content"] for item in generation_payload["source_evidence"]
+            }
+            preferences = evidence["sources/example/PreferencesKt.java"]
+            assert "getDomain" in preferences
+            assert "initPreferences" not in preferences
+            response = _manifest()
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(response)}}]},
+        )
+
+    ir = minimal_source_ir(
+        source_format="decompiled_apk",
+        capabilities=[Capability.SETTINGS],
+        main_class="Example",
+        files=[
+            SourceFile(
+                path="sources/example/Example.java",
+                content="public final class Example {}",
+                sha256="0",
+            ),
+            SourceFile(
+                path="sources/example/PreferencesKt.java",
+                content="""
+                public final class PreferencesKt {
+                    public static String getDomain(SharedPreferences preferences) {
+                        return preferences.getString("api_domain", "api.example.com");
+                    }
+                    public static Preference[] initPreferences(Context context) {
+                        ListPreference preference = new ListPreference(context);
+                        preference.setKey("api_domain");
+                        preference.setTitle("API domain");
+                        return new Preference[]{preference};
+                    }
+                }
+                """,
+                sha256="1",
+            ),
+        ],
+    )
+
+    with OpenAICompatibleClient(
+        provider_settings(), transport=httpx.MockTransport(handler)
+    ) as client:
+        result = client.generate(ir)
+
+    assert calls == 2
+    assert any(item.path == "res/settings.json" for item in result.value.files)
 
 
 def test_generate_uses_deterministic_kotlin_settings_without_second_ai_call() -> None:

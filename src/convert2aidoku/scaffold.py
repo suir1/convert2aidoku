@@ -89,6 +89,7 @@ _AIDOKU_ROOT_NAMES = {
 MANIFEST_PROJECTION_RULE_IDS = frozenset(
     {
         "project_generated_module_topology",
+        "project_prune_redundant_dynamic_settings",
         "project_prune_public_only_dynamic_filters",
         "project_recovered_chapter_image_resolution",
         "project_recovered_chapter_page_variants",
@@ -100,6 +101,7 @@ MANIFEST_PROJECTION_RULE_IDS = frozenset(
         "project_recovered_nullable_dto_defaults",
         "project_recovered_rank_item_wrapper",
         "project_recovered_request_headers",
+        "project_user_agent_setting",
         "project_skip_unused_decompiled_dto_fields",
         "project_synthesize_recovered_dynamic_filters",
     }
@@ -223,16 +225,37 @@ def _remove_reserved_smoke_marker(content: str) -> str:
 
 
 def _alloc_macro_is_imported(content: str, name: str) -> bool:
-    inspection = RustInspection.from_content(content)
-    pattern = re.compile(
-        rf"\balloc(?:::\{{[^}}]*\b{re.escape(name)}\b(?!::)[^}}]*\}}|::"
-        rf"{re.escape(name)}\b(?!::))"
-    )
-    return any(
-        (compact := RustInspection.compact_node(node)).startswith("useaidoku::")
-        and pattern.search(compact) is not None
-        for node in inspection.nodes("use_declaration")
-    )
+    for use in RustInspection.from_content(content).nodes("use_declaration"):
+        stack = [use]
+        while stack:
+            node = stack.pop()
+            stack.extend(reversed(node.children))
+            if _rust_identifier(node) != name:
+                continue
+            parent = node.parent
+            if (
+                parent is not None
+                and parent.type == "scoped_identifier"
+                and parent.parent == use
+                and RustInspection.compact_node(parent) == f"aidoku::alloc::{name}"
+            ):
+                return True
+            if parent is None or parent.type != "use_list":
+                continue
+            current = parent.parent
+            relative_alloc = False
+            while current is not None and current != use:
+                compact = RustInspection.compact_node(current)
+                if current.type == "scoped_use_list" and compact.startswith("alloc::{"):
+                    relative_alloc = True
+                elif (
+                    current.type == "scoped_use_list"
+                    and compact.startswith("aidoku::{")
+                    and relative_alloc
+                ):
+                    return True
+                current = current.parent
+    return False
 
 
 def _inject_no_std_macro_imports(content: str) -> str:
@@ -284,7 +307,7 @@ def _normalize_idempotent_get_retry(content: str) -> str:
 
 def _normalize_pinned_model_shapes(content: str) -> str:
     """Repair unambiguous model/request shapes for the pinned Aidoku revision."""
-    content = content.replace("Manga::new()", "Manga::default()")
+    content = re.sub(r"(?<![A-Za-z0-9_])Manga::new\(\)", "Manga::default()", content)
     content = re.sub(
         r"\b(?P<owner>manga|chapter)\s*\.\s*key\s*\.\s*ok_or_else\(\s*"
         r"\|\|\s*AidokuError::message\([^)]*\)\s*\)\?",
@@ -347,6 +370,12 @@ def _normalize_pinned_model_shapes(content: str) -> str:
     content = re.sub(
         r"\bmanga\.author\s*=\s*(?P<source>[A-Za-z_]\w*)\.author\s*;",
         r"manga.authors = \g<source>.authors;",
+        content,
+    )
+    content = re.sub(
+        r"\b(?P<owner>[A-Za-z_]\w*)\.artists\s*=\s*Some\("
+        r"(?P<value>[A-Za-z_]\w*\.title\.clone\(\))\s*\);",
+        r"\g<owner>.artists = Some(vec![\g<value>]);",
         content,
     )
     content = re.sub(
@@ -467,6 +496,24 @@ def _normalize_optional_model_shorthand(content: str) -> str:
 
 
 def _normalize_pinned_model_fields(content: str) -> str:
+    content = re.sub(
+        r"\b(?P<field>author|artist)\s*:\s*Some\((?P<value>[^,\n]{1,800}\.collect\(\))\),",
+        lambda match: f"{match.group('field')}s: Some({match.group('value')}),",
+        content,
+    )
+    content = re.sub(
+        r"\bstatus\s*:\s*(?:aidoku::)?MangaStatus::from_i32\((?P<value>[^,\n]{1,500})\)"
+        r"\.unwrap_or_default\(\)\s*,",
+        lambda match: (
+            f"status: match {match.group('value')} {{ "
+            "1 => aidoku::MangaStatus::Ongoing, "
+            "2 => aidoku::MangaStatus::Completed, "
+            "3 => aidoku::MangaStatus::Cancelled, "
+            "4 => aidoku::MangaStatus::Hiatus, "
+            "_ => aidoku::MangaStatus::Unknown },"
+        ),
+        content,
+    )
     replacements: list[tuple[str, str]] = []
     inspection = RustInspection.from_content(content)
     option_number_functions = {
@@ -782,6 +829,16 @@ def _normalize_aidoku_api_paths(content: str) -> str:
         if not re.match(r"use\s+aidoku::", original):
             continue
         normalized = original.replace("aidoku::source::", "aidoku::")
+        normalized = re.sub(
+            r"(?<![:\w])defaults\s*::\s*defaults_get\b",
+            "imports::defaults::defaults_get",
+            normalized,
+        )
+        normalized = re.sub(
+            r"(?<![:\w])error\s*::\s*\{\s*AidokuError\s*,\s*Result\s*\}",
+            "AidokuError, Result",
+            normalized,
+        )
         compact = RustInspection.compact_node(node)
         if compact.startswith("useaidoku::{"):
             for name in ("Request", "Response"):
@@ -815,6 +872,7 @@ def _normalize_aidoku_api_paths(content: str) -> str:
     for original, normalized in replacements:
         content = content.replace(original, normalized, 1)
     content = content.replace("error::AidokuError", "AidokuError")
+    content = content.replace("aidoku::imports::json::Json", "serde_json::Value")
     content = re.sub(r"\bMangasPage\b", "MangaPageResult", content)
     content = content.replace("aidoku::Request", "Request")
     content = content.replace("aidoku::Response", "Response")
@@ -825,6 +883,12 @@ def _normalize_aidoku_api_paths(content: str) -> str:
         content,
     )
     content = content.replace(".get_body_string()", ".get_string()")
+    content = content.replace(".body_string()", ".get_string()")
+    content = re.sub(
+        r"\b(?P<response>response|resp)\.text\(\)",
+        r"\g<response>.get_string()",
+        content,
+    )
     content = content.replace("listing.kind", "listing.id.as_str()")
     content = content.replace("ListingKind::Popular", '"popular"')
     content = content.replace("ListingKind::Latest", '"latest"')
@@ -879,11 +943,36 @@ def _aidoku_root_imported(content: str, name: str) -> bool:
 
 
 def _aidoku_to_string_imported(content: str) -> bool:
-    return any(
-        (compact := RustInspection.compact_node(node)).startswith("useaidoku::")
-        and re.search(r"alloc::(?:\{[^}]*?)?string(?:::\{[^}]*?)?::ToString\b", compact) is not None
-        for node in RustInspection.from_content(content).nodes("use_declaration")
-    )
+    for use in RustInspection.from_content(content).nodes("use_declaration"):
+        stack = [use]
+        while stack:
+            node = stack.pop()
+            stack.extend(reversed(node.children))
+            if _rust_identifier(node) != "ToString":
+                continue
+            current = node.parent
+            relative_string = False
+            relative_alloc = False
+            while current is not None and current != use:
+                compact = RustInspection.compact_node(current)
+                if compact.startswith("aidoku::alloc::string::"):
+                    return True
+                if current.type == "scoped_use_list" and compact.startswith("string::{"):
+                    relative_string = True
+                elif (
+                    current.type == "scoped_use_list"
+                    and compact.startswith("alloc::{")
+                    and relative_string
+                ):
+                    relative_alloc = True
+                elif (
+                    current.type == "scoped_use_list"
+                    and compact.startswith("aidoku::{")
+                    and relative_alloc
+                ):
+                    return True
+                current = current.parent
+    return False
 
 
 def _aidoku_alloc_string_imported(content: str) -> bool:
@@ -1983,6 +2072,12 @@ def _normalize_generic_deserialize(content: str) -> str:
         r"\g<type>: for<'de> Deserialize<'de>",
         content,
     )
+    content = re.sub(
+        r"fn\s+(?P<name>[A-Za-z_]\w*)\s*<\s*'(?P<lifetime>[A-Za-z_]\w*)\s*,\s*"
+        r"(?P<type>[A-Za-z_]\w*)\s*:\s*Deserialize\s*<\s*'(?P=lifetime)\s*>\s*>",
+        r"fn \g<name><\g<type>: for<'de> Deserialize<'de>>",
+        content,
+    )
     generic_structs = re.findall(
         r"\bstruct\s+(?P<name>[A-Za-z_]\w*)\s*<(?P<params>[^>{}]+)>\s*\{",
         content,
@@ -2132,6 +2227,28 @@ def _normalize_deep_link_defaults(content: str) -> str:
     return content
 
 
+def _normalize_absolute_deep_link_paths(content: str) -> str:
+    replacements: list[tuple[str, str]] = []
+    for function in RustInspection.from_content(content).named("handle_deep_link"):
+        if '.strip_prefix("/comic/")' not in function.text:
+            continue
+        normalized = re.sub(
+            r"(?P<value>[A-Za-z_]\w*)\.strip_prefix\(\"/comic/\"\)",
+            r'\g<value>.split_once("/comic/").map(|(_, rest)| rest)',
+            function.text,
+        )
+        normalized = re.sub(
+            r'\bparts\.len\(\)\s*>=\s*2\s*&&\s*parts\[1\]\s*==\s*"chapter"',
+            'parts.len() >= 3 && parts[1] == "chapter"',
+            normalized,
+        )
+        if normalized != function.text:
+            replacements.append((function.text, normalized))
+    for original, normalized in replacements:
+        content = content.replace(original, normalized, 1)
+    return content
+
+
 def _normalize_request_builder_helpers(
     content: str,
     known_helpers: set[str] | None = None,
@@ -2142,15 +2259,21 @@ def _normalize_request_builder_helpers(
         text = function.text
         if "Request::get" not in text or ".header(" not in text:
             continue
-        header = re.search(r"->\s*Request\s*\{", text)
+        plain_header = re.search(r"->\s*Request\s*\{", text)
+        result_header = re.search(r"->\s*(?:aidoku::)?Result\s*<\s*Request\s*>\s*\{", text)
         binding = re.search(
-            r"let\s+mut\s+(?P<name>[A-Za-z_]\w*)\s*=\s*Request::get\((?P<url>[^;]+)\);",
+            r"let\s+mut\s+(?P<name>[A-Za-z_]\w*)\s*=\s*"
+            r"(?:aidoku::imports::net::)?Request::get\((?P<url>[^;]+)\);",
             text,
         )
-        if header is None or binding is None:
+        if (plain_header is None and result_header is None) or binding is None:
             continue
-        normalized = text[: header.start()] + "-> Result<Request> {" + text[header.end() :]
-        normalized = normalized.replace(binding.group(0), binding.group(0)[:-1] + "?;")
+        normalized = text
+        if plain_header is not None:
+            normalized = (
+                text[: plain_header.start()] + "-> Result<Request> {" + text[plain_header.end() :]
+            )
+        normalized = normalized.replace(binding.group(0), binding.group(0)[:-1] + "?;", 1)
         variable = binding.group("name")
         normalized = re.sub(
             rf"(?m)^(?P<indent>[ \t]*){re.escape(variable)}\s*\n\}}$",
@@ -2173,6 +2296,183 @@ def _normalize_request_builder_helpers(
             r"\g<prefix>\g<call>?\g<suffix>",
             content,
         )
+    return content
+
+
+def _normalize_shadowed_known_imports(content: str) -> str:
+    if re.search(r"(?m)^\s*(?:pub\s+)?fn\s+parse_date\s*\(", content):
+        content = re.sub(
+            r"(?m)^\s*use\s+aidoku::imports::std::parse_date\s*;\s*\n?",
+            "",
+            content,
+        )
+    if "use aidoku::imports::defaults::defaults_get;" in content:
+        usage = re.sub(r"(?m)^\s*use\s+[^;]+;", "", content)
+        if re.search(r"\bDefaultValue\b", usage) is None:
+            content = re.sub(
+                r"(?m)^\s*defaults::DefaultValue\s*,\s*\n?",
+                "",
+                content,
+            )
+        content = re.sub(
+            r"defaults::\{(?P<body>[^{}]*)\}",
+            lambda match: (
+                "defaults::{"
+                + ", ".join(
+                    item.strip()
+                    for item in match.group("body").split(",")
+                    if item.strip()
+                    and item.strip() != "defaults_get"
+                    and not (
+                        item.strip() == "DefaultValue"
+                        and re.search(r"\bDefaultValue\b", usage) is None
+                    )
+                )
+                + "}"
+            ),
+            content,
+        )
+        content = re.sub(r"\bimports::defaults::defaults_get\s*,", "", content)
+        content = re.sub(r",\s*imports::defaults::defaults_get\b", "", content)
+        content = re.sub(r"\{\s*imports::defaults::defaults_get\s*\}", "{}", content)
+        content = content.replace("defaults::{},", "")
+    return content
+
+
+def _normalize_rate_limit_integer_types(content: str) -> str:
+    periods = {
+        match.group("period")
+        for match in re.finditer(
+            r"set_rate_limit\(\s*[A-Za-z_]\w*\s*,\s*(?P<period>[A-Za-z_]\w*)\s*,",
+            content,
+        )
+    }
+    for name in periods:
+        content = re.sub(
+            rf"(\blet\s+(?:mut\s+)?{re.escape(name)}\s*:\s*)i64\b",
+            r"\g<1>i32",
+            content,
+        )
+    return content
+
+
+def _normalize_page_context_maps(content: str) -> str:
+    replacements: list[tuple[str, str]] = []
+    for function in RustInspection.from_content(content).functions:
+        normalized = function.text
+        names = set(
+            re.findall(
+                r"\blet\s+mut\s+([A-Za-z_]\w*)\s*=\s*PageContext::(?:new|default)\(\)",
+                normalized,
+            )
+        )
+        for name in names:
+            normalized = re.sub(
+                rf"\b{re.escape(name)}\.set\(\s*(?P<key>\"(?:\\.|[^\"\\])*\")\s*,",
+                rf"{name}.insert(\g<key>.into(),",
+                normalized,
+            )
+        normalized = re.sub(
+            r"(?P<lookup>\b[A-Za-z_]\w*\.get\(\s*\"(?:\\.|[^\"\\])*\"\s*\))"
+            r"\.unwrap_or_default\(\)",
+            r"\g<lookup>.cloned().unwrap_or_default()",
+            normalized,
+        )
+        if normalized != function.text:
+            replacements.append((function.text, normalized))
+    for original, normalized in replacements:
+        content = content.replace(original, normalized, 1)
+    return content
+
+
+def _normalize_source_new_delegation(content: str) -> str:
+    inherent_new = {
+        match.group("name")
+        for match in re.finditer(
+            r"impl\s+(?P<name>[A-Za-z_]\w*)\s*\{[\s\S]{0,12000}?\bpub\s+fn\s+new\s*\(",
+            content,
+        )
+    }
+    for name in inherent_new:
+        content = re.sub(
+            rf"(impl\s+Source\s+for\s+{re.escape(name)}\s*\{{[\s\S]{{0,1200}}?"
+            rf"\bfn\s+new\s*\(\s*\)\s*->\s*Self\s*\{{\s*){re.escape(name)}::default\(\)",
+            rf"\g<1>{name}::new()",
+            content,
+            count=1,
+        )
+    return content
+
+
+def _normalize_moved_field_collection_usage(content: str) -> str:
+    pattern = re.compile(
+        r"(?P<indent>^[ \t]*)for\s+(?P<item>[^\n]+)\s+in\s+"
+        r"(?P<owner>[A-Za-z_]\w*)\.(?P<field>[A-Za-z_]\w*)\s*\{",
+        re.MULTILINE,
+    )
+    replacements: list[tuple[str, str]] = []
+    for function in RustInspection.from_content(content).functions:
+        normalized = function.text
+        for match in reversed(list(pattern.finditer(normalized))):
+            expression = f"{match.group('owner')}.{match.group('field')}"
+            if f"{expression}.is_empty()" not in normalized[match.end() :]:
+                continue
+            variable = f"{match.group('owner')}_{match.group('field')}_is_empty"
+            insertion = f"{match.group('indent')}let {variable} = {expression}.is_empty();\n"
+            normalized = normalized[: match.start()] + insertion + normalized[match.start() :]
+            tail_start = match.end() + len(insertion)
+            normalized = normalized[:tail_start] + normalized[tail_start:].replace(
+                f"{expression}.is_empty()", variable
+            )
+        if normalized != function.text:
+            replacements.append((function.text, normalized))
+    for original, normalized in replacements:
+        content = content.replace(original, normalized, 1)
+    return content
+
+
+def _normalize_overwritten_loop_initializers(content: str) -> str:
+    replacements: list[tuple[str, str]] = []
+    declaration_pattern = re.compile(
+        r"(?m)^(?P<indent>[ \t]*)let\s+mut\s+(?P<name>[A-Za-z_]\w*)"
+        r"(?:\s*:\s*[^=;]+)?\s*=\s*[^;]+;\s*\n"
+    )
+    for function in RustInspection.from_content(content).functions:
+        normalized = function.text
+        edits: list[tuple[int, int, str]] = []
+        for declaration in declaration_pattern.finditer(normalized):
+            name = declaration.group("name")
+            loop = re.search(r"\bloop\s*\{", normalized[declaration.end() :])
+            if loop is None:
+                continue
+            loop_start = declaration.end() + loop.end()
+            first_use = re.search(rf"\b{re.escape(name)}\b", normalized[loop_start:])
+            if first_use is None:
+                continue
+            use_start = loop_start + first_use.start()
+            line_start = normalized.rfind("\n", loop_start, use_start) + 1
+            if normalized[line_start:use_start].strip():
+                continue
+            assignment = re.match(
+                rf"{re.escape(name)}\s*=\s*[^;]+;",
+                normalized[use_start:],
+            )
+            if assignment is None:
+                continue
+            edits.append((declaration.start(), declaration.end(), ""))
+            edits.append(
+                (
+                    use_start,
+                    use_start + len(name),
+                    f"let {name}",
+                )
+            )
+        for start, end, replacement in sorted(edits, reverse=True):
+            normalized = normalized[:start] + replacement + normalized[end:]
+        if normalized != function.text:
+            replacements.append((function.text, normalized))
+    for original, normalized in replacements:
+        content = content.replace(original, normalized, 1)
     return content
 
 
@@ -2315,6 +2615,26 @@ def _normalize_safe_std_paths(content: str, *, remove_extern_std: bool) -> str:
     """Project allocation/core-only std paths into the no_std Aidoku runtime."""
     if remove_extern_std:
         content = re.sub(r"(?m)^\s*extern\s+crate\s+std\s*;\s*\n?", "", content)
+    safe_aidoku_std_imports = {
+        "String": "String",
+        "ToString": "string::ToString",
+        "Vec": "Vec",
+        "format": "format",
+        "vec": "vec",
+    }
+    for node in RustInspection.from_content(content).nodes("use_declaration"):
+        original = node.text.decode("utf-8", errors="replace")
+        if re.match(r"use\s+aidoku::", original) is None:
+            continue
+        match = re.search(r"\bstd::\{(?P<body>[^{}]+)\}", original)
+        if match is None:
+            continue
+        items = [item.strip() for item in match.group("body").split(",") if item.strip()]
+        if not items or any(item not in safe_aidoku_std_imports for item in items):
+            continue
+        projected = ", ".join(safe_aidoku_std_imports[item] for item in items)
+        normalized = original[: match.start()] + f"alloc::{{{projected}}}" + original[match.end() :]
+        content = content.replace(original, normalized, 1)
     content = re.sub(r"(?<!aidoku::)\balloc::vec!", "vec!", content)
     collection_aliases = {"HashMap": "BTreeMap", "HashSet": "BTreeSet"}
     for source, target in collection_aliases.items():
@@ -3271,7 +3591,9 @@ def _remove_unused_known_imports(content: str) -> str:
         (_AIDOKU_ROOT_NAMES - {"Source"})
         | {
             "CheckFilter",
+            "DefaultValue",
             "MultiSelectFilter",
+            "PageResult",
             "Result",
             "SelectFilter",
             "SortFilter",
@@ -3322,6 +3644,30 @@ def _remove_duplicate_imports(content: str) -> str:
         r"use \g<prefix>::\g<name>;",
         content,
     )
+    declarations = [
+        node.text.decode("utf-8", errors="replace")
+        for node in RustInspection.from_content(content).nodes("use_declaration")
+    ]
+    direct_to_string = "use aidoku::alloc::string::ToString;"
+    if direct_to_string in declarations and any(
+        declaration != direct_to_string and _aidoku_to_string_imported(declaration)
+        for declaration in declarations
+    ):
+        content = re.sub(
+            r"(?m)^\s*use\s+aidoku::alloc::string::ToString\s*;\s*\n?",
+            "",
+            content,
+        )
+    direct_vec = "use aidoku::alloc::vec;"
+    if direct_vec in declarations and any(
+        declaration != direct_vec and _alloc_macro_is_imported(declaration, "vec")
+        for declaration in declarations
+    ):
+        content = re.sub(
+            r"(?m)^\s*use\s+aidoku::alloc::vec\s*;\s*\n?",
+            "",
+            content,
+        )
     declarations = [
         node.text.decode("utf-8", errors="replace")
         for node in RustInspection.from_content(content).nodes("use_declaration")
@@ -3667,6 +4013,96 @@ def _normalize_platform_header_setting(
     return content
 
 
+def _normalize_user_agent_setting(
+    content: str,
+    setting_defaults: Mapping[str, str] | None,
+) -> str:
+    """Route every generated User-Agent header through the recovered setting."""
+    key = next(
+        (
+            candidate
+            for candidate in (setting_defaults or {})
+            if candidate.rsplit(".", 1)[-1] == "user_agent"
+        ),
+        None,
+    )
+    helper_name = "c2a_apply_user_agent"
+    if key is None or re.search(rf"\bfn\s+{helper_name}\s*\(", content):
+        return content
+
+    edits: list[tuple[int, int, bytes]] = []
+    for call in RustInspection.from_content(content).nodes("call_expression"):
+        function = call.child_by_field_name("function")
+        arguments = call.child_by_field_name("arguments")
+        if function is None or function.type != "field_expression" or arguments is None:
+            continue
+        method = function.child_by_field_name("field")
+        receiver = function.child_by_field_name("value")
+        values = arguments.named_children
+        if (
+            method is None
+            or method.text.decode("utf-8", errors="replace") != "header"
+            or receiver is None
+            or len(values) < 2
+        ):
+            continue
+        header = values[0].text.decode("utf-8", errors="replace")
+        try:
+            header_name = json.loads(header)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(header_name, str) or header_name.casefold() != "user-agent":
+            continue
+        receiver_text = receiver.text.decode("utf-8", errors="replace")
+        target = (
+            call.parent
+            if call.parent is not None and call.parent.type == "try_expression"
+            else call
+        )
+        edits.append(
+            (target.start_byte, target.end_byte, f"{helper_name}({receiver_text})".encode())
+        )
+    if not edits:
+        return content
+
+    encoded = content.encode("utf-8")
+    for start, end, replacement in sorted(edits, reverse=True):
+        encoded = encoded[:start] + replacement + encoded[end:]
+    normalized = encoded.decode("utf-8")
+    helper = (
+        f"fn {helper_name}(request: aidoku::imports::net::Request) "
+        "-> aidoku::imports::net::Request {\n"
+        "    let user_agent = "
+        "aidoku::imports::defaults::defaults_get::<aidoku::alloc::String>"
+        f"({json.dumps(key)}).unwrap_or_default();\n"
+        "    match user_agent.as_str() {\n"
+        '        "none" => request,\n'
+        '        "" | "reset" | "desktop" | "mobile" | "app" => '\
+        f"request.header(\"User-Agent\", {json.dumps(DEFAULT_BROWSER_USER_AGENT)}),\n"
+        '        _ => request.header("User-Agent", &user_agent),\n'
+        "    }\n"
+        "}"
+    )
+    return normalized.rstrip() + "\n\n" + helper + "\n"
+
+
+def _project_user_agent_setting(
+    files: list[GeneratedFile],
+    setting_defaults: Mapping[str, str],
+) -> list[GeneratedFile]:
+    updated: list[GeneratedFile] = []
+    for generated in files:
+        content = generated.content
+        if generated.path.endswith(".rs"):
+            content = _normalize_user_agent_setting(content, setting_defaults)
+        updated.append(
+            generated.model_copy(update={"content": content})
+            if content != generated.content
+            else generated
+        )
+    return updated
+
+
 _BOOLEAN_LET_SOME_ALTERNATIVE = re.compile(
     r"(?m)^(?P<indent>[ \t]*)if\s+\(let\s+Some\(\(_,[ \t]*"
     r"(?P<binding>[A-Za-z_][A-Za-z0-9_]*)\)\)\s*=\s*(?P<first>[^\r\n]+?)\)\s*"
@@ -3685,6 +4121,23 @@ def _normalize_boolean_let_some_alternatives(content: str) -> str:
         )
 
     return _BOOLEAN_LET_SOME_ALTERNATIVE.sub(replace, content)
+
+
+def _normalize_if_expression_arithmetic(content: str) -> str:
+    edits: list[tuple[int, bytes]] = []
+    inspection = RustInspection.from_content(content)
+    for node in inspection.nodes("if_expression"):
+        if node.parent is None or node.parent.type != "binary_expression":
+            continue
+        left = node.parent.child_by_field_name("left")
+        if left != node:
+            continue
+        edits.append((node.start_byte, b"("))
+        edits.append((node.end_byte, b")"))
+    encoded = content.encode("utf-8")
+    for position, insertion in sorted(edits, reverse=True):
+        encoded = encoded[:position] + insertion + encoded[position:]
+    return encoded.decode("utf-8")
 
 
 def _normalize_index_length_guards(content: str) -> str:
@@ -3742,6 +4195,7 @@ def normalize_pinned_aidoku_rust(
         active_trace.observe(rule_id, before, content)
 
     apply(_normalize_boolean_let_some_alternatives)
+    apply(_normalize_if_expression_arithmetic)
     apply(_normalize_safe_std_paths, remove_extern_std=remove_extern_std)
     apply(_normalize_graphql_request_body)
     apply(_normalize_aidoku_api_paths)
@@ -3764,6 +4218,8 @@ def normalize_pinned_aidoku_rust(
     apply(_normalize_raw_json_response_bindings)
     apply(_normalize_request_builder_helpers, request_builder_helpers)
     apply(_inject_source_new)
+    apply(_normalize_source_new_delegation)
+    apply(_normalize_rate_limit_integer_types)
     apply(_normalize_mutated_aidoku_models)
     apply(_normalize_default_model_assignments)
     apply(_normalize_page_index_fields)
@@ -3771,7 +4227,9 @@ def normalize_pinned_aidoku_rust(
     apply(_normalize_select_filter_constructors)
     apply(_normalize_legacy_page_context)
     apply(_normalize_page_url_context)
+    apply(_normalize_page_context_maps)
     apply(_normalize_deep_link_defaults)
+    apply(_normalize_absolute_deep_link_paths)
     apply(_normalize_parse_date_option_patterns)
     apply(_normalize_optional_chapter_dates)
     apply(_normalize_chapter_group_scope)
@@ -3810,6 +4268,8 @@ def normalize_pinned_aidoku_rust(
     apply(_normalize_partial_move_pagination)
     apply(_normalize_partial_move_loop_pagination)
     apply(_normalize_collection_len_after_move)
+    apply(_normalize_moved_field_collection_usage)
+    apply(_normalize_overwritten_loop_initializers)
     apply(_normalize_moved_key_then_borrowed_url)
     apply(_normalize_select_filter_structs)
     apply(_normalize_resolution_regex)
@@ -3857,8 +4317,10 @@ def normalize_pinned_aidoku_rust(
     apply(_normalize_generated_setting_defaults, setting_defaults)
     apply(_normalize_resolution_setting, setting_defaults, setting_values)
     apply(_normalize_platform_header_setting, setting_defaults, setting_values)
+    apply(_normalize_user_agent_setting, setting_defaults)
     apply(_inject_no_std_macro_imports)
     apply(_inject_required_aidoku_imports)
+    apply(_normalize_shadowed_known_imports)
     apply(_remove_macro_only_trait_imports)
     apply(_remove_duplicate_imports)
     apply(_remove_unused_known_imports)
@@ -3929,6 +4391,76 @@ def _request_builder_helpers(manifest: GenerationManifest) -> set[str]:
             if "Request::get" in function.text and ".header(" in function.text:
                 helpers.add(function.name)
     return helpers
+
+
+def _prune_redundant_dynamic_settings(
+    files: list[GeneratedFile],
+    implemented_traits: list[str],
+) -> tuple[list[GeneratedFile], list[str]]:
+    """Prefer static settings resources over an empty legacy dynamic implementation."""
+    if "DynamicSettings" not in implemented_traits:
+        return files, implemented_traits
+    settings = next(
+        (generated for generated in files if generated.path == "res/settings.json"),
+        None,
+    )
+    if settings is None:
+        return files, implemented_traits
+    try:
+        if not json.loads(settings.content):
+            return files, implemented_traits
+    except json.JSONDecodeError:
+        return files, implemented_traits
+
+    updated: list[GeneratedFile] = []
+    removed = False
+    for generated in files:
+        content = generated.content
+        if not generated.path.endswith(".rs"):
+            updated.append(generated)
+            continue
+        edits: list[tuple[int, int]] = []
+        for implementation in RustInspection.from_content(content).nodes("impl_item"):
+            trait = implementation.child_by_field_name("trait")
+            body = implementation.child_by_field_name("body")
+            if (
+                _last_rust_identifier(trait) != "DynamicSettings"
+                or body is None
+                or "Ok(Vec::new())" not in RustInspection.compact_node(body)
+            ):
+                continue
+            methods = {
+                _last_rust_identifier(item.child_by_field_name("name"))
+                for item in body.named_children
+                if item.type == "function_item"
+            }
+            if methods == {"get_settings"}:
+                edits.append((implementation.start_byte, implementation.end_byte))
+        if edits:
+            encoded = content.encode("utf-8")
+            for start, end in reversed(edits):
+                encoded = encoded[:start] + encoded[end:]
+            content = encoded.decode("utf-8")
+            removed = True
+        updated.append(
+            generated.model_copy(update={"content": content})
+            if content != generated.content
+            else generated
+        )
+    if not removed:
+        return files, implemented_traits
+    cleaned: list[GeneratedFile] = []
+    for generated in updated:
+        content = generated.content
+        if generated.path == "src/lib.rs":
+            content = re.sub(r"\bDynamicSettings\s*,\s*", "", content)
+            content = re.sub(r",\s*DynamicSettings\b", "", content)
+        cleaned.append(
+            generated.model_copy(update={"content": content})
+            if content != generated.content
+            else generated
+        )
+    return cleaned, [trait for trait in implemented_traits if trait != "DynamicSettings"]
 
 
 def _skip_unused_decompiled_dto_fields(
@@ -4368,18 +4900,8 @@ def _recovered_request_builder(
     if user_agent_key is not None and "User-Agent" in ir.header_names:
         lines.extend(
             [
-                "    let user_agent = "
-                "aidoku::imports::defaults::defaults_get::<aidoku::alloc::String>"
-                f"({json.dumps(user_agent_key)}).unwrap_or_default();",
-                '    if user_agent != "none" {',
-                '        if user_agent.is_empty() || user_agent == "desktop" '
-                '|| user_agent == "mobile" || user_agent == "app" {',
-                '            request = request.header("User-Agent", '
+                '    request = request.header("User-Agent", '
                 f"{json.dumps(DEFAULT_BROWSER_USER_AGENT)});",
-                "        } else {",
-                '            request = request.header("User-Agent", &user_agent);',
-                "        }",
-                "    }",
             ]
         )
     lines.extend(["    Ok(request)", "}"])
@@ -5325,6 +5847,16 @@ def normalize_generation_manifest(
         (original_files, original_traits),
         (seeded_files, implemented_traits),
     )
+    before = (seeded_files, implemented_traits)
+    seeded_files, implemented_traits = _prune_redundant_dynamic_settings(
+        seeded_files,
+        implemented_traits,
+    )
+    changed |= projected(
+        "prune_redundant_dynamic_settings",
+        before,
+        (seeded_files, implemented_traits),
+    )
     before = seeded_files
     seeded_files = _prune_public_only_dynamic_filters(ir, seeded_files)
     changed |= projected("prune_public_only_dynamic_filters", before, seeded_files)
@@ -5374,6 +5906,10 @@ def normalize_generation_manifest(
     )
     changed |= projected("recovered_request_headers", before, header_projected)
     files = header_projected
+    before = files
+    user_agent_projected = _project_user_agent_setting(files, setting_defaults)
+    changed |= projected("user_agent_setting", before, user_agent_projected)
+    files = user_agent_projected
     before = files
     envelope_projected = _project_recovered_detail_api_envelope(ir, files)
     changed |= projected("recovered_detail_api_envelope", before, envelope_projected)

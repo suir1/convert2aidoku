@@ -7,12 +7,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from .ai import AIResult, OpenAICompatibleClient
+from .ai import AIResult, OpenAICompatibleClient, combine_ai_usage
 from .checkpoint_store import CheckpointStore
 from .constants import MAX_AI_DIAGNOSTIC_CHARS
 from .errors import AIProviderError, SecurityError
 from .manifest_contract import ContractEvaluation
 from .models import (
+    AIUsage,
     ConversionCheckpoint,
     GeneratedFile,
     GenerationManifest,
@@ -303,27 +304,84 @@ class TargetedRepair:
         diagnostics = self.validation.diagnostics[-MAX_AI_DIAGNOSTIC_CHARS:]
         patch_request = self._patch_request(diagnostics)
         if patch_request is not None:
-            patch_result = client.repair_patch(
-                self.ir,
-                current_file_excerpts=patch_request.excerpts,
-                diagnostics=patch_request.diagnostics,
-                scope=patch_request.scope,
+            patch_result: AIResult[RepairPatch] | None = None
+            patch_error: AIProviderError | None = None
+            try:
+                patch_result = client.repair_patch(
+                    self.ir,
+                    current_file_excerpts=patch_request.excerpts,
+                    diagnostics=patch_request.diagnostics,
+                    scope=patch_request.scope,
+                )
+                trace = NormalizationTrace()
+                patched_manifest = apply_repair_patch(
+                    self.manifest,
+                    current_files,
+                    patch_result.value,
+                    patch_request.excerpts,
+                    trace=trace,
+                )
+            except AIProviderError as exc:
+                patch_error = exc
+                patch_failure = str(exc)
+            else:
+                repair_mode: RepairMode = (
+                    "compiler_patch" if patch_request.scope == "compiler" else "contract_patch"
+                )
+                return patch_result.with_value(
+                    patched_manifest,
+                    normalization_rewrites=trace.counts,
+                    repair_mode=repair_mode,
+                )
+
+            full_diagnostics = repair_diagnostics(
+                self.validation,
+                self.contract.messages,
+            )[-MAX_AI_DIAGNOSTIC_CHARS:]
+            patch_usage = (
+                patch_result.usage
+                if patch_result is not None
+                else patch_error.usage
+                if patch_error is not None and isinstance(patch_error.usage, AIUsage)
+                else None
             )
-            trace = NormalizationTrace()
-            patched_manifest = apply_repair_patch(
-                self.manifest,
-                current_files,
-                patch_result.value,
-                patch_request.excerpts,
-                trace=trace,
+            patch_warnings = (
+                patch_result.warnings
+                if patch_result is not None
+                else patch_error.warnings
+                if patch_error is not None
+                else []
             )
-            repair_mode: RepairMode = (
-                "compiler_patch" if patch_request.scope == "compiler" else "contract_patch"
+            fallback_warning = (
+                "targeted repair was rejected locally; used a full controlled repair: "
+                + patch_failure
             )
-            return patch_result.with_value(
-                patched_manifest,
-                normalization_rewrites=trace.counts,
-                repair_mode=repair_mode,
+            try:
+                full_result = client.repair(
+                    self.ir,
+                    current_files=current_files,
+                    diagnostics=full_diagnostics,
+                    manifest_history=self._history(),
+                )
+            except AIProviderError as exc:
+                full_usage = exc.usage if isinstance(exc.usage, AIUsage) else None
+                raise AIProviderError(
+                    str(exc),
+                    usage=combine_ai_usage([patch_usage, full_usage]),
+                    warnings=list(
+                        dict.fromkeys([*patch_warnings, fallback_warning, *exc.warnings])
+                    ),
+                ) from exc
+            return AIResult(
+                value=full_result.value,
+                structured_output=full_result.structured_output,
+                reasoning_effort=full_result.reasoning_effort,
+                usage=combine_ai_usage([patch_usage, full_result.usage]),
+                repair_mode="full",
+                warnings=list(
+                    dict.fromkeys([*patch_warnings, fallback_warning, *full_result.warnings])
+                ),
+                normalization_rewrites=full_result.normalization_rewrites,
             )
 
         diagnostics = repair_diagnostics(

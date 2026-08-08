@@ -155,7 +155,8 @@ def test_live_smoke_can_probe_non_custom_api_domain_settings(tmp_path: Path) -> 
     assert '"api.default.example", "api.alt.example"' in smoke
     assert "DefaultValue::String(domain.into())" in smoke
     assert '"custom"' not in smoke
-    assert "select_readable_api_domain(&source)" in smoke
+    assert "let source = select_readable_api_domain()" in smoke
+    assert "let source = Simple::new();" in smoke
     assert "source.get_page_list(updated, chapter)" in smoke
 
 
@@ -3003,6 +3004,265 @@ def test_scaffold_declares_minimum_app_version_for_request_timeout(tmp_path: Pat
     apply_generation_manifest(project, ir, manifest, query=None)
 
     assert GeneratedSourceMetadata.load(project).minimum_app_version == "0.8.3"
+
+
+def test_normalizes_common_pinned_api_errors_in_full_repair_output() -> None:
+    rust = r"""
+use aidoku::imports::defaults::defaults_get;
+use aidoku::imports::std::parse_date;
+use aidoku::{
+    imports::{defaults::{DefaultValue, defaults_get}, net::TimeUnit},
+    Manga, MangaStatus, PageContext, Request, Result, Source,
+};
+use aidoku::serde::Deserialize;
+
+struct Example { period: i32 }
+impl Example {
+    pub fn new() -> Self {
+        let permits: i32 = 10;
+        let seconds: i64 = 1;
+        aidoku::imports::net::set_rate_limit(permits, seconds, TimeUnit::Seconds);
+        Self { period: seconds as i32 }
+    }
+    fn request(&self, url: String) -> Result<Request> {
+        let mut request = Request::get(url);
+        request = request.header("Accept", "application/json");
+        Ok(request)
+    }
+    fn json<'a, T: Deserialize<'a>>(&self, body: String) -> Result<T> {
+        serde_json::from_str(&body).map_err(|_| aidoku::AidokuError::message("bad"))
+    }
+    fn manga(&self) -> Manga {
+        Manga {
+            author: Some(["A".to_string()].into_iter().collect()),
+            status: MangaStatus::from_i32(1).unwrap_or_default(),
+            ..Default::default()
+        }
+    }
+    fn pages(&self) -> PageContext {
+        let mut context = PageContext::default();
+        context.set("referer", "https://example.com".to_string());
+        context
+    }
+    fn referer(&self, context: PageContext) -> String {
+        context.get("referer").unwrap_or_default()
+    }
+    fn list(&self, mut result: ListResult) {
+        let mut offset = 0;
+        let mut total = i32::MAX;
+        loop {
+            let page = fetch("?offset={}", offset);
+            total = page.total;
+            offset += 100;
+            if total == 0 { break; }
+        }
+        for item in result.list { consume(item); }
+        if result.list.is_empty() { done(); }
+    }
+}
+impl Source for Example {
+    fn new() -> Self { Example::default() }
+}
+fn parse_date(value: &str) -> i64 { value.len() as i64 }
+"""
+
+    normalized = normalize_pinned_aidoku_rust(rust)
+
+    assert "use aidoku::imports::std::parse_date;" not in normalized
+    assert normalized.count("defaults_get") == 1
+    assert "let seconds: i32 = 1;" in normalized
+    assert "let mut request = Request::get(url)?;" in normalized
+    assert "fn json<T: for<'de> Deserialize<'de>>" in normalized
+    assert "authors: Some(" in normalized
+    assert "2 => aidoku::MangaStatus::Completed" in normalized
+    assert "_ => aidoku::MangaStatus::Unknown" in normalized
+    assert 'context.insert("referer".into(),' in normalized
+    assert 'context.get("referer").cloned().unwrap_or_default()' in normalized
+    assert "fn new() -> Self { Example::new() }" in normalized
+    assert "let result_list_is_empty = result.list.is_empty();" in normalized
+    assert "if result_list_is_empty" in normalized
+    assert "let mut total = i32::MAX;" not in normalized
+    assert "let total = page.total;" in normalized
+    assert "let mut offset = 0;" in normalized
+    assert 'fetch("?offset={}", offset)' in normalized
+
+
+def test_normalizes_only_safe_aidoku_std_import_projection() -> None:
+    safe = (
+        "use aidoku::std::{String, Vec, ToString};\n"
+        "fn values(value: String) -> Vec<String> { vec![value.to_string()] }\n"
+    )
+    mixed = "use aidoku::std::{String, fs};\n"
+
+    normalized = normalize_pinned_aidoku_rust(safe)
+
+    assert "aidoku::std" not in normalized
+    assert "aidoku::alloc::{String, Vec, string::ToString}" in normalized
+    with pytest.raises(SecurityError, match="uses std"):
+        validate_generated_content("src/lib.rs", normalize_pinned_aidoku_rust(mixed))
+
+
+def test_parenthesizes_if_expression_used_in_arithmetic() -> None:
+    rust = """
+fn timestamp(seconds: i64, index: i64) -> i64 {
+    if seconds == 0 { 1 } else { seconds } + index
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(rust)
+
+    assert "(if seconds == 0 { 1 } else { seconds }) + index" in normalized
+
+
+def test_normalizes_pinned_response_text_and_single_artist_assignment() -> None:
+    rust = """
+fn body(response: Response) -> Result<String> { response.text() }
+fn update(mut manga: Manga) -> Manga {
+    manga.artists = Some(manga.title.clone());
+    manga
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(rust)
+
+    assert "response.get_string()" in normalized
+    assert "manga.artists = Some(vec![manga.title.clone()]);" in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
+def test_normalizes_deep_links_to_accept_absolute_urls() -> None:
+    rust = """
+fn handle_deep_link(&self, url: String) -> Result<Option<DeepLinkResult>> {
+    let path = url.as_str();
+    if let Some(rest) = path.strip_prefix("/comic/") {
+        let parts: Vec<&str> = rest.split('/').collect();
+        if parts.len() >= 2 && parts[1] == "chapter" {
+            return Ok(Some(DeepLinkResult::Chapter {
+                manga_key: format!("/comic/{}", parts[0]),
+                key: format!("/comic/{}/chapter/{}", parts[0], parts[2]),
+            }));
+        }
+    }
+    Ok(None)
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(rust)
+
+    assert 'path.split_once("/comic/").map(|(_, rest)| rest)' in normalized
+    assert 'parts.len() >= 3 && parts[1] == "chapter"' in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
+def test_manifest_applies_user_agent_setting_to_every_request() -> None:
+    ir = minimal_source_ir(header_names=["User-Agent"])
+    manifest = GenerationManifest(
+        source_struct="Example",
+        files=[
+            GeneratedFile(path="src/lib.rs", content="#![no_std]\n"),
+            GeneratedFile(
+                path="src/source.rs",
+                content="""
+use aidoku::imports::net::Request;
+fn api_request(url: &str) -> aidoku::Result<Request> {
+    let request = Request::get(url)?.header("User-Agent", "stale api ua")?;
+    Ok(request)
+}
+fn image_request(url: &str) -> aidoku::Result<Request> {
+    Ok(Request::get(url)?.header("User-Agent", &IMAGE_UA).header("Accept", "image/*"))
+}
+""",
+            ),
+            GeneratedFile(
+                path="res/settings.json",
+                content="""[{"type":"group","title":"Request","items":[
+                    {"type":"text","key":"v2.key.user_agent","title":"UA","default":"okhttp/4.12.0"}
+                ]}]""",
+            ),
+        ],
+    )
+
+    normalized = normalize_generation_manifest(ir, manifest)
+    source = next(item.content for item in normalized.files if item.path == "src/source.rs")
+
+    assert "stale api ua" not in source
+    assert "IMAGE_UA" not in source
+    assert source.count("c2a_apply_user_agent(") == 3
+    assert "c2a_apply_user_agent(Request::get(url)?)?" not in source
+    assert 'defaults_get::<aidoku::alloc::String>("v2.key.user_agent")' in source
+    assert '"none" => request' in source
+    assert '"" | "reset" | "desktop" | "mobile" | "app"' in source
+    assert normalize_generation_manifest(ir, normalized) == normalized
+
+
+def test_normalizes_nested_pinned_imports_and_json_value() -> None:
+    rust = """
+use aidoku::alloc::string::ToString;
+use aidoku::alloc::vec;
+use aidoku::imports::defaults::defaults_get;
+use aidoku::{
+    PageResult,
+    alloc::{string::{String, ToString}, vec, vec::Vec},
+    defaults::defaults_get,
+    error::{AidokuError, Result},
+};
+fn parse(url: &str) -> Result<aidoku::imports::json::Json> {
+    let _ = defaults_get::<String>("domain");
+    Err(AidokuError::message(url))
+}
+fn items(value: String) -> Vec<String> { vec![value.to_string()] }
+"""
+
+    normalized = normalize_pinned_aidoku_rust(rust)
+
+    assert "aidoku::defaults" not in normalized
+    assert "aidoku::error" not in normalized
+    assert "aidoku::imports::json::Json" not in normalized
+    assert "serde_json::Value" in normalized
+    assert "PageResult" not in normalized
+    assert normalized.count("defaults_get") == 2  # one import and one call
+    assert normalized.count("ToString") == 1
+    assert "use aidoku::alloc::vec;" not in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
+def test_manifest_prunes_empty_dynamic_settings_when_static_settings_exist() -> None:
+    ir = minimal_source_ir()
+    manifest = GenerationManifest(
+        source_struct="Example",
+        implemented_traits=["DynamicSettings"],
+        files=[
+            GeneratedFile(
+                path="src/lib.rs",
+                content=(
+                    "#![no_std]\n"
+                    "register_source!(Example, DynamicSettings, ImageRequestProvider);\n"
+                ),
+            ),
+            GeneratedFile(
+                path="src/source.rs",
+                content="""
+struct Example;
+impl DynamicSettings for Example {
+    fn get_settings(&self) -> Result<Vec<Filter>> { Ok(Vec::new()) }
+}
+""",
+            ),
+            GeneratedFile(
+                path="res/settings.json",
+                content='[{"type":"group","title":"Request","items":[]}]',
+            ),
+        ],
+    )
+
+    normalized = normalize_generation_manifest(ir, manifest)
+    source = next(item.content for item in normalized.files if item.path == "src/source.rs")
+    lib = next(item.content for item in normalized.files if item.path == "src/lib.rs")
+
+    assert "DynamicSettings" not in normalized.implemented_traits
+    assert "impl DynamicSettings" not in source
+    assert "DynamicSettings" not in lib
+    assert normalize_generation_manifest(ir, normalized) == normalized
 
 
 @pytest.mark.parametrize(

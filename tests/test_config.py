@@ -11,8 +11,10 @@ def test_loads_env_key_without_exposing_it(monkeypatch: pytest.MonkeyPatch) -> N
     settings = load_ai_settings(base_url="http://localhost/v1", model="model")
     assert settings.api_key.get_secret_value() == "secret-value"
     assert "secret-value" not in repr(settings)
-    assert settings.generation_reasoning_effort == ReasoningEffort.AUTO
+    assert settings.generation_reasoning_effort == ReasoningEffort.OFF
     assert settings.repair_reasoning_effort == ReasoningEffort.LOW
+    assert settings.generation_max_tokens == 24_000
+    assert settings.repair_max_tokens == 12_000
     assert settings.max_repair_rounds == 1
 
 
@@ -89,3 +91,29 @@ def test_rejects_invalid_reasoning_effort(monkeypatch: pytest.MonkeyPatch) -> No
 
     with pytest.raises(ConfigurationError, match="repair_reasoning_effort must be one of"):
         load_ai_settings(base_url="http://localhost/v1", model="model")
+
+
+def test_output_token_budget_precedence(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    config = tmp_path / "c2a.toml"
+    config.write_text(
+        '[ai]\nbase_url="http://x/v1"\nmodel="m"\n'
+        "generation_max_tokens=30000\nrepair_max_tokens=9000\n"
+    )
+    monkeypatch.setenv("C2A_API_KEY", "from-env")
+    monkeypatch.setenv("C2A_GENERATION_MAX_TOKENS", "20000")
+
+    settings = load_ai_settings(config_path=config, repair_max_tokens=8_000)
+
+    assert settings.generation_max_tokens == 20_000
+    assert settings.repair_max_tokens == 8_000
+
+
+def test_rejects_out_of_range_output_token_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("C2A_API_KEY", "from-env")
+
+    with pytest.raises(ConfigurationError, match="generation_max_tokens must be between"):
+        load_ai_settings(
+            base_url="http://localhost/v1",
+            model="model",
+            generation_max_tokens=128,
+        )

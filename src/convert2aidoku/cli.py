@@ -223,6 +223,14 @@ def convert(
         ReasoningEffort | None,
         typer.Option("--repair-reasoning", help="AI reasoning effort for repair requests."),
     ] = None,
+    generation_max_tokens: Annotated[
+        int | None,
+        typer.Option(help="Maximum completion tokens for initial Rust generation."),
+    ] = None,
+    repair_max_tokens: Annotated[
+        int | None,
+        typer.Option(help="Maximum completion tokens for settings and repair requests."),
+    ] = None,
     live: Annotated[
         bool,
         typer.Option("--live/--no-live", help="Run list/details/chapters/pages/image smoke tests."),
@@ -252,6 +260,8 @@ def convert(
             max_repair_rounds=max_repairs,
             generation_reasoning_effort=generation_reasoning,
             repair_reasoning_effort=repair_reasoning,
+            generation_max_tokens=generation_max_tokens,
+            repair_max_tokens=repair_max_tokens,
         )
         if not yes:
             console.print(

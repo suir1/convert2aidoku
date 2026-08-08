@@ -342,6 +342,8 @@ form.addEventListener("submit", async (event) => {
     proxy: byId("proxy").value || null,
     generation_reasoning: byId("generation-reasoning").value,
     repair_reasoning: byId("repair-reasoning").value,
+    generation_max_tokens: Number(byId("generation-max-tokens").value),
+    repair_max_tokens: Number(byId("repair-max-tokens").value),
     live: byId("live").checked,
     force: byId("force").checked,
     resume: false,

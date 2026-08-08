@@ -319,6 +319,64 @@ def test_targeted_repair_applies_compiler_patch_without_loading_history(tmp_path
     assert calls.repair == 0
 
 
+def test_rejected_local_patch_falls_back_to_full_controlled_manifest(tmp_path: Path) -> None:
+    store = CheckpointStore(tmp_path / "workspace")
+    source = store.project / "src"
+    source.mkdir(parents=True)
+    rust = "fn broken() { old(); }\n"
+    (source / "lib.rs").write_text(rust, encoding="utf-8")
+    manifest = generation_manifest(rust)
+    replacement = generation_manifest("fn fixed() {}\n")
+    invalid_patch = RepairPatch.model_validate(
+        {
+            "edits": [
+                {
+                    "path": "src/lib.rs",
+                    "old_text": "text outside the supplied excerpt",
+                    "new_text": "fixed();",
+                }
+            ]
+        }
+    )
+    adapter, calls = scripted_ai_client(
+        generation=manifest,
+        repair=replacement,
+        repair_patch=invalid_patch,
+        patch_scope="compiler",
+    )
+    repair = TargetedRepair(
+        ir=minimal_source_ir(),
+        store=store,
+        checkpoint=ConversionCheckpoint(
+            input_ref="fixture",
+            output="generated/en.example",
+            provider_base_url="http://local/v1",
+            model="test",
+        ),
+        manifest=manifest,
+        validation=ValidationResult(
+            stages=[
+                ValidationStage(
+                    name="cargo-check",
+                    kind="check",
+                    ok=False,
+                    output="error\n  --> src/lib.rs:1:15",
+                )
+            ]
+        ),
+        contract=ContractEvaluation(()),
+    )
+
+    with adapter(provider_settings()) as client:
+        result = repair.request(client)
+
+    assert result.value.files[0].content == "fn fixed() {}\n"
+    assert result.repair_mode == "full"
+    assert any("used a full controlled repair" in warning for warning in result.warnings)
+    assert calls.repair_patch == 1
+    assert calls.repair == 1
+
+
 def test_format_parse_failure_uses_bounded_compiler_patch(tmp_path: Path) -> None:
     store = CheckpointStore(tmp_path / "workspace")
     source = store.project / "src"

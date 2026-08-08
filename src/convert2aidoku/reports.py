@@ -61,6 +61,7 @@ def write_report(project: Path, report: ConversionReport) -> None:
     normalization_rewrites: Counter[str] = Counter()
     contract_rules: Counter[str] = Counter()
     repair_modes: Counter[str] = Counter()
+    token_totals: Counter[str] = Counter()
     repair_rounds = 0
     for round_result in report.ai_rounds:
         normalization_rewrites.update(round_result.normalization_rewrites)
@@ -70,6 +71,26 @@ def write_report(project: Path, report: ConversionReport) -> None:
             repair_rounds += 1
         if round_result.repair_mode is not None:
             repair_modes[round_result.repair_mode] += 1
+        if round_result.usage is not None:
+            for field in (
+                "prompt_tokens",
+                "completion_tokens",
+                "total_tokens",
+                "reasoning_tokens",
+                "cached_prompt_tokens",
+            ):
+                token_totals[field] += getattr(round_result.usage, field) or 0
+    for failed_exchange in report.failed_ai_exchanges:
+        if failed_exchange.usage is None:
+            continue
+        for field in (
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "reasoning_tokens",
+            "cached_prompt_tokens",
+        ):
+            token_totals[field] += getattr(failed_exchange.usage, field) or 0
     targeted_repairs = sum(count for mode, count in repair_modes.items() if mode.endswith("_patch"))
     unclassified_repairs = repair_rounds - sum(repair_modes.values())
     lines = [
@@ -79,6 +100,12 @@ def write_report(project: Path, report: ConversionReport) -> None:
         f"- Input: `{report.input_ref}`",
         f"- Model: `{report.model or 'not used'}`",
         f"- AI rounds: {len(report.ai_rounds)}",
+        "- AI tokens: "
+        f"{token_totals['total_tokens']:,} total "
+        f"({token_totals['prompt_tokens']:,} prompt, "
+        f"{token_totals['completion_tokens']:,} completion, "
+        f"{token_totals['reasoning_tokens']:,} reasoning, "
+        f"{token_totals['cached_prompt_tokens']:,} cached prompt)",
         "- Repair rounds: "
         f"{repair_rounds} ({targeted_repairs} targeted, {repair_modes['full']} full, "
         f"{unclassified_repairs} unclassified)",

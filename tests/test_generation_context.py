@@ -6,7 +6,7 @@ import pytest
 
 from convert2aidoku.errors import InputError
 from convert2aidoku.generation_context import build_generation_context, build_settings_context
-from convert2aidoku.models import SourceFile, SourceIR
+from convert2aidoku.models import Capability, SourceFile, SourceIR
 from tests.scenarios import minimal_source_ir
 
 
@@ -267,3 +267,74 @@ def test_settings_context_keeps_decompiled_preference_keys_defaults_and_enum_val
     assert 'getString("v1.key.api", "www.example.com")' in content
     assert 'setTitle("API 域名")' in content
     assert "must-not-be-sent" not in content
+
+
+def test_settings_context_removes_android_listener_bodies_from_ui_builder() -> None:
+    preferences = _file(
+        "sources/example/PreferencesKt.java",
+        """
+        public final class PreferencesKt {
+            public static Preference[] initPreferences(Context context) {
+                ListPreference preference = new ListPreference(context);
+                preference.setKey("api_domain");
+                preference.setTitle("API domain");
+                preference.setDefaultValue("api.example.com");
+                preference.setOnPreferenceChangeListener(value -> {
+                    String listenerNoise = "must-not-be-sent";
+                    return true;
+                });
+                return new Preference[]{preference};
+            }
+        }
+        """,
+    )
+
+    payload = build_settings_context(_ir(preferences))
+    content = payload["settings_evidence"][0]["content"]
+
+    assert 'setKey("api_domain")' in content
+    assert 'setTitle("API domain")' in content
+    assert 'setDefaultValue("api.example.com")' in content
+    assert "must-not-be-sent" not in content
+
+
+def test_rust_generation_keeps_setting_accessors_but_omits_android_settings_ui() -> None:
+    main = _file("sources/example/Example.java", "public final class Example {}")
+    preferences = _file(
+        "sources/example/PreferencesKt.java",
+        """
+        public final class PreferencesKt {
+            public static String getDomain(SharedPreferences preferences) {
+                return preferences.getString("api_domain", "api.example.com");
+            }
+            public static Preference[] initPreferences(Context context) {
+                ListPreference preference = new ListPreference(context);
+                preference.setKey("api_domain");
+                preference.setTitle("API domain");
+                return new Preference[]{preference};
+            }
+            private static boolean initPreferences$lambda$1(Preference preference, Object value) {
+                preference.setSummary(value.toString());
+                return true;
+            }
+        }
+        """,
+    )
+    ir = _ir(main, preferences).model_copy(update={"capabilities": [Capability.SETTINGS]})
+
+    payload = build_generation_context(ir).as_payload()
+    evidence = {item["path"]: item["content"] for item in payload["source_evidence"]}
+
+    assert "getDomain" in evidence[preferences.path]
+    assert "initPreferences" not in evidence[preferences.path]
+
+
+def test_provider_prompt_projection_summarizes_omissions_without_audit_hashes() -> None:
+    main = _file("sources/example/Example.java", "public final class Example {}")
+    manifest = _file("resources/AndroidManifest.xml", "<manifest/>")
+
+    payload = build_generation_context(_ir(main, manifest)).as_prompt_payload()
+
+    assert "sha256" not in payload["source_evidence"][0]
+    assert payload["omitted_source_summary"] == {"represented_in_source_ir": 1}
+    assert "omitted_source_files" not in payload

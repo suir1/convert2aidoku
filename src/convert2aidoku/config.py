@@ -5,9 +5,17 @@ import tomllib
 from enum import StrEnum
 from pathlib import Path
 
-from pydantic import BaseModel, SecretStr
+from pydantic import BaseModel, Field, SecretStr
 
-from .constants import DEFAULT_AI_TIMEOUT_SECONDS, DEFAULT_MAX_REPAIR_ROUNDS, MAX_REPAIR_ROUNDS
+from .constants import (
+    DEFAULT_AI_TIMEOUT_SECONDS,
+    DEFAULT_GENERATION_MAX_TOKENS,
+    DEFAULT_MAX_REPAIR_ROUNDS,
+    DEFAULT_REPAIR_MAX_TOKENS,
+    MAX_AI_MAX_TOKENS,
+    MAX_REPAIR_ROUNDS,
+    MIN_AI_MAX_TOKENS,
+)
 from .errors import ConfigurationError
 
 
@@ -25,8 +33,18 @@ class AISettings(BaseModel):
     api_key: SecretStr
     timeout_seconds: float = DEFAULT_AI_TIMEOUT_SECONDS
     max_repair_rounds: int = DEFAULT_MAX_REPAIR_ROUNDS
-    generation_reasoning_effort: ReasoningEffort = ReasoningEffort.AUTO
+    generation_reasoning_effort: ReasoningEffort = ReasoningEffort.OFF
     repair_reasoning_effort: ReasoningEffort = ReasoningEffort.LOW
+    generation_max_tokens: int = Field(
+        default=DEFAULT_GENERATION_MAX_TOKENS,
+        ge=MIN_AI_MAX_TOKENS,
+        le=MAX_AI_MAX_TOKENS,
+    )
+    repair_max_tokens: int = Field(
+        default=DEFAULT_REPAIR_MAX_TOKENS,
+        ge=MIN_AI_MAX_TOKENS,
+        le=MAX_AI_MAX_TOKENS,
+    )
 
     @property
     def chat_completions_url(self) -> str:
@@ -66,6 +84,8 @@ def load_ai_settings(
     max_repair_rounds: int | None = None,
     generation_reasoning_effort: ReasoningEffort | str | None = None,
     repair_reasoning_effort: ReasoningEffort | str | None = None,
+    generation_max_tokens: int | None = None,
+    repair_max_tokens: int | None = None,
 ) -> AISettings:
     config = _read_config(config_path)
     resolved_base_url = base_url or os.getenv("C2A_BASE_URL") or config.get("base_url")
@@ -111,6 +131,27 @@ def load_ai_settings(
             values = ", ".join(item.value for item in ReasoningEffort)
             raise ConfigurationError(f"{config_name} must be one of: {values}") from exc
 
+    def max_tokens(
+        explicit: int | None,
+        env_name: str,
+        config_name: str,
+        default: int,
+    ) -> int:
+        raw = (
+            explicit
+            if explicit is not None
+            else os.getenv(env_name) or config.get(config_name, default)
+        )
+        try:
+            value = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise ConfigurationError(f"{config_name} must be an integer") from exc
+        if not MIN_AI_MAX_TOKENS <= value <= MAX_AI_MAX_TOKENS:
+            raise ConfigurationError(
+                f"{config_name} must be between {MIN_AI_MAX_TOKENS} and {MAX_AI_MAX_TOKENS}"
+            )
+        return value
+
     return AISettings(
         base_url=str(resolved_base_url),
         model=str(resolved_model),
@@ -121,12 +162,24 @@ def load_ai_settings(
             generation_reasoning_effort,
             "C2A_GENERATION_REASONING_EFFORT",
             "generation_reasoning_effort",
-            ReasoningEffort.AUTO,
+            ReasoningEffort.OFF,
         ),
         repair_reasoning_effort=reasoning_effort(
             repair_reasoning_effort,
             "C2A_REPAIR_REASONING_EFFORT",
             "repair_reasoning_effort",
             ReasoningEffort.LOW,
+        ),
+        generation_max_tokens=max_tokens(
+            generation_max_tokens,
+            "C2A_GENERATION_MAX_TOKENS",
+            "generation_max_tokens",
+            DEFAULT_GENERATION_MAX_TOKENS,
+        ),
+        repair_max_tokens=max_tokens(
+            repair_max_tokens,
+            "C2A_REPAIR_MAX_TOKENS",
+            "repair_max_tokens",
+            DEFAULT_REPAIR_MAX_TOKENS,
         ),
     )

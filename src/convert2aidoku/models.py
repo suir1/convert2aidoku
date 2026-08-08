@@ -875,6 +875,8 @@ class AIUsage(BaseModel):
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     total_tokens: int | None = None
+    reasoning_tokens: int | None = None
+    cached_prompt_tokens: int | None = None
 
 
 type RepairMode = Literal["compiler_patch", "contract_patch", "full"]

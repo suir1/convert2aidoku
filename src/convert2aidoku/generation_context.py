@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
@@ -8,7 +9,7 @@ from typing import Any
 from .decompiled_input import decompiled_dto_shapes, project_java_behavior
 from .errors import InputError
 from .listing_renderer import SearchListingOwnership, search_listing_ownership
-from .models import SourceFile, SourceIR
+from .models import Capability, SourceFile, SourceIR
 
 DEFAULT_GENERATION_EVIDENCE_CHARS = 110_000
 DEFAULT_SETTINGS_EVIDENCE_CHARS = 50_000
@@ -24,6 +25,15 @@ _SETTING_USAGE = re.compile(
 _SETTING_ACCESS = re.compile(
     r"\.(?:getBoolean|getString|setKey|setTitle|setSummary|setEntries|"
     r"setEntryValues|setDefaultValue)\s*\("
+)
+_SETTING_UI_METHOD = re.compile(r"\b(?:initPreferences|setupPreferenceScreen)\b")
+_SETTING_UI_STATEMENT = re.compile(
+    r"\bnew\s+(?:ListPreference|MultiSelectListPreference|SwitchPreferenceCompat|"
+    r"EditTextPreference|PreferenceCategory|PreferenceScreen)\b|"
+    r"\.(?:setKey|setTitle|setSummary|setEntries|setEntryValues|setDefaultValue)\s*\(|"
+    r"\b(?:Preference|ListPreference|MultiSelectListPreference|SwitchPreferenceCompat|"
+    r"EditTextPreference)\s*\[\s*\]|"
+    r"\breturn\s+(?:new\s+Preference\s*\[|preferenceArr\b)"
 )
 
 
@@ -41,6 +51,20 @@ class GenerationContext:
             "source_evidence": self.source_evidence,
             "decompiled_dto_shapes": self.decompiled_dto_shapes,
             "omitted_source_files": self.omitted_source_files,
+            "context_stats": self.context_stats,
+        }
+
+    def as_prompt_payload(self) -> dict[str, Any]:
+        """Drop audit-only hashes and per-file omission details from provider input."""
+        omission_counts = Counter(item["reason"] for item in self.omitted_source_files)
+        return {
+            "source_ir": self.source_ir,
+            "source_evidence": [
+                {key: value for key, value in item.items() if key != "sha256"}
+                for item in self.source_evidence
+            ],
+            "decompiled_dto_shapes": self.decompiled_dto_shapes,
+            "omitted_source_summary": dict(sorted(omission_counts.items())),
             "context_stats": self.context_stats,
         }
 
@@ -84,6 +108,9 @@ def _source_evidence(
             main=main,
             public_only=ir.feature_scope == "public_only",
             excluded_methods=ownership.java_methods if ownership is not None else frozenset(),
+            excluded_method_prefixes=("initPreferences", "setupPreferenceScreen")
+            if Capability.SETTINGS in ir.capabilities
+            else (),
         )
         if sliced != content:
             content = sliced
@@ -309,7 +336,17 @@ def _settings_accessor_slice(content: str) -> str:
             merged[-1][1] = max(merged[-1][1], end)
         else:
             merged.append([start, end])
-    return "\n\n".join("\n".join(lines[start:end]) for start, end in merged)
+    excerpts = []
+    for start, end in merged:
+        block = lines[start:end]
+        if block and _SETTING_UI_METHOD.search(block[0]):
+            compact = [block[0]]
+            compact.extend(line for line in block[1:] if _SETTING_UI_STATEMENT.search(line))
+            compact.append("}")
+            excerpts.append("\n".join(compact))
+        else:
+            excerpts.append("\n".join(block))
+    return "\n\n".join(excerpts)
 
 
 def _settings_usage_slice(content: str) -> str:
