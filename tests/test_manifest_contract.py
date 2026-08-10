@@ -438,6 +438,31 @@ def test_settings_contract_ignores_non_json_rust_string_constants() -> None:
     assert "unread_settings" not in evaluation.rule_ids
 
 
+def test_settings_contract_resolves_associated_setting_constants() -> None:
+    ir = minimal_source_ir(capabilities=[Capability.SETTINGS])
+    manifest = _manifest(
+        """
+        struct Source;
+        impl Source {
+            const CHECK_API_LIMIT_PREF: &'static str = "CHECK_API_LIMIT";
+            fn check_limit() -> bool {
+                defaults_get::<bool>(Source::CHECK_API_LIMIT_PREF).unwrap_or(true)
+            }
+        }
+        """
+    )
+    manifest.files.append(
+        GeneratedFile(
+            path="res/settings.json",
+            content='[{"type":"switch","key":"CHECK_API_LIMIT","title":"Limit"}]',
+        )
+    )
+
+    evaluation = evaluate_manifest_contract(ir, manifest)
+
+    assert "unread_settings" not in evaluation.rule_ids
+
+
 def test_settings_contract_does_not_conflate_same_named_functions() -> None:
     ir = minimal_source_ir(capabilities=[Capability.SETTINGS])
     manifest = _manifest(

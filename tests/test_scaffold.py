@@ -283,13 +283,26 @@ fn http_get(url: &str) -> Result<Response> {
             .map_err(|e| RequestError::from(format!("{e:?}")))
             .and_then(|request| request.send()))?)
 }
+fn graphql_request(body: &str) -> Result<Request> {
+    Ok(Request::post(API_URL)?.body(body))
+}
+fn listing_query() -> String { String::new() }
+fn list() -> Result<Response> {
+    let body = listing_query();
+    let request = graphql_request(&body)?;
+    let response = request.send()?;
+    Ok(response)
+}
 """
 
     normalized = normalize_pinned_aidoku_rust(content)
 
     assert "let response = match make_request()?.send()" in normalized
     assert "Err(_) => make_request()?.send()?," in normalized
+    assert "let response = match graphql_request(&body)?.send()" in normalized
+    assert "Err(_) => graphql_request(&body)?.send()?," in normalized
     assert "RequestError::from" not in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
 
 
 def test_normalizer_adds_idempotent_dead_code_allowance_for_generated_modules() -> None:
@@ -1339,6 +1352,163 @@ fn selected(filters: &[FilterValue]) -> bool {
     assert normalize_pinned_aidoku_rust(normalized) == normalized
 
 
+def test_normalizer_projects_custom_referer_page_context_to_map() -> None:
+    content = """
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ImagePageContext {
+    referer: String,
+}
+
+impl PageContext for ImagePageContext {
+    fn from_bytes(_bytes: &[u8]) -> Option<Self> { None }
+    fn to_bytes(&self) -> Vec<u8> { Vec::new() }
+}
+
+fn page(image_url: String, referer: String) -> PageContent {
+    let context = ImagePageContext { referer: referer.clone() };
+    PageContent::url_context(image_url, context)
+}
+
+fn image(mut request: Request, context: Option<PageContext>) -> Request {
+    if let Some(context) = context {
+        if let Ok(context) = context.downcast_ref::<ImagePageContext>() {
+            request = request.header("Referer", &context.referer);
+        }
+    }
+    request
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "struct ImagePageContext" not in normalized
+    assert "impl PageContext" not in normalized
+    assert "downcast_ref" not in normalized
+    assert 'PageContext::from([("referer".into(), referer.clone())])' in normalized
+    assert 'context.get("referer")' in normalized
+    assert 'request.header("Referer", context.as_str())' in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
+def test_normalizer_projects_legacy_group_filter_to_multi_select() -> None:
+    content = """
+use aidoku::{CheckFilter, Filter, FilterGroup, GroupFilter};
+
+fn categories(categories: Vec<Category>) -> Filter {
+    let options = categories.iter().map(|item| item.name.clone().into()).collect();
+    let ids = categories.iter().map(|item| item.id.clone().into()).collect();
+    let mut items = Vec::new();
+    for category in categories {
+        items.push(CheckFilter {
+            id: category.id.into(),
+            title: Some(category.name.into()),
+            ..Default::default()
+        }.into());
+    }
+    Filter::Group(FilterGroup {
+        id: "category".into(),
+        title: Some("Categories".into()),
+        items,
+    })
+}
+
+fn selected(filters: Vec<FilterValue>) -> Vec<String> {
+    let mut category_ids = Vec::new();
+    for filter in filters {
+        match filter {
+            FilterValue::Group { id, items } if id == "category" => {
+                for item in items {
+                    if let FilterValue::Check { id, value } = item {
+                        if value {
+                            category_ids.push(id);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    category_ids
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "FilterGroup" not in normalized
+    assert "GroupFilter" not in normalized
+    assert "aidoku::MultiSelectFilter" in normalized
+    assert "options," in normalized
+    assert "ids: Some(ids)," in normalized
+    assert "let mut items" not in normalized
+    assert "items.push" not in normalized
+    assert "FilterValue::Group" not in normalized
+    assert "FilterValue::MultiSelect" in normalized
+    assert "category_ids.extend(included.iter().cloned())" in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
+def test_normalizer_projects_legacy_request_error_and_manga_shapes() -> None:
+    content = """
+impl ResponseDto {
+    fn into_data(self) -> Result<DataDto> {
+        self.data.ok_or_else(|| {
+            self.errors.map(|errors| errors.join("\n")).unwrap_or_else(|| "No data".into())
+        })
+    }
+}
+
+fn make_request(body: &str) -> Result<Request> {
+    let mut request = Request::post(API_URL, body);
+    request.header(
+        "Accept",
+        "application/json",
+    );
+    Ok(request)
+}
+
+fn absolute_url(path: &str) -> String { path.into() }
+
+fn page(chapter: Chapter) -> String {
+    absolute_url(&chapter.url)
+}
+
+fn manga(dto: MangaDto) -> Manga {
+    let authors = dto.authors.iter().map(|item| item.name.clone()).collect::<Vec<_>>().join(", ");
+    let status = match dto.status.as_str() {
+        "ONGOING" => 1,
+        "END" => 2,
+        _ => 0,
+    };
+    Manga {
+        id: dto.id.clone(),
+        key: dto.id,
+        title: dto.title,
+        author: authors,
+        artist: dto.authors.iter().map(|item| item.name.clone()).collect(),
+        status,
+        nsfw: 0,
+        viewer: 0,
+        ..Default::default()
+    }
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "ok_or_else(|| aidoku::AidokuError::message({" in normalized
+    assert "Request::post(API_URL)?.body(body.to_string().as_bytes())" in normalized
+    assert 'request = request.header(\n        "Accept"' in normalized
+    assert "absolute_url(chapter.url.as_deref().unwrap_or(&chapter.key))" in normalized
+    assert "id: dto.id.clone()" not in normalized
+    assert "authors: Some(vec![authors])" in normalized
+    assert "artists: Some(dto.authors.iter()" in normalized
+    assert "status: match status" in normalized
+    assert "aidoku::MangaStatus::Ongoing" in normalized
+    assert "content_rating: aidoku::ContentRating::Unknown" in normalized
+    assert "viewer: aidoku::Viewer::Unknown" in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
 def test_normalizer_repairs_local_model_optional_fields_image_request_and_deep_links() -> None:
     content = """
 use aidoku::filters::SelectFilter;
@@ -1412,6 +1582,32 @@ fn qualified_deep_link() -> aidoku::DeepLinkResult {
     assert normalize_pinned_aidoku_rust(normalized) == normalized
 
 
+def test_normalizer_accepts_relative_manga_and_chapter_deep_links() -> None:
+    content = """
+fn handle_deep_link(&self, url: String) -> Result<Option<DeepLinkResult>> {
+    if let Some(rest) = url.strip_prefix("https://example.com") {
+        let path = rest;
+        if path.starts_with("/comic/") {
+            let id = path.trim_start_matches("/comic/");
+            if !id.is_empty() {
+                return Ok(Some(DeepLinkResult::Manga {
+                    key: format!("/comic/{}", id),
+                }));
+            }
+        }
+    }
+    Ok(None)
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "then_some(url.as_str())" in normalized
+    assert 'split_once("/chapter/")' in normalized
+    assert "DeepLinkResult::Chapter { manga_key, key }" in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
 def test_normalizer_projects_grouped_aidoku_imports_and_local_parse_date() -> None:
     content = """
 use aidoku::{
@@ -1450,6 +1646,30 @@ fn preserve_types(
     assert "imports::{," not in normalized
     assert "FilterValue" in normalized
     assert "ListingProvider" in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
+def test_normalizer_projects_pinned_json_cow_and_duplicate_imports() -> None:
+    content = """
+use aidoku::alloc::string::ToString;
+use aidoku::{alloc::{String, string::ToString}};
+use aidoku::serde_json::{Value, json};
+use aidoku::imports::serde_json;
+use aidoku::imports::net::request;
+
+fn value() -> (String, Value, aidoku::alloc::Cow<'static, str>) {
+    (String::new(), json!({}), "value".into())
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert normalized.count("string::ToString") == 1
+    assert "use serde_json::{Value, json};" in normalized
+    assert "aidoku::serde_json" not in normalized
+    assert "aidoku::imports::serde_json" not in normalized
+    assert "imports::net::request" not in normalized
+    assert "aidoku::alloc::borrow::Cow<'static, str>" in normalized
     assert normalize_pinned_aidoku_rust(normalized) == normalized
 
 
@@ -1627,6 +1847,41 @@ fn get_manga_update(
     assert "comicById" not in chapters_arm
     assert "chaptersByComicId" in chapters_arm
     assert "self.manga_query(manga_id, needs_details, needs_chapters)" in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
+def test_normalizer_splits_raw_combined_graphql_manga_update_projection() -> None:
+    content = """
+fn manga_query(id: &str) -> String {
+    let query = build_query(
+        r#"
+        query chapterByComicId($comicId: ID!) {
+          comicById(comicId: $comicId) #{body}
+          chaptersByComicId(comicId: $comicId) {
+            id
+            serial
+          }
+        }
+        "#,
+    );
+    build_request_body(&query, id)
+}
+fn get_manga_update(needs_details: bool, needs_chapters: bool, id: &str) {
+    let body = manga_query(id);
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "fn manga_query(id: &str, needs_details: bool, needs_chapters: bool)" in normalized
+    assert "match (needs_details, needs_chapters)" in normalized
+    assert "manga_query(id, needs_details, needs_chapters)" in normalized
+    details_arm = normalized.split("(true, false) =>", 1)[1].split("(false, true) =>", 1)[0]
+    chapters_arm = normalized.split("(false, true) =>", 1)[1].split("_ =>", 1)[0]
+    assert "comicById" in details_arm
+    assert "chaptersByComicId" not in details_arm
+    assert "comicById" not in chapters_arm
+    assert "chaptersByComicId" in chapters_arm
     assert normalize_pinned_aidoku_rust(normalized) == normalized
 
 
@@ -2303,11 +2558,17 @@ def test_manifest_normalizer_repairs_cross_file_module_topology(tmp_path: Path) 
                 path="src/source.rs",
                 content=(
                     "#![allow(dead_code)]\n"
-                    "mod parser;\nmod paths;\nuse parser::*;\nuse paths::*;\n"
+                    "mod dto;\nmod parser;\nmod paths;\nmod query;\n"
+                    "use dto::*;\nuse parser::*;\nuse paths::*;\nuse query::*;\n"
                     "fn resolution() -> i32 { 1 }\nfn api_domain() -> i32 { 2 }\n"
-                    "fn endpoint() -> &'static str { API_URL }\n"
+                    "fn endpoint(data: Data) -> &'static str { "
+                    "data.value(); build_query(); API_URL }\n"
                     "register_source!(Simple);\n"
                 ),
+            ),
+            GeneratedFile(
+                path="src/dto.rs",
+                content="pub struct Data;\nimpl Data { fn value(&self) {} }\n",
             ),
             GeneratedFile(
                 path="src/parser.rs",
@@ -2319,7 +2580,7 @@ def test_manifest_normalizer_repairs_cross_file_module_topology(tmp_path: Path) 
             ),
             GeneratedFile(
                 path="src/query.rs",
-                content='const API_URL: &str = "https://example.com";\n',
+                content=('const API_URL: &str = "https://example.com";\nfn build_query() {}\n'),
             ),
         ],
     )
@@ -2327,10 +2588,14 @@ def test_manifest_normalizer_repairs_cross_file_module_topology(tmp_path: Path) 
     normalized = normalize_generation_manifest(ir, manifest)
     files = {item.path: item.content for item in normalized.files}
 
+    assert "mod dto;" not in files["src/source.rs"]
     assert "mod parser;" not in files["src/source.rs"]
     assert "mod paths;" not in files["src/source.rs"]
+    assert "mod query;" not in files["src/source.rs"]
+    assert "use crate::dto::*;" in files["src/source.rs"]
     assert "use crate::parser::*;" in files["src/source.rs"]
     assert "use crate::paths::*;" in files["src/source.rs"]
+    assert "use crate::query::*;" in files["src/source.rs"]
     assert "use crate::source::resolution;" in files["src/parser.rs"]
     assert "use crate::source::api_domain;" in files["src/paths.rs"]
     assert "pub(crate) fn resolution" in files["src/source.rs"]
@@ -2340,6 +2605,172 @@ def test_manifest_normalizer_repairs_cross_file_module_topology(tmp_path: Path) 
     assert "use crate::query::API_URL;" in files["src/source.rs"]
     assert files["src/source.rs"].startswith("#![allow(dead_code)]")
     assert "pub(crate) const API_URL" in files["src/query.rs"]
+    assert "pub(crate) fn build_query" in files["src/query.rs"]
+    assert "pub(crate) fn value" in files["src/dto.rs"]
+    assert normalize_generation_manifest(ir, normalized) == normalized
+
+
+def test_manifest_normalizer_borrows_vec_results_without_clone(tmp_path: Path) -> None:
+    _project, ir = scaffold_project(tmp_path)
+    manifest = GenerationManifest(
+        source_struct="Simple",
+        files=[
+            GeneratedFile(path="src/lib.rs", content="#![no_std]\n"),
+            GeneratedFile(
+                path="src/dto.rs",
+                content="""
+struct MangaDto;
+struct DataDto { mangas: Option<Vec<MangaDto>> }
+impl DataDto {
+    fn get_listing(&self) -> Option<&Vec<MangaDto>> { self.mangas.as_ref() }
+}
+struct ResponseDto { data: Option<DataDto>, errors: Option<Vec<String>> }
+impl ResponseDto {
+    fn into_data(self) -> Result<DataDto> {
+        self.data.ok_or_else(|| self.errors.unwrap_or_default().join("\n"))
+    }
+}
+""",
+            ),
+            GeneratedFile(
+                path="src/source.rs",
+                content="""
+use crate::dto::*;
+fn entries(data: DataDto) -> usize {
+    let mangas = data.get_listing().cloned().unwrap_or_default();
+    mangas.len()
+}
+fn parse(response: ResponseDto) -> Result<DataDto> {
+    response.into_data().map_err(|error| AidokuError::message(error))
+}
+""",
+            ),
+        ],
+    )
+
+    normalized = normalize_generation_manifest(ir, manifest)
+    source = next(item.content for item in normalized.files if item.path == "src/source.rs")
+
+    assert "get_listing().map(|values| values.as_slice()).unwrap_or_default()" in source
+    assert ".cloned()" not in source
+    assert ".map_err(" not in source
+    assert normalize_generation_manifest(ir, normalized) == normalized
+
+
+def test_manifest_projects_proven_standard_kotlin_chapters(tmp_path: Path) -> None:
+    _project, ir = scaffold_project(tmp_path)
+    ir = ir.model_copy(
+        update={
+            "source_format": "kotlin_module",
+            "capabilities": [Capability.CHAPTERS, Capability.DETAILS, Capability.SETTINGS],
+            "files": [
+                SourceFile(
+                    path="Entity.kt",
+                    sha256="0",
+                    content="""
+class ChapterDto {
+    fun toSChapter(mangaUrl: String, dateFormat: SimpleDateFormat) = SChapter.create().apply {
+        val (suffix, typeName) = when (type) {
+            "chapter" -> Pair("話", "連載")
+            "book" -> Pair("卷", "單行本")
+            else -> throw Exception()
+        }
+        url = "$mangaUrl/chapter/${this@ChapterDto.id}"
+        name = "${this@ChapterDto.serial}$suffix（${this@ChapterDto.size}P）"
+        scanlator = typeName
+        date_upload = dateFormat.parse(this@ChapterDto.dateCreated)!!.time
+        chapter_number = this@ChapterDto.serial.toFloatOrNull() ?: -1f
+    }
+}
+val dateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US)
+""",
+                )
+            ],
+        }
+    )
+    manifest = GenerationManifest(
+        source_struct="Simple",
+        files=[
+            GeneratedFile(path="src/lib.rs", content="#![no_std]\n"),
+            GeneratedFile(
+                path="src/dto.rs",
+                content="""
+struct DataDto {
+    #[serde(rename = "chaptersByComicId")]
+    chapters_by_comic_id: Option<Vec<ChapterDto>>,
+}
+struct ChapterDto {
+    id: String,
+    serial: String,
+    #[serde(rename = "type")]
+    chapter_type: String,
+    size: i32,
+    #[serde(rename = "dateCreated")]
+    date_created: String,
+}
+""",
+            ),
+            GeneratedFile(
+                path="src/queries.rs",
+                content="""
+fn manga_query(id: &str) -> String {
+    let query = build_query(r#"
+        query chapterByComicId($comicId: ID!) {
+          comicById(comicId: $comicId) #{body}
+          chaptersByComicId(comicId: $comicId) { id serial type size dateCreated }
+        }
+    "#);
+    build_request_body(&query, id)
+}
+""",
+            ),
+            GeneratedFile(
+                path="src/source.rs",
+                content="""
+use crate::dto::*;
+use crate::queries::*;
+fn get_manga_update(
+    manga: Manga,
+    needs_details: bool,
+    needs_chapters: bool,
+) -> Result<Manga> {
+    let body = manga_query(&manga.key);
+    let data: DataDto = fetch(body)?;
+    let mut updated = manga;
+    if needs_details { update_details(&mut updated); }
+    if needs_chapters {
+        if let Some(chapters) = data.chapters_by_comic_id {
+            // TODO: updated.chapters = Some(chapters);
+            let _ = chapters;
+        }
+    }
+    Ok(updated)
+}
+""",
+            ),
+            GeneratedFile(
+                path="res/settings.json",
+                content="""[
+                    {"type":"select","key":"CHAPTER_FILTER","title":"Chapters",
+                     "titles":["All","Chapter","Book"],
+                     "values":["all","chapter","book"],"default":"all"}
+                ]""",
+            ),
+        ],
+    )
+
+    normalized = normalize_generation_manifest(ir, manifest)
+    files = {item.path: item.content for item in normalized.files}
+
+    assert "manga_query(&manga.key, needs_details, needs_chapters)" in files["src/source.rs"]
+    assert 'defaults_get::<aidoku::alloc::String>("CHAPTER_FILTER")' in files["src/source.rs"]
+    assert "updated.chapters = Some(chapters)" in files["src/source.rs"]
+    assert "fn c2a_into_chapter" in files["src/dto.rs"]
+    assert '"chapter" => ("話", "連載")' in files["src/dto.rs"]
+    assert "date_uploaded: aidoku::imports::std::parse_date" in files["src/dto.rs"]
+    assert "scanlators: Some" in files["src/dto.rs"]
+    assert "url: Some(key)" in files["src/dto.rs"]
+    assert normalize_generation_manifest(ir, normalized) == normalized
 
 
 def test_manifest_projects_recovered_static_filters_into_dynamic_provider(tmp_path: Path) -> None:

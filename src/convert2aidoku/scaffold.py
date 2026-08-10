@@ -89,6 +89,7 @@ _AIDOKU_ROOT_NAMES = {
 MANIFEST_PROJECTION_RULE_IDS = frozenset(
     {
         "project_generated_module_topology",
+        "project_generated_return_ownership",
         "project_prune_redundant_dynamic_settings",
         "project_prune_public_only_dynamic_filters",
         "project_recovered_chapter_image_resolution",
@@ -97,6 +98,7 @@ MANIFEST_PROJECTION_RULE_IDS = frozenset(
         "project_recovered_detail_api_envelope",
         "project_recovered_dynamic_filter_queries",
         "project_recovered_dynamic_filters",
+        "project_recovered_kotlin_chapters",
         "project_recovered_nested_dto_aliases",
         "project_recovered_nullable_dto_defaults",
         "project_recovered_rank_item_wrapper",
@@ -302,6 +304,42 @@ def _normalize_idempotent_get_retry(content: str) -> str:
         replacements.append((text, replacement))
     for original, replacement in replacements:
         content = content.replace(original, replacement, 1)
+
+    graphql_helpers = {
+        function.name
+        for function in RustInspection.from_content(content).functions
+        if re.search(r"->\s*(?:aidoku::)?Result\s*<\s*Request\s*>", function.text)
+        and "Request::post" in function.text
+        and ".body(" in function.text
+    }
+    if graphql_helpers:
+        helper_pattern = "|".join(re.escape(name) for name in sorted(graphql_helpers))
+        request_pair = re.compile(
+            rf"(?m)^(?P<indent>[ \t]*)let\s+(?P<request>[A-Za-z_]\w*)\s*=\s*"
+            rf"(?P<call>(?:{helper_pattern})\([^;\n]+\)\?)\s*;\s*\n"
+            rf"(?P=indent)let\s+(?P<response>[A-Za-z_]\w*)\s*=\s*"
+            rf"(?P=request)\.send\(\)\?\s*;"
+        )
+        replacements = []
+        for function in RustInspection.from_content(content).functions:
+            if re.search(r"\b[A-Za-z_]\w*query\s*\(", function.text) is None:
+                continue
+
+            def retry(match: re.Match[str]) -> str:
+                indent = match.group("indent")
+                return (
+                    f"{indent}let {match.group('response')} = match "
+                    f"{match.group('call')}.send() {{\n"
+                    f"{indent}    Ok(response) => response,\n"
+                    f"{indent}    Err(_) => {match.group('call')}.send()?,\n"
+                    f"{indent}}};"
+                )
+
+            normalized = request_pair.sub(retry, function.text)
+            if normalized != function.text:
+                replacements.append((function.text, normalized))
+        for original, replacement in replacements:
+            content = content.replace(original, replacement, 1)
     return content
 
 
@@ -354,7 +392,8 @@ def _normalize_pinned_model_shapes(content: str) -> str:
                 ):
                     continue
                 normalized = re.sub(
-                    rf"\b(?:{field}|{field.removesuffix('s')}):\s*Some\({value}\),",
+                    rf"\b(?:{field}|{field.removesuffix('s')}):\s*"
+                    rf"(?:Some\()?{value}(?:\))?,",
                     f"{field}: Some(vec![{value}]),",
                     normalized,
                 )
@@ -388,6 +427,32 @@ def _normalize_pinned_model_shapes(content: str) -> str:
         r"\g<indent>\g<request> = \g<request>.header(\g<args>);",
         content,
     )
+    edits: list[tuple[int, int, bytes]] = []
+    for statement in RustInspection.from_content(content).nodes("expression_statement"):
+        if len(statement.named_children) != 1:
+            continue
+        expression = statement.named_children[0]
+        if expression.type != "call_expression":
+            continue
+        callee = expression.child_by_field_name("function")
+        if callee is None or callee.type != "field_expression":
+            continue
+        receiver = callee.child_by_field_name("value")
+        field = callee.child_by_field_name("field")
+        if (
+            receiver is None
+            or receiver.type != "identifier"
+            or field is None
+            or field.text != b"header"
+        ):
+            continue
+        request = receiver.text.decode("utf-8", errors="replace")
+        replacement = f"{request} = {expression.text.decode('utf-8', errors='replace')};"
+        edits.append((statement.start_byte, statement.end_byte, replacement.encode()))
+    encoded = content.encode("utf-8")
+    for begin, end, replacement in sorted(edits, reverse=True):
+        encoded = encoded[:begin] + replacement + encoded[end:]
+    content = encoded.decode("utf-8")
     content = re.sub(
         r"(?P<request>[A-Za-z_]\w*)\s*=\s*(?P=request)\.header\("
         r"(?P<args>[^;\r\n]+)\)(?=\s*\})",
@@ -503,7 +568,8 @@ def _normalize_optional_model_shorthand(content: str) -> str:
 
 def _normalize_pinned_model_fields(content: str) -> str:
     content = re.sub(
-        r"\b(?P<field>author|artist)\s*:\s*Some\((?P<value>[^,\n]{1,800}\.collect\(\))\),",
+        r"\b(?P<field>author|artist)\s*:\s*"
+        r"(?:Some\()?(?P<value>[^,\n]{1,800}\.collect\(\))(?:\))?,",
         lambda match: f"{match.group('field')}s: Some({match.group('value')}),",
         content,
     )
@@ -670,6 +736,122 @@ def _normalize_pinned_model_fields(content: str) -> str:
                 replacements.append((original, f"{field_name}: {replacement_value}"))
     for original, replacement in replacements:
         content = content.replace(original, replacement, 1)
+
+    inspection = RustInspection.from_content(content)
+    numeric_status_bindings: dict[int, set[str]] = {}
+    for function in inspection.functions:
+        numeric_status_bindings[function.node.start_byte] = set()
+        for match in re.finditer(
+            r"\blet\s+(?P<name>[A-Za-z_]\w*)\s*=\s*match\s+[^\{;]+\{"
+            r"(?P<body>[\s\S]{1,2000}?)\}\s*;",
+            function.text,
+        ):
+            arm_values = re.findall(r"=>\s*([^,\s]+)", match.group("body"))
+            if len(arm_values) >= 2 and all(re.fullmatch(r"[0-4]", value) for value in arm_values):
+                numeric_status_bindings[function.node.start_byte].add(match.group("name"))
+
+    enum_edits: list[tuple[int, int, bytes]] = []
+    encoded = content.encode("utf-8")
+    for node in inspection.nodes("struct_expression"):
+        name = node.child_by_field_name("name")
+        body = node.child_by_field_name("body")
+        if name is None or name.text != b"Manga" or body is None:
+            continue
+        owner = node
+        while owner.parent is not None and owner.type != "function_item":
+            owner = owner.parent
+        integer_status = numeric_status_bindings.get(owner.start_byte, set())
+        for field in body.named_children:
+            if (
+                field.type == "shorthand_field_initializer"
+                and field.text == b"status"
+                and "status" in integer_status
+            ):
+                replacement = (
+                    "status: match status { "
+                    "1 => aidoku::MangaStatus::Ongoing, "
+                    "2 => aidoku::MangaStatus::Completed, "
+                    "3 => aidoku::MangaStatus::Cancelled, "
+                    "4 => aidoku::MangaStatus::Hiatus, "
+                    "_ => aidoku::MangaStatus::Unknown }"
+                )
+                enum_edits.append((field.start_byte, field.end_byte, replacement.encode()))
+                continue
+            field_node = field.child_by_field_name("field")
+            value_node = field.child_by_field_name("value")
+            if field_node is None or value_node is None:
+                continue
+            field_name = field_node.text.decode("utf-8", errors="replace")
+            value = value_node.text.decode("utf-8", errors="replace")
+            if field_name == "id":
+                begin = field.start_byte
+                line_start = encoded.rfind(b"\n", 0, begin) + 1
+                if not encoded[line_start:begin].strip():
+                    begin = line_start
+                end = field.end_byte
+                while end < len(encoded) and encoded[end : end + 1] in {b" ", b"\t"}:
+                    end += 1
+                if encoded[end : end + 1] == b",":
+                    end += 1
+                if begin == line_start:
+                    while end < len(encoded) and encoded[end : end + 1] in {b" ", b"\t"}:
+                        end += 1
+                    if encoded[end : end + 1] == b"\n":
+                        end += 1
+                enum_edits.append((begin, end, b""))
+            elif field_name == "status" and (
+                re.fullmatch(r"[0-4]", value) or value in integer_status
+            ):
+                replacement = (
+                    f"status: match {value} {{ "
+                    "1 => aidoku::MangaStatus::Ongoing, "
+                    "2 => aidoku::MangaStatus::Completed, "
+                    "3 => aidoku::MangaStatus::Cancelled, "
+                    "4 => aidoku::MangaStatus::Hiatus, "
+                    "_ => aidoku::MangaStatus::Unknown }"
+                )
+                enum_edits.append((field.start_byte, field.end_byte, replacement.encode()))
+            elif field_name == "viewer" and re.fullmatch(r"[0-4]", value):
+                variants = {
+                    "0": "Unknown",
+                    "1": "LeftToRight",
+                    "2": "RightToLeft",
+                    "3": "Vertical",
+                    "4": "Webtoon",
+                }
+                replacement = f"viewer: aidoku::Viewer::{variants[value]}"
+                enum_edits.append((field.start_byte, field.end_byte, replacement.encode()))
+            elif field_name == "nsfw" and re.fullmatch(r"[01]", value):
+                variant = "Unknown" if value == "0" else "NSFW"
+                replacement = f"content_rating: aidoku::ContentRating::{variant}"
+                enum_edits.append((field.start_byte, field.end_byte, replacement.encode()))
+    for begin, end, replacement in sorted(enum_edits, reverse=True):
+        encoded = encoded[:begin] + replacement + encoded[end:]
+    content = encoded.decode("utf-8")
+
+    string_helpers: set[str] = set()
+    for function in RustInspection.from_content(content).functions:
+        parameters = function.node.child_by_field_name("parameters")
+        first = next(
+            (
+                parameter
+                for parameter in (parameters.named_children if parameters is not None else ())
+                if parameter.type == "parameter"
+            ),
+            None,
+        )
+        type_node = first.child_by_field_name("type") if first is not None else None
+        if type_node is not None and re.fullmatch(rb"&\s*str", type_node.text):
+            string_helpers.add(function.name)
+    for helper in string_helpers:
+        content = re.sub(
+            rf"\b{re.escape(helper)}\(\s*&(?P<owner>manga|chapter)\.url\s*\)",
+            lambda match, helper=helper: (
+                f"{helper}({match.group('owner')}.url.as_deref()"
+                f".unwrap_or(&{match.group('owner')}.key))"
+            ),
+            content,
+        )
     return content
 
 
@@ -881,6 +1063,14 @@ def _remove_grouped_use_item(content: str, item: str) -> str:
 
 def _normalize_aidoku_api_paths(content: str) -> str:
     content = content.replace("aidoku::net::", "aidoku::imports::net::")
+    content = content.replace("aidoku::imports::serde_json", "serde_json")
+    content = content.replace("aidoku::serde_json", "serde_json")
+    content = content.replace("aidoku::alloc::Cow", "aidoku::alloc::borrow::Cow")
+    content = re.sub(
+        r"(?m)^\s*use\s+aidoku::imports::net::request\s*;\s*\n?",
+        "",
+        content,
+    )
     replacements: list[tuple[str, str]] = []
     for node in RustInspection.from_content(content).nodes("use_declaration"):
         original = node.text.decode("utf-8", errors="replace")
@@ -987,6 +1177,13 @@ def _aidoku_root_imported(content: str, name: str) -> bool:
 
 def _aidoku_to_string_imported(content: str) -> bool:
     for use in RustInspection.from_content(content).nodes("use_declaration"):
+        compact_use = RustInspection.compact_node(use)
+        if (
+            compact_use.startswith("useaidoku::")
+            and "alloc::" in compact_use
+            and "string::ToString" in compact_use
+        ):
+            return True
         stack = [use]
         while stack:
             node = stack.pop()
@@ -1412,6 +1609,53 @@ def _normalize_aidoku_result_errors(content: str) -> str:
     encoded = content.encode("utf-8")
     for begin, end, replacement in sorted(replacements, reverse=True):
         encoded = encoded[:begin] + replacement.encode("utf-8") + encoded[end:]
+    content = encoded.decode("utf-8")
+
+    closure_edits: list[tuple[int, int, bytes]] = []
+    for function in RustInspection.from_content(content).functions:
+        return_type = function.node.child_by_field_name("return_type")
+        if (
+            return_type is None
+            or re.fullmatch(rb"(?:aidoku::)?Result\s*<[^>]+>", return_type.text) is None
+        ):
+            continue
+        for call in RustInspection.from_content(function.text).nodes("call_expression"):
+            callee = call.child_by_field_name("function")
+            arguments = call.child_by_field_name("arguments")
+            if (
+                callee is None
+                or callee.type != "field_expression"
+                or arguments is None
+                or len(arguments.named_children) != 1
+            ):
+                continue
+            field = callee.child_by_field_name("field")
+            closure = arguments.named_children[0]
+            body = closure.child_by_field_name("body")
+            if (
+                field is None
+                or field.text != b"ok_or_else"
+                or closure.type != "closure_expression"
+                or body is None
+            ):
+                continue
+            body_text = body.text.decode("utf-8", errors="replace")
+            if "AidokuError::message" in body_text or not any(
+                marker in body_text
+                for marker in ('"', "format!", ".join(", ".to_string()", "String::")
+            ):
+                continue
+            replacement = f"aidoku::AidokuError::message({body_text})".encode()
+            closure_edits.append(
+                (
+                    function.node.start_byte + body.start_byte,
+                    function.node.start_byte + body.end_byte,
+                    replacement,
+                )
+            )
+    encoded = content.encode("utf-8")
+    for begin, end, replacement in sorted(closure_edits, reverse=True):
+        encoded = encoded[:begin] + replacement + encoded[end:]
     return encoded.decode("utf-8")
 
 
@@ -1869,6 +2113,246 @@ def _normalize_legacy_filter_fields(content: str) -> str:
             replacements.append((original, normalized))
     for original, normalized in replacements:
         content = content.replace(original, normalized, 1)
+    return content
+
+
+def _normalize_legacy_group_filters(content: str) -> str:
+    replacements: list[tuple[str, str]] = []
+    item_builders: set[str] = set()
+    for node in RustInspection.from_content(content).nodes("call_expression"):
+        function = node.child_by_field_name("function")
+        arguments = node.child_by_field_name("arguments")
+        if (
+            function is None
+            or arguments is None
+            or function.text.decode("utf-8", errors="replace")
+            not in {"Filter::Group", "aidoku::Filter::Group"}
+            or len(arguments.named_children) != 1
+        ):
+            continue
+        group = arguments.named_children[0]
+        group_name = group.child_by_field_name("name")
+        body = group.child_by_field_name("body")
+        if (
+            group.type != "struct_expression"
+            or group_name is None
+            or body is None
+            or group_name.text.decode("utf-8", errors="replace").rsplit("::", 1)[-1]
+            != "FilterGroup"
+        ):
+            continue
+        owner = node
+        while owner.parent is not None and owner.type != "function_item":
+            owner = owner.parent
+        if owner.type != "function_item":
+            continue
+        owner_text = owner.text.decode("utf-8", errors="replace")
+        if not all(
+            re.search(rf"\blet\s+(?:mut\s+)?{name}\b", owner_text) for name in ("options", "ids")
+        ):
+            continue
+        fields: dict[str, str] = {}
+        for child in body.named_children:
+            field = child.child_by_field_name("field")
+            value = child.child_by_field_name("value")
+            if field is not None and value is not None:
+                fields[field.text.decode("utf-8", errors="replace")] = value.text.decode(
+                    "utf-8", errors="replace"
+                )
+            elif child.type == "shorthand_field_initializer":
+                name = child.text.decode("utf-8", errors="replace")
+                fields[name] = name
+        if not {"id", "title", "items"} <= fields.keys():
+            continue
+        replacement = (
+            "aidoku::MultiSelectFilter { "
+            f"id: {fields['id']}, title: {fields['title']}, "
+            "options, ids: Some(ids), ..Default::default() }.into()"
+        )
+        replacements.append((node.text.decode("utf-8", errors="replace"), replacement))
+        if re.fullmatch(r"[A-Za-z_]\w*", fields["items"]):
+            item_builders.add(fields["items"])
+    for original, replacement in replacements:
+        content = content.replace(original, replacement, 1)
+
+    builder_edits: list[tuple[int, int, bytes]] = []
+    for function in RustInspection.from_content(content).functions:
+        local = RustInspection.from_content(function.text)
+        for builder in item_builders:
+            declarations = [
+                node
+                for node in local.nodes("let_declaration")
+                if re.match(
+                    rf"let(?:mut)?{re.escape(builder)}=",
+                    RustInspection.compact_node(node),
+                )
+            ]
+            loops = [
+                node
+                for node in local.nodes("for_expression")
+                if re.search(
+                    rf"\b{re.escape(builder)}\s*\.\s*push\s*\(",
+                    node.text.decode("utf-8", errors="replace"),
+                )
+            ]
+            if len(declarations) != 1 or len(loops) != 1:
+                continue
+            masked = bytearray(function.text.encode("utf-8"))
+            for node in (declarations[0], loops[0]):
+                masked[node.start_byte : node.end_byte] = b" " * (node.end_byte - node.start_byte)
+            if re.search(rf"\b{re.escape(builder)}\b", masked.decode("utf-8")):
+                continue
+            builder_edits.extend(
+                (
+                    function.node.start_byte + node.start_byte,
+                    function.node.start_byte + node.end_byte,
+                    b"",
+                )
+                for node in (declarations[0], loops[0])
+            )
+    encoded = content.encode("utf-8")
+    for begin, end, replacement in sorted(builder_edits, reverse=True):
+        encoded = encoded[:begin] + replacement + encoded[end:]
+    content = encoded.decode("utf-8")
+
+    value_edits: list[tuple[int, int, bytes]] = []
+    for arm in RustInspection.from_content(content).nodes("match_arm"):
+        pattern = arm.child_by_field_name("pattern")
+        value = arm.child_by_field_name("value")
+        if pattern is None or value is None:
+            continue
+        pattern_text = pattern.text.decode("utf-8", errors="replace")
+        if (
+            re.search(
+                r"(?:aidoku::)?FilterValue::Group\s*\{\s*id\s*,\s*items\s*\}",
+                pattern_text,
+            )
+            is None
+        ):
+            continue
+        targets = set(
+            re.findall(
+                r"\b([A-Za-z_]\w*)\s*\.\s*push\s*\(",
+                value.text.decode("utf-8", errors="replace"),
+            )
+        )
+        if len(targets) != 1:
+            continue
+        projected_pattern = re.sub(
+            r"(?P<prefix>(?:aidoku::)?FilterValue::)Group\s*\{\s*id\s*,\s*items\s*\}",
+            r"\g<prefix>MultiSelect { id, included, .. }",
+            pattern_text,
+            count=1,
+        )
+        target = next(iter(targets))
+        replacement = f"{projected_pattern} => {{ {target}.extend(included.iter().cloned()); }}"
+        value_edits.append((arm.start_byte, arm.end_byte, replacement.encode()))
+    encoded = content.encode("utf-8")
+    for begin, end, replacement in sorted(value_edits, reverse=True):
+        encoded = encoded[:begin] + replacement + encoded[end:]
+    content = encoded.decode("utf-8")
+
+    import_replacements: list[tuple[str, str]] = []
+    for node in RustInspection.from_content(content).nodes("use_declaration"):
+        original = node.text.decode("utf-8", errors="replace")
+        normalized = original
+        for name in ("FilterGroup", "GroupFilter"):
+            normalized = _remove_grouped_use_item(normalized, re.escape(name))
+        normalized = re.sub(r"\{\s*,", "{", normalized)
+        normalized = re.sub(r",\s*}", "}", normalized)
+        normalized = re.sub(
+            r"use\s+aidoku::\{\s*(?P<item>[A-Za-z_]\w*)\s*};",
+            r"use aidoku::\g<item>;",
+            normalized,
+        )
+        if re.fullmatch(r"use\s+aidoku::\{\s*\}\s*;", normalized.strip()):
+            normalized = ""
+        if normalized != original:
+            import_replacements.append((original, normalized))
+    for original, normalized in import_replacements:
+        content = content.replace(original, normalized, 1)
+    return content
+
+
+def _normalize_custom_page_context_types(content: str) -> str:
+    inspection = RustInspection.from_content(content)
+    custom_types: dict[str, tuple[Any, Any, tuple[str, ...]]] = {}
+    for implementation in inspection.nodes("impl_item"):
+        match = re.match(
+            r"impl(?:aidoku::)?PageContextfor(?P<name>[A-Za-z_]\w*)\{",
+            RustInspection.compact_node(implementation),
+        )
+        if match is None:
+            continue
+        struct = inspection.struct_named(match.group("name"))
+        if (
+            struct is None
+            or len(struct.fields) != 1
+            or struct.fields[0].name != "referer"
+            or struct.fields[0].type_text.rsplit("::", 1)[-1] != "String"
+        ):
+            continue
+        attributes: list[str] = []
+        sibling = struct.node.prev_named_sibling
+        while sibling is not None and sibling.type == "attribute_item":
+            attributes.append(sibling.text.decode("utf-8", errors="replace"))
+            sibling = sibling.prev_named_sibling
+        custom_types[struct.name] = (struct.node, implementation, tuple(attributes))
+
+    for name, (struct_node, implementation, attributes) in custom_types.items():
+        replacements: list[tuple[str, str]] = []
+        for expression in RustInspection.from_content(content).nodes("struct_expression"):
+            type_node = expression.child_by_field_name("name")
+            body = expression.child_by_field_name("body")
+            if (
+                type_node is None
+                or body is None
+                or type_node.text.decode("utf-8", errors="replace").rsplit("::", 1)[-1] != name
+            ):
+                continue
+            referer = next(
+                (
+                    value.text.decode("utf-8", errors="replace")
+                    for field in body.named_children
+                    if (field_name := field.child_by_field_name("field")) is not None
+                    and field_name.text == b"referer"
+                    and (value := field.child_by_field_name("value")) is not None
+                ),
+                None,
+            )
+            if referer is not None:
+                replacements.append(
+                    (
+                        expression.text.decode("utf-8", errors="replace"),
+                        f'PageContext::from([("referer".into(), {referer})])',
+                    )
+                )
+        for original, replacement in replacements:
+            content = content.replace(original, replacement, 1)
+
+        downcast = re.compile(
+            rf"if\s+let\s+Ok\((?P<binding>[A-Za-z_]\w*)\)\s*=\s*"
+            rf"(?P<context>[A-Za-z_]\w*)\.downcast_ref::<{re.escape(name)}>\(\)\s*"
+            r"\{(?P<body>[^{}]*)\}"
+        )
+
+        def replace_downcast(match: re.Match[str]) -> str:
+            binding = match.group("binding")
+            body = match.group("body").replace(
+                f"&{binding}.referer",
+                f"{binding}.as_str()",
+            )
+            return f'if let Some({binding}) = {match.group("context")}.get("referer") {{{body}}}'
+
+        content = downcast.sub(replace_downcast, content)
+        for attribute in attributes:
+            content = content.replace(attribute, "", 1)
+        content = content.replace(struct_node.text.decode("utf-8", errors="replace"), "", 1)
+        content = content.replace(
+            implementation.text.decode("utf-8", errors="replace"),
+            "",
+            1,
+        )
     return content
 
 
@@ -2335,13 +2819,46 @@ def _normalize_deep_link_defaults(content: str) -> str:
 def _normalize_absolute_deep_link_paths(content: str) -> str:
     replacements: list[tuple[str, str]] = []
     for function in RustInspection.from_content(content).named("handle_deep_link"):
-        if '.strip_prefix("/comic/")' not in function.text:
+        if '"/comic/"' not in function.text:
             continue
+        normalized = function.text
+        if "then_some(url.as_str())" not in normalized:
+            normalized = re.sub(
+                r"(?P<url>[A-Za-z_]\w*)\.strip_prefix\("
+                r'(?P<base>"https?://(?:\\.|[^"\\])*")\)',
+                r"\g<url>.strip_prefix(\g<base>).or_else(|| "
+                r"\g<url>.starts_with('/').then_some(\g<url>.as_str()))",
+                normalized,
+                count=1,
+            )
         normalized = re.sub(
             r"(?P<value>[A-Za-z_]\w*)\.strip_prefix\(\"/comic/\"\)",
             r'\g<value>.split_once("/comic/").map(|(_, rest)| rest)',
-            function.text,
+            normalized,
         )
+        if "DeepLinkResult::Chapter" not in normalized:
+            normalized = re.sub(
+                r"(?m)^(?P<indent>[ \t]*)if\s+(?P<path>[A-Za-z_]\w*)"
+                r'\.starts_with\("/comic/"\)\s*\{',
+                lambda match: (
+                    f"{match.group('indent')}if let Some((manga_id, chapter_id)) = "
+                    f'{match.group("path")}.split_once("/comic/")\n'
+                    f"{match.group('indent')}    .map(|(_, rest)| rest)\n"
+                    f"{match.group('indent')}    .and_then(|rest| "
+                    'rest.split_once("/chapter/"))\n'
+                    f"{match.group('indent')}{{\n"
+                    f"{match.group('indent')}    let manga_key = "
+                    'format!("/comic/{}", manga_id);\n'
+                    f"{match.group('indent')}    let key = "
+                    'format!("{}/chapter/{}", manga_key, chapter_id);\n'
+                    f"{match.group('indent')}    return Ok(Some(DeepLinkResult::Chapter "
+                    "{ manga_key, key }));\n"
+                    f"{match.group('indent')}}}\n"
+                    f'{match.group("indent")}if {match.group("path")}.starts_with("/comic/") {{'
+                ),
+                normalized,
+                count=1,
+            )
         normalized = re.sub(
             r'\bparts\.len\(\)\s*>=\s*2\s*&&\s*parts\[1\]\s*==\s*"chapter"',
             'parts.len() >= 3 && parts[1] == "chapter"',
@@ -3036,6 +3553,32 @@ def _split_graphql_manga_query(query: str) -> tuple[str, str] | None:
     return detail, chapters
 
 
+def _split_raw_graphql_manga_query(query: str) -> tuple[str, str] | None:
+    """Split line-oriented raw GraphQL detail/chapter fields at operation depth one."""
+    lines = query.splitlines(keepends=True)
+    detail_lines = [index for index, line in enumerate(lines) if "comicById(" in line]
+    chapter_lines = [index for index, line in enumerate(lines) if "chaptersByComicId(" in line]
+    if len(detail_lines) != 1 or len(chapter_lines) != 1:
+        return None
+    detail_index = detail_lines[0]
+    chapter_start = chapter_lines[0]
+    depth = 0
+    chapter_end = None
+    for index in range(chapter_start, len(lines)):
+        line = lines[index].replace("#{body}", "")
+        if index == chapter_start and "{" not in line:
+            return None
+        depth += line.count("{") - line.count("}")
+        if depth == 0:
+            chapter_end = index + 1
+            break
+    if chapter_end is None:
+        return None
+    details = "".join(lines[:chapter_start] + lines[chapter_end:])
+    chapters = "".join(lines[:detail_index] + lines[detail_index + 1 :])
+    return details, chapters
+
+
 def _normalize_graphql_manga_update_projection(content: str) -> str:
     replacements: list[tuple[str, str]] = []
     for function in RustInspection.from_content(content).functions:
@@ -3045,16 +3588,43 @@ def _normalize_graphql_manga_update_projection(content: str) -> str:
             r'format!\(\s*(?P<literal>"(?:\\.|[^"\\])*")\s*\)',
             function.text,
         )
-        if query_match is None:
+        raw_match = re.search(
+            r'build_query\(\s*(?P<literal>r(?P<hashes>#+)"(?P<query>[\s\S]*?)"(?P=hashes))'
+            r"\s*,?\s*\)",
+            function.text,
+        )
+        if query_match is not None:
+            try:
+                query = json.loads(query_match.group("literal"))
+            except json.JSONDecodeError:
+                continue
+            projections = _split_graphql_manga_query(query)
+            if projections is None:
+                continue
+            details_query, chapters_query = projections
+            combined_expression = query_match.group(0)
+            details_expression = f"format!({json.dumps(details_query, ensure_ascii=False)})"
+            chapters_expression = f"format!({json.dumps(chapters_query, ensure_ascii=False)})"
+            default_expression = "String::new()"
+            expression = query_match.group(0)
+        elif raw_match is not None:
+            query = raw_match.group("query")
+            projections = _split_raw_graphql_manga_query(query)
+            if projections is None:
+                continue
+            details_query, chapters_query = projections
+            hashes = raw_match.group("hashes")
+
+            def raw_literal(value: str, hashes: str = hashes) -> str:
+                return f'r{hashes}"{value}"{hashes}'
+
+            combined_expression = raw_match.group("literal")
+            details_expression = raw_literal(details_query)
+            chapters_expression = raw_literal(chapters_query)
+            default_expression = '""'
+            expression = raw_match.group("literal")
+        else:
             continue
-        try:
-            query = json.loads(query_match.group("literal"))
-        except json.JSONDecodeError:
-            continue
-        projections = _split_graphql_manga_query(query)
-        if projections is None:
-            continue
-        details_query, chapters_query = projections
         signature = re.search(
             r"(?P<head>fn\s+manga_query\s*\((?P<params>[\s\S]*?)\))"
             r"(?P<return>\s*->\s*String)",
@@ -3068,19 +3638,16 @@ def _normalize_graphql_manga_update_projection(content: str) -> str:
             f"fn manga_query({params}{separator}"
             f"needs_details: bool, needs_chapters: bool){signature.group('return')}"
         )
-        combined_literal = json.dumps(query, ensure_ascii=False)
-        details_literal = json.dumps(details_query, ensure_ascii=False)
-        chapters_literal = json.dumps(chapters_query, ensure_ascii=False)
         projection = (
             "match (needs_details, needs_chapters) {\n"
-            f"            (true, true) => format!({combined_literal}),\n"
-            f"            (true, false) => format!({details_literal}),\n"
-            f"            (false, true) => format!({chapters_literal}),\n"
-            "            _ => String::new(),\n"
+            f"            (true, true) => {combined_expression},\n"
+            f"            (true, false) => {details_expression},\n"
+            f"            (false, true) => {chapters_expression},\n"
+            f"            _ => {default_expression},\n"
             "        }"
         )
         normalized = function.text.replace(signature.group(0), new_signature, 1)
-        normalized = normalized.replace(query_match.group(0), projection, 1)
+        normalized = normalized.replace(expression, projection, 1)
         replacements.append((function.text, normalized))
     for original, replacement in replacements:
         content = content.replace(original, replacement, 1)
@@ -3090,9 +3657,10 @@ def _normalize_graphql_manga_update_projection(content: str) -> str:
         if "needs_details" not in function.text or "needs_chapters" not in function.text:
             continue
         normalized = re.sub(
-            r"self\.manga_query\((?P<args>[^(),\n]+)\)",
+            r"(?P<prefix>self\.)?manga_query\((?P<args>[^(),\n]+)\)",
             lambda match: (
-                f"self.manga_query({match.group('args').strip()}, needs_details, needs_chapters)"
+                f"{match.group('prefix') or ''}manga_query("
+                f"{match.group('args').strip()}, needs_details, needs_chapters)"
             ),
             function.text,
         )
@@ -3121,7 +3689,7 @@ def _normalize_graphql_request_body(content: str) -> str:
     )
     return re.sub(
         r"Request::(?P<method>post|put|patch)\(\s*(?P<url>[^,\n()]+)\s*,\s*"
-        r"(?P<body>body|payload)\s*\)\?",
+        r"(?P<body>body|payload)\s*\)\??",
         lambda match: (
             f"Request::{match.group('method')}({match.group('url').strip()})?"
             f".body({match.group('body')}.to_string().as_bytes())"
@@ -3983,7 +4551,11 @@ def _remove_unused_known_imports(content: str) -> str:
             replacements.append((declaration, normalized))
     for original, normalized in replacements:
         content = content.replace(original, normalized, 1)
-    return content
+    return re.sub(
+        r"use\s+(?P<prefix>[A-Za-z_][\w:]*)::\{\s*(?P<name>[A-Za-z_]\w*)\s*};",
+        r"use \g<prefix>::\g<name>;",
+        content,
+    )
 
 
 def _remove_duplicate_imports(content: str) -> str:
@@ -4775,7 +5347,9 @@ def normalize_pinned_aidoku_rust(
     apply(_normalize_default_model_assignments)
     apply(_normalize_page_index_fields)
     apply(_normalize_legacy_filter_fields)
+    apply(_normalize_legacy_group_filters)
     apply(_normalize_select_filter_constructors)
+    apply(_normalize_custom_page_context_types)
     apply(_normalize_legacy_page_context)
     apply(_normalize_page_url_context)
     apply(_normalize_page_context_maps)
@@ -5250,6 +5824,324 @@ def _project_recovered_nullable_dto_defaults(
     return updated
 
 
+def _project_generated_return_ownership(files: list[GeneratedFile]) -> list[GeneratedFile]:
+    """Project call sites from unambiguous generated helper return types."""
+    inspection = RustInspection(
+        generated.content for generated in files if generated.path.endswith(".rs")
+    )
+    return_kinds: dict[str, set[str]] = {}
+    for function in inspection.functions:
+        return_type = function.node.child_by_field_name("return_type")
+        compact = RustInspection.compact_node(return_type) if return_type is not None else ""
+        if re.fullmatch(r"(?:aidoku::)?Result<.+>", compact):
+            kind = "aidoku_result"
+        elif re.fullmatch(r"Option<&Vec<.+>>", compact):
+            kind = "borrowed_vec"
+        else:
+            kind = "other"
+        return_kinds.setdefault(function.name, set()).add(kind)
+    aidoku_results = {name for name, kinds in return_kinds.items() if kinds == {"aidoku_result"}}
+    borrowed_vecs = {name for name, kinds in return_kinds.items() if kinds == {"borrowed_vec"}}
+    if not aidoku_results and not borrowed_vecs:
+        return files
+
+    updated: list[GeneratedFile] = []
+    for generated in files:
+        if not generated.path.endswith(".rs"):
+            updated.append(generated)
+            continue
+        edits: list[tuple[int, int, bytes]] = []
+        for call in RustInspection.from_content(generated.content).nodes("call_expression"):
+            callee = call.child_by_field_name("function")
+            arguments = call.child_by_field_name("arguments")
+            if callee is None or callee.type != "field_expression" or arguments is None:
+                continue
+            field = callee.child_by_field_name("field")
+            receiver = callee.child_by_field_name("value")
+            if field is None or receiver is None or receiver.type != "call_expression":
+                continue
+            receiver_callee = receiver.child_by_field_name("function")
+            helper_node = (
+                receiver_callee.child_by_field_name("field")
+                if receiver_callee is not None and receiver_callee.type == "field_expression"
+                else receiver_callee
+            )
+            helper = (
+                helper_node.text.decode("utf-8", errors="replace").rsplit("::", 1)[-1]
+                if helper_node is not None
+                else None
+            )
+            if field.text == b"cloned" and not arguments.named_children:
+                if helper not in borrowed_vecs:
+                    continue
+                receiver_text = receiver.text.decode("utf-8", errors="replace")
+                replacement = f"{receiver_text}.map(|values| values.as_slice())"
+                edits.append((call.start_byte, call.end_byte, replacement.encode()))
+                continue
+            if (
+                field.text != b"map_err"
+                or helper not in aidoku_results
+                or len(arguments.named_children) != 1
+            ):
+                continue
+            mapper = RustInspection.compact_node(arguments.named_children[0])
+            if (
+                re.fullmatch(
+                    r"\|(?P<error>[A-Za-z_]\w*)\|(?:aidoku::)?AidokuError::message\("
+                    r"(?P=error)\)",
+                    mapper,
+                )
+                is not None
+            ):
+                edits.append((call.start_byte, call.end_byte, receiver.text))
+        encoded = generated.content.encode("utf-8")
+        for begin, end, replacement in sorted(edits, reverse=True):
+            encoded = encoded[:begin] + replacement + encoded[end:]
+        content = encoded.decode("utf-8")
+        updated.append(
+            generated.model_copy(update={"content": content})
+            if content != generated.content
+            else generated
+        )
+    return updated
+
+
+def _project_recovered_kotlin_chapters(
+    ir: SourceIR,
+    files: list[GeneratedFile],
+    *,
+    setting_defaults: Mapping[str, str],
+    setting_values: Mapping[str, tuple[str, ...]],
+) -> list[GeneratedFile]:
+    """Materialize a standard Kotlin ChapterDto mapping when every behavior fact is proven."""
+    if ir.source_format != "kotlin_module" or Capability.CHAPTERS not in ir.capabilities:
+        return files
+    input_content = "\n".join(source.content for source in ir.files)
+    if not all(
+        marker in input_content
+        for marker in (
+            "fun toSChapter(",
+            "date_upload",
+            "scanlator = typeName",
+            "chapter_number",
+            ".toFloatOrNull()",
+        )
+    ):
+        return files
+    type_pairs = re.findall(
+        r'"(?P<kind>[^"\\]+)"\s*->\s*Pair\('
+        r'"(?P<suffix>[^"\\]*)"\s*,\s*"(?P<scanlator>[^"\\]*)"\)',
+        input_content,
+    )
+    route_match = re.search(
+        r'\burl\s*=\s*"\$[A-Za-z_]\w*(?P<route>/[^"$]*?)'
+        r'\$\{[^}\n]*\.id\}"',
+        input_content,
+    )
+    date_formats = set(re.findall(r'SimpleDateFormat\("([^"\\]+)"', input_content))
+    if not type_pairs or route_match is None or len(date_formats) != 1:
+        return files
+    if "${this@ChapterDto.serial}$suffix" not in input_content or "size}P）" not in input_content:
+        return files
+
+    inspection = RustInspection(
+        generated.content for generated in files if generated.path.endswith(".rs")
+    )
+    required = {"id", "serial", "type", "size", "dateCreated"}
+    chapter_candidates = [
+        struct
+        for struct in inspection.structs
+        if required <= {field.serialized_name for field in struct.fields}
+    ]
+    if len(chapter_candidates) != 1:
+        return files
+    chapter_dto = chapter_candidates[0]
+    chapter_fields = {field.serialized_name: field.name for field in chapter_dto.fields}
+    container_candidates = [
+        (struct, field)
+        for struct in inspection.structs
+        for field in struct.fields
+        if field.serialized_name == "chaptersByComicId" and chapter_dto.name in field.type_text
+    ]
+    if len(container_candidates) != 1:
+        return files
+    chapter_collection = container_candidates[0][1].name
+    setting_candidates = [
+        key
+        for key, values in setting_values.items()
+        if "all" in values and {kind for kind, _suffix, _scanlator in type_pairs} <= set(values)
+    ]
+    if len(setting_candidates) != 1:
+        return files
+    setting_key = setting_candidates[0]
+    setting_default = setting_defaults.get(setting_key, "all")
+
+    source_file = next(
+        (
+            generated
+            for generated in files
+            if generated.path.endswith(".rs")
+            and "fn get_manga_update" in generated.content
+            and f".{chapter_collection}" in generated.content
+        ),
+        None,
+    )
+    dto_file = next(
+        (
+            generated
+            for generated in files
+            if generated.path.endswith(".rs") and f"struct {chapter_dto.name}" in generated.content
+        ),
+        None,
+    )
+    if source_file is None or dto_file is None or "c2a_into_chapter" in source_file.content:
+        return files
+
+    source_content = source_file.content
+    replacement = None
+    for function in RustInspection.from_content(source_content).named("get_manga_update"):
+        compact_function = RustInspection.compact_node(function.node)
+        if "needs_chapters" not in function.text or ".chapters=" in compact_function:
+            continue
+        access = re.search(
+            rf"\b(?P<data>[A-Za-z_]\w*)\.{re.escape(chapter_collection)}\b",
+            function.text,
+        )
+        updated = re.search(
+            r"\blet\s+mut\s+(?P<updated>[A-Za-z_]\w*)\s*=\s*[A-Za-z_]\w*\s*;",
+            function.text,
+        )
+        if access is None or updated is None:
+            continue
+        for branch in RustInspection.from_content(function.text).nodes("if_expression"):
+            condition = branch.child_by_field_name("condition")
+            consequence = branch.child_by_field_name("consequence")
+            if (
+                condition is None
+                or RustInspection.compact_node(condition) != "needs_chapters"
+                or consequence is None
+                or consequence.type != "block"
+            ):
+                continue
+            data = access.group("data")
+            target = updated.group("updated")
+            block = (
+                "{\n"
+                "            let c2a_chapter_filter = "
+                "aidoku::imports::defaults::defaults_get::<aidoku::alloc::String>("
+                f"{json.dumps(setting_key)}).unwrap_or_else(|| "
+                f"aidoku::alloc::String::from({json.dumps(setting_default)}));\n"
+                f"            if let Some(chapters) = {data}.{chapter_collection} {{\n"
+                f"                let manga_key = {target}.key.clone();\n"
+                "                let mut chapters = chapters.into_iter()\n"
+                '                    .filter(|chapter| c2a_chapter_filter == "all" '
+                "|| chapter.c2a_matches_filter(&c2a_chapter_filter))\n"
+                "                    .filter_map(|chapter| chapter.c2a_into_chapter(&manga_key))\n"
+                "                    .collect::<aidoku::alloc::Vec<_>>();\n"
+                "                chapters.sort_by(|left, right| right.chapter_number\n"
+                "                    .partial_cmp(&left.chapter_number)\n"
+                "                    .unwrap_or(core::cmp::Ordering::Equal));\n"
+                f"                {target}.chapters = Some(chapters);\n"
+                "            }\n"
+                "        }"
+            )
+            replacement = function.text.replace(
+                consequence.text.decode("utf-8", errors="replace"),
+                block,
+                1,
+            )
+            source_content = source_content.replace(function.text, replacement, 1)
+            break
+        if replacement is not None:
+            break
+    if replacement is None:
+        return files
+
+    type_arms = "\n".join(
+        f"            {json.dumps(kind, ensure_ascii=False)} => "
+        f"({json.dumps(suffix, ensure_ascii=False)}, "
+        f"{json.dumps(scanlator, ensure_ascii=False)}),"
+        for kind, suffix, scanlator in type_pairs
+    )
+    route = route_match.group("route")
+    date_format = next(iter(date_formats))
+    dto_helper = f"""
+impl {chapter_dto.name} {{
+    pub(crate) fn c2a_matches_filter(&self, filter: &str) -> bool {{
+        self.{chapter_fields["type"]} == filter
+    }}
+
+    pub(crate) fn c2a_into_chapter(self, manga_key: &str) -> Option<aidoku::Chapter> {{
+        let (suffix, scanlator) = match self.{chapter_fields["type"]}.as_str() {{
+{type_arms}
+            _ => return None,
+        }};
+        let key = aidoku::alloc::format!(
+            "{{}}{{}}{{}}",
+            manga_key.trim_end_matches('/'),
+            {json.dumps(route)},
+            self.{chapter_fields["id"]},
+        );
+        Some(aidoku::Chapter {{
+            key: key.clone(),
+            title: Some(aidoku::alloc::format!(
+                "{{}}{{}}（{{}}P）",
+                self.{chapter_fields["serial"]},
+                suffix,
+                self.{chapter_fields["size"]},
+            )),
+            chapter_number: self.{chapter_fields["serial"]}.parse::<f32>().ok(),
+            date_uploaded: aidoku::imports::std::parse_date(
+                &self.{chapter_fields["dateCreated"]},
+                {json.dumps(date_format)},
+            ),
+            scanlators: Some(aidoku::alloc::vec![scanlator.into()]),
+            url: Some(key),
+            ..Default::default()
+        }})
+    }}
+}}
+""".strip()
+    dto_content = dto_file.content.rstrip() + "\n\n" + dto_helper + "\n"
+    return [
+        generated.model_copy(update={"content": source_content})
+        if generated.path == source_file.path
+        else generated.model_copy(update={"content": dto_content})
+        if generated.path == dto_file.path
+        else generated
+        for generated in files
+    ]
+
+
+def _expose_generated_module_items(content: str) -> str:
+    content = re.sub(
+        r"(?m)^(?!pub\b)(?P<kind>fn|struct|enum|type|const|static)\s+",
+        r"pub(crate) \g<kind> ",
+        content,
+    )
+    edits: list[int] = []
+    for implementation in RustInspection.from_content(content).nodes("impl_item"):
+        if implementation.child_by_field_name("trait") is not None:
+            continue
+        body = implementation.child_by_field_name("body")
+        if body is None:
+            continue
+        edits.extend(
+            item.start_byte
+            for item in body.named_children
+            if item.type == "function_item"
+            and re.match(
+                r"pub(?:\s|\()",
+                item.text.decode("utf-8", errors="replace").lstrip(),
+            )
+            is None
+        )
+    encoded = content.encode("utf-8")
+    for position in sorted(edits, reverse=True):
+        encoded = encoded[:position] + b"pub(crate) " + encoded[position:]
+    return encoded.decode("utf-8")
+
+
 def _normalize_generated_module_topology(files: list[GeneratedFile]) -> list[GeneratedFile]:
     modules = {
         PurePosixPath(generated.path).stem: generated.path
@@ -5313,6 +6205,13 @@ def _normalize_generated_module_topology(files: list[GeneratedFile]) -> list[Gen
                 rf"\g<indent>use crate::{module}::",
                 content,
             )
+        for module in re.findall(
+            r"(?m)^\s*use\s+crate::([A-Za-z_]\w*)::\*\s*;",
+            content,
+        ):
+            owner_path = modules.get(module)
+            if owner_path is not None and owner_path != path:
+                contents[owner_path] = _expose_generated_module_items(contents[owner_path])
         for symbol in re.findall(r"(?m)^\s*use\s+crate::([A-Za-z_]\w*)\s*;", content):
             owner = definitions.get(symbol)
             if owner is None or owner == PurePosixPath(path).stem:
@@ -6648,6 +7547,15 @@ def normalize_generation_manifest(
         changed |= projected("recovered_nullable_dto_defaults", before, defaulted)
         files = defaulted
     before = files
+    chapter_projected = _project_recovered_kotlin_chapters(
+        ir,
+        files,
+        setting_defaults=setting_defaults,
+        setting_values=setting_values,
+    )
+    changed |= projected("recovered_kotlin_chapters", before, chapter_projected)
+    files = chapter_projected
+    before = files
     header_projected = _project_recovered_request_headers(
         ir,
         files,
@@ -6693,6 +7601,10 @@ def normalize_generation_manifest(
     check_projected = _project_recovered_check_filter_mappings(ir, files)
     changed |= projected("recovered_check_filter_mappings", before, check_projected)
     files = check_projected
+    before = files
+    return_projected = _project_generated_return_ownership(files)
+    changed |= projected("generated_return_ownership", before, return_projected)
+    files = return_projected
     before = files
     topologized = _normalize_generated_module_topology(files)
     changed |= projected("generated_module_topology", before, topologized)

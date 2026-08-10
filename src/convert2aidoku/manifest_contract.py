@@ -547,7 +547,8 @@ def _settings_not_read(resources: GeneratedResources, rust_content: str) -> list
     arguments = re.findall(
         r"(?:aidoku::imports::defaults::)?defaults_get\s*"
         r"(?:::\s*<[^;{}()]+>)?\s*\(\s*"
-        r"(?P<argument>\"(?:\\.|[^\"\\])*\"|[A-Za-z_]\w*)\s*\)",
+        r"(?P<argument>\"(?:\\.|[^\"\\])*\"|"
+        r"(?:[A-Za-z_]\w*::)*[A-Za-z_]\w*)\s*\)",
         rust_content,
     )
     consumed: set[str] = set()
@@ -555,8 +556,8 @@ def _settings_not_read(resources: GeneratedResources, rust_content: str) -> list
         if argument.startswith('"'):
             if (value := _decode_string_literal(argument)) is not None:
                 consumed.add(value)
-        elif argument in constants:
-            consumed.add(constants[argument])
+        elif (constant := argument.rsplit("::", 1)[-1]) in constants:
+            consumed.add(constants[constant])
     inspection = RustInspection.from_content(rust_content)
     wrapper_definitions: dict[str, list[set[int]]] = {}
     for function in inspection.functions:
@@ -591,8 +592,8 @@ def _settings_not_read(resources: GeneratedResources, rust_content: str) -> list
             if argument.startswith('"'):
                 if (value := _decode_string_literal(argument)) is not None:
                     consumed.add(value)
-            elif argument in constants:
-                consumed.add(constants[argument])
+            elif (constant := argument.rsplit("::", 1)[-1]) in constants:
+                consumed.add(constants[constant])
     return [key for key in keys if key not in consumed]
 
 

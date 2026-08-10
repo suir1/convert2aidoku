@@ -7,6 +7,16 @@
 - Ignore unrelated Rust constants whose string syntax is not JSON-compatible while checking
   generated settings usage, so invalid generated Rust reaches normal validation instead of a
   Python traceback.
+- Project generated module visibility and helper return ownership across Rust files, including
+  borrowed DTO lists, pinned Aidoku errors, current request builders, and legacy model/API paths.
+- Recover standard Kotlin chapter DTO behavior when URL, title, type, date, scanlator, ordering,
+  and setting evidence are complete; split raw GraphQL manga queries by requested detail/chapter
+  data and support relative manga/chapter deep links.
+- Convert legacy checkbox groups and their `FilterValue` consumers to current multi-select filters,
+  and retry reproducible read-only GraphQL POST requests once after a transient request failure.
+- Komiic now reaches live `verified` from its saved 43,714-token AI manifest without another
+  provider call; Copymanga remains `verified` from a clean APK conversion with zero AI calls and
+  zero tokens.
 
 ## 0.1.0b2 — 2026-08-10
 
