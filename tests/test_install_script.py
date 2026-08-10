@@ -78,6 +78,6 @@ def test_installer_rejects_unsupported_operating_system() -> None:
 
 
 def test_installer_can_pin_a_release_tag() -> None:
-    output = _dry_run("Darwin", install_ref="v0.1.0-beta.1")
+    output = _dry_run("Darwin", install_ref="v0.1.0-beta.2")
 
-    assert "convert2aidoku/archive/v0.1.0-beta.1.zip" in output
+    assert "convert2aidoku/archive/v0.1.0-beta.2.zip" in output

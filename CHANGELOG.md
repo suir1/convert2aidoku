@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## 0.1.0b2 — 2026-08-10
+
+This beta turns the first verified APK conversion into a repeatable, provider-optional pipeline.
+
+### Highlights
+
+- Recover listing, details, chapters, pages, filters, and settings from supported decompiled source
+  evidence and render complete Aidoku Rust traits deterministically.
+- Skip the provider entirely when analysis proves a complete deterministic projection. Copymanga
+  now converts from its public extension APK to a live-tested `verified` AIX with zero AI calls,
+  zero AI tokens, and zero repair rounds.
+- Require API configuration only after analysis determines that generation or repair needs it. The
+  CLI, Web UI, reports, and resumable checkpoints preserve the distinction between provider-free
+  and AI-assisted conversions.
+- Fall back to controlled AI generation when evidence is incomplete, without weakening generated
+  path confinement, dependency allowlisting, manifest validation, or command-execution boundaries.
+
+### Generation and validation
+
 - Default initial generation to disabled thinking and cap generation/repair completion budgets,
   with provider-compatible parameter fallback and reasoning/cache token reporting.
 - Split decompiled Android settings evidence from Rust behavior generation and remove audit-only
@@ -12,6 +31,18 @@
   recreate source instances, sample readable listings, and report per-domain failure stages.
 - Copymanga reached `verified` with `deepseek-v4-flash`; its measured initial generation fell from
   227,881 to 49,858 tokens in the regression run.
+- Harden deterministic projection with evidence-owned query bindings, response contracts, manga
+  field mappings, source traits, settings resources, dynamic filters, and Aidoku compatibility
+  normalization.
+
+### Known limitations
+
+- Deterministic conversion applies only when the supported evidence is complete. Other inputs may
+  still require a compatible model and can fail because of provider output or token limits.
+- Standalone public-reading sources remain the supported scope. Multisrc themes, login, bookcases,
+  Cloudflare bypass, image scrambling, and unknown cryptography remain out of scope.
+- Live `verified` status still depends on source-site availability and anti-bot behavior at the
+  time of validation.
 
 ## 0.1.0b1 — 2026-07-31
 
