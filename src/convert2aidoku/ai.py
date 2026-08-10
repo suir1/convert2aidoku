@@ -483,6 +483,14 @@ def initial_generation_request_characters(ir: SourceIR) -> int:
     return characters
 
 
+def generation_requires_provider(ir: SourceIR) -> bool:
+    """Return whether initial generation must contact the configured AI provider."""
+    seed = _deterministic_generation_seed(ir)
+    return seed is None or (
+        _needs_settings(ir) and not GeneratedResources(seed).has_nonempty_setting_items()
+    )
+
+
 def _strip_fences(content: str) -> str:
     stripped = content.strip()
     match = re.fullmatch(r"```(?:json)?\s*([\s\S]*?)\s*```", stripped)
@@ -647,14 +655,14 @@ class OpenAICompatibleClient:
         self._reasoning_effort_supported: bool | None = None
         self._thinking_control_supported: bool | None = None
         self._token_limit_parameter: _TokenLimitParameter | None = "max_completion_tokens"
+        headers = {"Content-Type": "application/json"}
+        if api_key := settings.api_key.get_secret_value():
+            headers["Authorization"] = f"Bearer {api_key}"
         self._client = httpx.Client(
             timeout=settings.timeout_seconds,
             transport=transport,
             trust_env=False,
-            headers={
-                "Authorization": f"Bearer {settings.api_key.get_secret_value()}",
-                "Content-Type": "application/json",
-            },
+            headers=headers,
         )
 
     def close(self) -> None:
@@ -717,6 +725,7 @@ class OpenAICompatibleClient:
         schema_name: str | None = None,
         schema: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        self.settings.require_provider()
         body: dict[str, Any] = {"model": self.settings.model, "messages": messages}
         if max_output_tokens is not None and self._token_limit_parameter is not None:
             body[self._token_limit_parameter] = max_output_tokens

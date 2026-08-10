@@ -33,8 +33,8 @@ class WebConversionRequest(BaseModel):
 
     input_ref: str = Field(min_length=1, max_length=4_096)
     output: str = Field(min_length=1, max_length=4_096)
-    base_url: str = Field(min_length=1, max_length=2_048)
-    model: str = Field(min_length=1, max_length=256)
+    base_url: str = Field(default="", max_length=2_048)
+    model: str = Field(default="", max_length=256)
     query: str | None = Field(default=None, max_length=256)
     max_repairs: int | None = Field(default=None, ge=0, le=8)
     generation_reasoning: ReasoningEffort | None = None
@@ -231,6 +231,7 @@ class WebJobManager:
                 repair_reasoning_effort=request.repair_reasoning,
                 generation_max_tokens=request.generation_max_tokens,
                 repair_max_tokens=request.repair_max_tokens,
+                require_provider=False,
             )
             output = Path(request.output).expanduser()
             if not output.is_absolute():

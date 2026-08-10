@@ -29,6 +29,26 @@ def test_supported_http_source_is_eligible_with_a_bounded_token_budget() -> None
     assert budget.recommended_total_tokens_max > budget.initial_prompt_tokens_max
 
 
+def test_deterministic_generation_reports_a_zero_token_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ir = analyze_path(str(SIMPLE_FIXTURE))
+    monkeypatch.setattr(
+        conversion_assessment,
+        "initial_generation_request_characters",
+        lambda _ir: 0,
+    )
+
+    budget = assess_source_ir(ir).token_budget
+
+    assert budget is not None
+    assert budget.request_characters == 0
+    assert budget.initial_prompt_tokens_min == 0
+    assert budget.initial_prompt_tokens_max == 0
+    assert budget.recommended_total_tokens_min == 0
+    assert budget.recommended_total_tokens_max == 0
+
+
 def test_missing_core_reading_behavior_is_blocked_before_ai() -> None:
     ir = analyze_path(str(SIMPLE_FIXTURE))
     ir = ir.model_copy(

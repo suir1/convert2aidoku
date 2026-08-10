@@ -109,8 +109,17 @@ class ConversionIntake:
             installed_output=request.output,
         )
         _check_resume_compatibility(checkpoint, request)
+        checkpoint_changed = False
+        if not checkpoint.provider_base_url and request.settings.base_url:
+            checkpoint.provider_base_url = request.settings.base_url
+            checkpoint_changed = True
+        if not checkpoint.model and request.settings.model:
+            checkpoint.model = request.settings.model
+            checkpoint_changed = True
         if request.query is not None and request.query != checkpoint.query:
             checkpoint.query = request.query
+            checkpoint_changed = True
+        if checkpoint_changed:
             store.commit(checkpoint=checkpoint)
         if not store.project.is_dir() or store.project.is_symlink():
             raise InputError(f"resume staging project is missing or unsafe: {store.project}")
@@ -183,9 +192,13 @@ def _check_resume_compatibility(
         mismatches.append("input")
     if checkpoint.output != str(request.output):
         mismatches.append("output")
-    if checkpoint.provider_base_url.rstrip("/") != request.settings.base_url.rstrip("/"):
+    if (
+        checkpoint.provider_base_url
+        and request.settings.base_url
+        and checkpoint.provider_base_url.rstrip("/") != request.settings.base_url.rstrip("/")
+    ):
         mismatches.append("base URL")
-    if checkpoint.model != request.settings.model:
+    if checkpoint.model and request.settings.model and checkpoint.model != request.settings.model:
         mismatches.append("model")
     if checkpoint.live != request.live:
         mismatches.append("live mode")

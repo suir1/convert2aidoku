@@ -4,11 +4,12 @@ from pathlib import Path
 import pytest
 
 from convert2aidoku.analyzer import analyze_source
+from convert2aidoku.config import AISettings
 from convert2aidoku.converter import (
     convert_source,
     validate_existing,
 )
-from convert2aidoku.errors import AIProviderError
+from convert2aidoku.errors import AIProviderError, ConfigurationError
 from convert2aidoku.ingest import resolve_source
 from convert2aidoku.manifest_contract import (
     ContractDiagnostic,
@@ -141,6 +142,45 @@ def test_conversion_orchestrates_atomic_output(
     assert "secret" not in (output / "report.json").read_text()
     assert (output / ".c2a" / "manifests" / "round-01.json").is_file()
     assert not list(output.parent.glob(f".{output.name}-*"))
+
+
+def test_missing_provider_can_be_supplied_when_resuming_analyzed_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    output = tmp_path / "generated" / "en.simple"
+
+    with pytest.raises(ConfigurationError, match="required for this source"):
+        convert_source(
+            str(FIXTURE),
+            output=output,
+            settings=AISettings(),
+            live=False,
+        )
+
+    workspace = output.parent / f".{output.name}.c2a-work"
+    assert (workspace / "source-ir.json").is_file()
+
+    _install_ai_scenario(monkeypatch)
+    monkeypatch.setattr(
+        "convert2aidoku.converter.validate_project",
+        lambda *_args, **_kwargs: ValidationResult(
+            build_ok=True,
+            package_ok=True,
+            live_ok=True,
+        ),
+    )
+    outcome = convert_source(
+        str(FIXTURE),
+        output=output,
+        settings=conversion_settings(),
+        live=False,
+        resume=True,
+    )
+
+    assert outcome.report.status is ConversionStatus.BUILD_ONLY
+    assert outcome.report.provider_base_url == "http://localhost/v1"
+    assert outcome.report.model == "fake"
 
 
 def test_conversion_reports_generation_and_validation_progress(

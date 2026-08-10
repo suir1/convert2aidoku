@@ -57,6 +57,14 @@ class ConversionAssessment(BaseModel):
 
 
 def _token_budget(request_characters: int) -> TokenBudgetEstimate:
+    if request_characters == 0:
+        return TokenBudgetEstimate(
+            request_characters=0,
+            initial_prompt_tokens_min=0,
+            initial_prompt_tokens_max=0,
+            recommended_total_tokens_min=0,
+            recommended_total_tokens_max=0,
+        )
     prompt_min = max(1_000, round(request_characters / 5.7))
     prompt_max = max(prompt_min + 1_000, round(request_characters / 3.2))
     total_min = prompt_min + max(3_000, round(prompt_min * 0.12))

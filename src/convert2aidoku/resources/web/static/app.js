@@ -15,6 +15,8 @@ const jobView = byId("job-view");
 const toastElement = byId("toast");
 let analyzedInput = "";
 let analyzedEligible = false;
+let providerRequired = true;
+let providerReady = false;
 let activeJob = "";
 let eventStream = null;
 
@@ -147,8 +149,26 @@ function renderAnalysis(payload) {
   byId("assessment-label").textContent = assessmentLabels[assessment.status] || assessment.status;
   byId("assessment-score").textContent = `${assessment.score}/100`;
   const budget = assessment.token_budget;
+  providerRequired = payload.provider_required;
+  byId("base-url").required = providerRequired;
+  byId("model").required = providerRequired;
+  const keyStatus = byId("key-status");
+  const keyConfigured = keyStatus.dataset.configured === "true";
+  providerReady = !providerRequired || keyConfigured;
+  keyStatus.classList.toggle("ok", !providerRequired || keyConfigured);
+  keyStatus.classList.toggle("warn", providerRequired && !keyConfigured);
+  byId("key-status-text").textContent = providerRequired
+    ? keyConfigured
+      ? "该源需要 AI；C2A_API_KEY 已就绪"
+      : "该源需要 AI；请配置 C2A_API_KEY"
+    : "该源可确定性生成，不需要 AI 配置";
+  byId("consent-text").textContent = providerRequired
+    ? "我确认需要回退时会向上述 AI 服务发送聚焦源码证据；API Key 不会写入报告。"
+    : "我确认开始完全本地的确定性转换；不会向 AI 服务发送请求。";
   const tokenRange = (minimum, maximum) =>
-    `${Number(minimum).toLocaleString()}–${Number(maximum).toLocaleString()}`;
+    minimum === maximum
+      ? Number(minimum).toLocaleString()
+      : `${Number(minimum).toLocaleString()}–${Number(maximum).toLocaleString()}`;
   byId("token-budget").classList.toggle("hidden", !budget);
   if (budget) {
     byId("initial-token-budget").textContent = tokenRange(
@@ -183,10 +203,12 @@ function renderAnalysis(payload) {
   analysisCard.classList.remove("hidden");
   options.classList.remove("hidden");
   options.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  convertButton.disabled = !consent.checked || !analyzedEligible;
-  convertButton.textContent = analyzedEligible
-    ? "开始生成 Aidoku 源"
-    : "当前源未通过付费前检查";
+  convertButton.disabled = !consent.checked || !analyzedEligible || !providerReady;
+  convertButton.textContent = !analyzedEligible
+    ? "当前源未通过付费前检查"
+    : providerReady
+      ? "开始生成 Aidoku 源"
+      : "该源需要 C2A_API_KEY";
 }
 
 analyzeButton.addEventListener("click", async () => {
@@ -206,7 +228,8 @@ analyzeButton.addEventListener("click", async () => {
 });
 
 consent.addEventListener("change", () => {
-  convertButton.disabled = !consent.checked || !analyzedInput || !analyzedEligible;
+  convertButton.disabled =
+    !consent.checked || !analyzedInput || !analyzedEligible || !providerReady;
 });
 
 byId("ai-check").addEventListener("click", async (event) => {

@@ -12,8 +12,8 @@ from convert2aidoku.ai import (
     ai_round,
     initial_generation_request_characters,
 )
-from convert2aidoku.config import ReasoningEffort
-from convert2aidoku.errors import AIProviderError
+from convert2aidoku.config import AISettings, ReasoningEffort
+from convert2aidoku.errors import AIProviderError, ConfigurationError
 from convert2aidoku.models import (
     AIUsage,
     Capability,
@@ -1023,7 +1023,7 @@ def test_complete_deterministic_source_without_settings_makes_no_provider_reques
         raise AssertionError("deterministic generation must not contact the provider")
 
     with OpenAICompatibleClient(
-        provider_settings(),
+        AISettings(),
         transport=httpx.MockTransport(unexpected_request),
     ) as client:
         result = client.generate(minimal_source_ir())
@@ -1059,7 +1059,7 @@ def test_complete_source_with_deterministic_decompiled_settings_makes_no_request
         capabilities=[Capability.SETTINGS],
     )
     with OpenAICompatibleClient(
-        provider_settings(),
+        AISettings(),
         transport=httpx.MockTransport(unexpected_request),
     ) as client:
         result = client.generate(ir)
@@ -1071,6 +1071,14 @@ def test_complete_source_with_deterministic_decompiled_settings_makes_no_request
         "res/settings.json",
     }
     assert initial_generation_request_characters(ir) == 0
+
+
+def test_provider_configuration_is_required_before_a_real_ai_request() -> None:
+    with (
+        OpenAICompatibleClient(AISettings()) as client,
+        pytest.raises(ConfigurationError, match="required for this source"),
+    ):
+        client.generate(minimal_source_ir())
 
 
 def test_initial_request_budget_counts_only_requests_that_will_be_sent(

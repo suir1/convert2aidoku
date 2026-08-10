@@ -18,6 +18,22 @@ def test_loads_env_key_without_exposing_it(monkeypatch: pytest.MonkeyPatch) -> N
     assert settings.max_repair_rounds == 1
 
 
+def test_defers_missing_provider_configuration_until_ai_is_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in ("C2A_API_KEY", "C2A_BASE_URL", "C2A_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+
+    settings = load_ai_settings(
+        config_path=Path("/does/not/exist"),
+        require_provider=False,
+    )
+
+    assert not settings.provider_configured
+    with pytest.raises(ConfigurationError, match="required for this source"):
+        settings.require_provider()
+
+
 def test_non_secret_defaults_are_available_to_interactive_clients(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

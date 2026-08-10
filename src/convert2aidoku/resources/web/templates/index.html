@@ -50,24 +50,24 @@
         <div class="section-heading">
           <div>
             <h2 id="source-title">转换设置</h2>
-            <p class="section-description">连接 AI 服务并选择 Tachi 输入源</p>
+            <p class="section-description">选择 Tachi 输入源；仅在无法确定生成时使用 AI</p>
           </div>
         </div>
 
         <form id="conversion-form">
           <fieldset>
-            <legend>AI 服务</legend>
+            <legend>AI 服务（按需）</legend>
             <div class="field-row">
               <label>API 地址
-                <input id="base-url" name="base_url" type="url" value="{{ ai.base_url }}" placeholder="https://provider.example/v1" required>
+                <input id="base-url" name="base_url" type="url" value="{{ ai.base_url }}" placeholder="https://provider.example/v1">
               </label>
               <label>模型
-                <input id="model" name="model" value="{{ ai.model }}" placeholder="model-name" required>
+                <input id="model" name="model" value="{{ ai.model }}" placeholder="model-name">
               </label>
             </div>
-            <div class="inline-status {{ 'ok' if api_key_configured else 'warn' }}" id="key-status">
+            <div class="inline-status {{ 'ok' if api_key_configured else 'warn' }}" id="key-status" data-configured="{{ 'true' if api_key_configured else 'false' }}">
               <span></span>
-              {% if api_key_configured %}C2A_API_KEY 已从环境变量读取{% else %}尚未设置 C2A_API_KEY；请在启动 UI 前配置{% endif %}
+              <b id="key-status-text">{% if api_key_configured %}C2A_API_KEY 已从环境变量读取{% else %}尚未设置 C2A_API_KEY；需要 AI 时再配置{% endif %}</b>
             </div>
             <button class="text-button" id="ai-check" type="button">测试 AI 连接</button>
           </fieldset>
@@ -149,7 +149,7 @@
                 <label class="check"><input id="force" type="checkbox"><span>覆盖已有输出</span></label>
               </div>
             </details>
-            <label class="consent"><input id="consent" type="checkbox"><span>我确认选中的源码证据会发送给上述 AI 服务；API Key 不会被写入报告。</span></label>
+            <label class="consent"><input id="consent" type="checkbox"><span id="consent-text">我确认开始本地转换；仅在需要 AI 回退时发送聚焦源码证据，API Key 不会写入报告。</span></label>
             <button class="button primary full" id="convert" type="submit" disabled>开始生成 Aidoku 源</button>
           </fieldset>
         </form>

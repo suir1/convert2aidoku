@@ -18,7 +18,7 @@ from platformdirs import user_cache_dir
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from .ai import OpenAICompatibleClient
+from .ai import OpenAICompatibleClient, generation_requires_provider
 from .analyzer import analyze_path
 from .config import ai_config_defaults, load_ai_settings
 from .conversion_assessment import assess_source_ir
@@ -68,6 +68,7 @@ def _analysis_payload(ir, *, input_ref: str, working_directory: Path) -> dict[st
             "unsupported_features": ir.unsupported_features,
         },
         "assessment": assessment.model_dump(mode="json"),
+        "provider_required": generation_requires_provider(ir),
     }
 
 

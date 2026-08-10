@@ -44,6 +44,7 @@ def test_local_dashboard_is_self_contained_and_hardened(web_client) -> None:
     assert response.status_code == 200
     assert "Convert to Aidoku" in response.text
     assert "转换设置" in response.text
+    assert "AI 服务（按需）" in response.text
     assert "把源代码变成" not in response.text
     assert "/static/app.css" in response.text
     assert "/static/app.js" in response.text
@@ -143,6 +144,7 @@ def test_analyze_previews_a_local_module_without_ai(web_client) -> None:
     assert payload["assessment"]["status"] == "ready"
     assert payload["assessment"]["eligible"] is True
     assert payload["assessment"]["score"] >= 85
+    assert payload["provider_required"] is True
     budget = payload["assessment"]["token_budget"]
     assert budget["initial_prompt_tokens_min"] < budget["initial_prompt_tokens_max"]
 
@@ -160,11 +162,32 @@ def test_web_upload_rejects_non_apk_files(web_client) -> None:
     assert ".apk" in response.json()["detail"]
 
 
+def test_analysis_marks_deterministic_sources_as_provider_optional(
+    web_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, client = web_client
+    monkeypatch.setattr(
+        "convert2aidoku.web_app.generation_requires_provider",
+        lambda _ir: False,
+    )
+
+    response = client.post(
+        "/api/analyze",
+        data={"input_ref": str(FIXTURE)},
+        headers=_csrf(app),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["provider_required"] is False
+
+
 def test_conversion_job_streams_terminal_state_and_downloads_artifacts(
     web_client,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app, client = web_client
+    monkeypatch.delenv("C2A_API_KEY")
 
     def fake_convert(_input_ref: str, **kwargs):
         output = kwargs["output"]
@@ -186,8 +209,6 @@ def test_conversion_job_streams_terminal_state_and_downloads_artifacts(
         json={
             "input_ref": str(FIXTURE),
             "output": "generated/en.simple",
-            "base_url": "http://localhost/v1",
-            "model": "model",
             "consent": True,
         },
     )

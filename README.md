@@ -51,10 +51,9 @@ Rust/WASM/Aidoku layer.
 
 ## Local Web UI
 
-Start the browser interface after exporting the API key:
+Start the browser interface directly:
 
 ```bash
-export C2A_API_KEY='...'
 c2a ui
 ```
 
@@ -63,7 +62,10 @@ analyzer, converter, checkpoint, validator, and reports as the CLI. It supports 
 local/GitHub module reference, no-token analysis preview, conversion-readiness scoring, token-budget
 estimates, AI connectivity checks, live conversion progress, failed-job resume, and controlled
 AIX/report downloads. Sources missing core reading evidence are blocked before any provider request.
-Provider keys are read only from the process environment and are never accepted by Web forms.
+After analysis, sources with a complete deterministic projection are marked as requiring no AI and
+can be converted without provider fields or an API key. Other sources request provider configuration
+only when generation or repair actually needs it. Provider keys are read only from the process
+environment and are never accepted by Web forms.
 
 On WSL2, C2A opens the URL with Windows PowerShell when available; otherwise open the same
 `localhost` URL in the Windows browser. Headless Linux users can suppress browser launch:
@@ -92,8 +94,9 @@ provenance remain separate.
 
 ## AI configuration
 
-The API key is accepted only through the environment. Do not put it in `c2a.toml` or a command-line
-argument.
+AI configuration is optional for sources that the analysis marks as fully deterministic. When AI
+fallback is required, the API key is accepted only through the environment. Do not put it in
+`c2a.toml` or a command-line argument.
 
 ```toml
 # c2a.toml
@@ -132,10 +135,11 @@ prompt.
 The client first requests JSON-Schema structured output. Providers that reject that feature fall
 back to JSON Object mode and then plain JSON, both still validated locally with Pydantic.
 
-For decompiled APKs, the initial prompt uses deterministic Java behavior slices instead of JADX
-boilerplate; Android preference UI/listener bodies are kept in the focused settings request and
-omitted from Rust evidence. Settings are extracted first and passed to Rust generation as a compact
-contract. Kotlin modules still send their complete selected source files. The primary AI call
+For decompiled APKs, complete public `initPreferences` contracts are recovered deterministically;
+incomplete or ambiguous preference evidence falls back to the bounded settings request. The Rust
+prompt uses deterministic Java behavior slices instead of JADX boilerplate and omits Android
+preference UI/listener bodies. Settings are extracted first and passed to Rust generation as a
+compact contract. Kotlin modules still send their complete selected source files. The primary AI call
 returns Rust files only. Static filters are generated deterministically from `SourceIR`, while
 settings use a separate bounded evidence prompt whose response contains real JSON objects rather
 than JSON text nested inside a manifest string. Rust format, compiler, and Clippy repairs first use

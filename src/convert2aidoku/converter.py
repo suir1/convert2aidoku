@@ -5,7 +5,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .ai import AIResult, OpenAICompatibleClient, ai_round
+from .ai import AIResult, OpenAICompatibleClient, ai_round, generation_requires_provider
 from .checkpoint_store import CheckpointStore, ManifestWrite
 from .config import AISettings
 from .conversion_completion import ConversionOutcome, complete_conversion
@@ -201,6 +201,7 @@ class _ConversionRoundRunner:
             return
         if not repair_required(self.validation, self.capability_gaps, live=self.live):
             return
+        settings.require_provider()
         with OpenAICompatibleClient(settings) as client:
             while repair_required(self.validation, self.capability_gaps, live=self.live):
                 round_limit = repair_round_limit(
@@ -279,6 +280,14 @@ def convert_source(
     project = intake.project
     ir = intake.source_ir
     checkpoint = intake.checkpoint
+    settings = settings.model_copy(
+        update={
+            "base_url": settings.base_url or checkpoint.provider_base_url,
+            "model": settings.model or checkpoint.model,
+        }
+    )
+    if generation_requires_provider(ir):
+        settings.require_provider()
 
     rounds = _ConversionRoundRunner(
         ir=ir,

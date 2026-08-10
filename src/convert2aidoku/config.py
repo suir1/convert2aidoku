@@ -4,6 +4,7 @@ import os
 import tomllib
 from enum import StrEnum
 from pathlib import Path
+from typing import Self
 
 from pydantic import BaseModel, Field, SecretStr
 
@@ -28,9 +29,9 @@ class ReasoningEffort(StrEnum):
 
 
 class AISettings(BaseModel):
-    base_url: str
-    model: str
-    api_key: SecretStr
+    base_url: str = ""
+    model: str = ""
+    api_key: SecretStr = SecretStr("")
     timeout_seconds: float = DEFAULT_AI_TIMEOUT_SECONDS
     max_repair_rounds: int = DEFAULT_MAX_REPAIR_ROUNDS
     generation_reasoning_effort: ReasoningEffort = ReasoningEffort.OFF
@@ -52,6 +53,24 @@ class AISettings(BaseModel):
         if base.endswith("/chat/completions"):
             return base
         return f"{base}/chat/completions"
+
+    @property
+    def provider_configured(self) -> bool:
+        return bool(self.base_url and self.model and self.api_key.get_secret_value())
+
+    def require_provider(self) -> Self:
+        missing = []
+        if not self.base_url:
+            missing.append("base URL (--base-url, C2A_BASE_URL, or c2a.toml)")
+        if not self.model:
+            missing.append("model (--model, C2A_MODEL, or c2a.toml)")
+        if not self.api_key.get_secret_value():
+            missing.append("C2A_API_KEY")
+        if missing:
+            raise ConfigurationError(
+                "AI configuration is required for this source: " + ", ".join(missing)
+            )
+        return self
 
 
 def _read_config(path: Path | None) -> dict[str, object]:
@@ -86,21 +105,12 @@ def load_ai_settings(
     repair_reasoning_effort: ReasoningEffort | str | None = None,
     generation_max_tokens: int | None = None,
     repair_max_tokens: int | None = None,
+    require_provider: bool = True,
 ) -> AISettings:
     config = _read_config(config_path)
     resolved_base_url = base_url or os.getenv("C2A_BASE_URL") or config.get("base_url")
     resolved_model = model or os.getenv("C2A_MODEL") or config.get("model")
     api_key = os.getenv("C2A_API_KEY")
-
-    missing = []
-    if not resolved_base_url:
-        missing.append("base URL (--base-url, C2A_BASE_URL, or c2a.toml)")
-    if not resolved_model:
-        missing.append("model (--model, C2A_MODEL, or c2a.toml)")
-    if not api_key:
-        missing.append("C2A_API_KEY")
-    if missing:
-        raise ConfigurationError("missing AI configuration: " + ", ".join(missing))
 
     configured_rounds = config.get("max_repair_rounds", DEFAULT_MAX_REPAIR_ROUNDS)
     env_rounds = os.getenv("C2A_MAX_REPAIR_ROUNDS")
@@ -152,10 +162,10 @@ def load_ai_settings(
             )
         return value
 
-    return AISettings(
-        base_url=str(resolved_base_url),
-        model=str(resolved_model),
-        api_key=SecretStr(api_key),
+    settings = AISettings(
+        base_url=str(resolved_base_url or ""),
+        model=str(resolved_model or ""),
+        api_key=SecretStr(api_key or ""),
         timeout_seconds=timeout,
         max_repair_rounds=rounds,
         generation_reasoning_effort=reasoning_effort(
@@ -183,3 +193,4 @@ def load_ai_settings(
             DEFAULT_REPAIR_MAX_TOKENS,
         ),
     )
+    return settings.require_provider() if require_provider else settings

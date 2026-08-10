@@ -262,11 +262,13 @@ def convert(
             repair_reasoning_effort=repair_reasoning,
             generation_max_tokens=generation_max_tokens,
             repair_max_tokens=repair_max_tokens,
+            require_provider=False,
         )
         if not yes:
             console.print(
-                "The selected Tachi source code will be sent to the configured AI provider. "
-                "The API key will not be stored."
+                "The selected Tachi source code stays local when deterministic generation is "
+                "complete. If AI fallback is required, focused source evidence will be sent to "
+                "the configured provider. The API key will not be stored."
             )
             if not typer.confirm("Continue?"):
                 raise typer.Abort()
