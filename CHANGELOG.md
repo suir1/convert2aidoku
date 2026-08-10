@@ -12,6 +12,8 @@
   projection, and checkbox consumption one Generation Filter Projection Module owner.
 - Centralize recovered request headers, User-Agent settings, detail envelopes, chapter endpoint
   variants, and image-resolution rewrites in one Generation Request Projection Module.
+- Move recovered rank envelopes, unused DTO fields, nested aliases, and nullable defaults into one
+  Generation Response Projection Module; only pinned Rust compatibility remains in Scaffold.
 
 ### Regression results
 

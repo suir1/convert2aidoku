@@ -31,3 +31,28 @@ TOOL_OWNED_RUST_PATHS = frozenset(
 # Aidoku's networking runtime negotiates and decodes response compression. Forwarding this
 # source-client header can leave get_html/get_json_owned with raw compressed bytes.
 AIDOKU_RUNTIME_MANAGED_REQUEST_HEADERS = frozenset({"accept-encoding"})
+
+AIDOKU_ROOT_NAMES = frozenset(
+    {
+        "BaseUrlProvider",
+        "Chapter",
+        "DeepLinkHandler",
+        "DeepLinkResult",
+        "DynamicFilters",
+        "Filter",
+        "FilterKind",
+        "FilterValue",
+        "ImageRequestProvider",
+        "Listing",
+        "ListingKind",
+        "ListingProvider",
+        "Manga",
+        "MangaPageResult",
+        "MangaStatus",
+        "Page",
+        "PageContent",
+        "PageContext",
+        "Source",
+        "Viewer",
+    }
+)

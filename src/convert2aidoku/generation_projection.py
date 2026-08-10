@@ -6,7 +6,6 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
-from . import scaffold as _implementation
 from .generation_filter_projection import (
     _project_recovered_check_filter_mappings,
     _project_recovered_dynamic_filter_queries,
@@ -24,10 +23,17 @@ from .generation_request_projection import (
     _project_user_agent_setting,
     _request_builder_helpers,
 )
+from .generation_response_projection import (
+    _project_recovered_nested_dto_aliases,
+    _project_recovered_nullable_dto_defaults,
+    _project_recovered_rank_item_wrapper,
+    _skip_unused_decompiled_dto_fields,
+)
 from .models import Capability, GeneratedFile, GeneratedResources, GenerationManifest, SourceIR
 from .normalization_trace import NormalizationTrace
 from .rust_inspection import RustInspection
 from .rust_inspection import last_rust_identifier as _last_rust_identifier
+from .scaffold import normalize_pinned_aidoku_rust as _normalize_pinned_aidoku_rust
 
 
 @dataclass(frozen=True)
@@ -596,7 +602,7 @@ def _project_rank_item_wrapper(
 ) -> _ProjectionState:
     return _with_files(
         state,
-        _implementation._project_recovered_rank_item_wrapper(context.ir, state.files),
+        _project_recovered_rank_item_wrapper(context.ir, state.files),
     )
 
 
@@ -608,7 +614,7 @@ def _normalize_pinned_rust(
     for generated in state.files:
         content = generated.content
         if generated.path.endswith(".rs"):
-            content = _implementation.normalize_pinned_aidoku_rust(
+            content = _normalize_pinned_aidoku_rust(
                 content,
                 allow_dead_code=generated.path != "src/lib.rs",
                 setting_defaults=context.setting_defaults,
@@ -633,7 +639,7 @@ def _skip_unused_dto_fields(
     _context: _ProjectionContext,
     state: _ProjectionState,
 ) -> _ProjectionState:
-    return _with_files(state, _implementation._skip_unused_decompiled_dto_fields(state.files))
+    return _with_files(state, _skip_unused_decompiled_dto_fields(state.files))
 
 
 def _project_nested_dto_aliases(
@@ -642,7 +648,7 @@ def _project_nested_dto_aliases(
 ) -> _ProjectionState:
     return _with_files(
         state,
-        _implementation._project_recovered_nested_dto_aliases(context.ir, state.files),
+        _project_recovered_nested_dto_aliases(context.ir, state.files),
     )
 
 
@@ -652,7 +658,7 @@ def _project_nullable_dto_defaults(
 ) -> _ProjectionState:
     return _with_files(
         state,
-        _implementation._project_recovered_nullable_dto_defaults(context.ir, state.files),
+        _project_recovered_nullable_dto_defaults(context.ir, state.files),
     )
 
 

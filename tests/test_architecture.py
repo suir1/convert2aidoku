@@ -115,6 +115,20 @@ def test_manifest_projection_registry_preserves_deterministic_order() -> None:
     assert len(MANIFEST_PROJECTION_RULE_ORDER) == len(MANIFEST_PROJECTION_RULE_IDS)
 
 
+def test_manifest_projection_scaffold_dependency_is_only_rust_compatibility() -> None:
+    path = Path(__file__).parents[1] / "src" / "convert2aidoku" / "generation_projection.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+
+    scaffold_imports = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "scaffold"
+    ]
+
+    assert len(scaffold_imports) == 1
+    assert [alias.name for alias in scaffold_imports[0].names] == ["normalize_pinned_aidoku_rust"]
+
+
 def test_source_rule_catalogs_match_capabilities_and_preflight_call_sites() -> None:
     package = Path(__file__).parents[1] / "src" / "convert2aidoku"
     preflight_ids = _literal_rule_ids(package / "conversion_assessment.py", "record")
