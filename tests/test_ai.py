@@ -890,6 +890,10 @@ def test_generate_reserves_tool_owned_search_listing_module(
         "convert2aidoku.ai.deterministic_page_list_available",
         lambda _ir: True,
     )
+    monkeypatch.setattr(
+        "convert2aidoku.ai.deterministic_dynamic_filters_available",
+        lambda _ir: True,
+    )
 
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
@@ -902,6 +906,8 @@ def test_generate_reserves_tool_owned_search_listing_module(
         assert "manga, needs_details, needs_chapters" in prompt
         assert "owns src/c2a_pages.rs" in prompt
         assert "crate::c2a_pages::get_page_list(chapter)" in prompt
+        assert "deterministically owns DynamicFilters" in prompt
+        assert "include DynamicFilters in implemented_traits" in prompt
         return httpx.Response(
             200,
             json={"choices": [{"message": {"content": json.dumps(_manifest())}}]},

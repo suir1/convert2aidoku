@@ -64,6 +64,7 @@ from .models import (
 from .normalization_trace import NormalizationTrace
 from .page_renderer import deterministic_page_list_available
 from .scaffold import (
+    deterministic_dynamic_filters_available,
     normalize_pinned_aidoku_rust,
     render_generated_lib_rs,
     validate_generated_content,
@@ -313,6 +314,7 @@ def _generation_messages(
     deterministic_detail = deterministic_listing and deterministic_manga_detail_available(ir)
     deterministic_update = deterministic_listing and deterministic_manga_update_available(ir)
     deterministic_pages = deterministic_listing and deterministic_page_list_available(ir)
+    deterministic_filters = deterministic_listing and deterministic_dynamic_filters_available(ir)
     listing_instruction = (
         "The tool deterministically owns src/c2a_listing.rs for search, rank, and browse. "
         "Do not return that file or reimplement its exclusive endpoints and DTOs. Implement "
@@ -350,6 +352,13 @@ def _generation_messages(
         if deterministic_pages
         else ""
     )
+    filter_instruction = (
+        "The tool deterministically owns DynamicFilters, including its dynamic and static "
+        "filter items. Do not implement get_dynamic_filters, include DynamicFilters in "
+        "implemented_traits, or duplicate the theme endpoint and DTOs. "
+        if deterministic_filters
+        else ""
+    )
     return [
         {
             "role": "system",
@@ -368,12 +377,15 @@ def _generation_messages(
                 "Generate a complete Aidoku implementation for this standalone source. "
                 "Allowed output paths are only src/**/*.rs. Do not return filters.json or "
                 "settings.json: the tool owns those resources and generates them separately. "
+                "Do not implement DynamicSettings or Rust setting item types; res/settings.json "
+                "is the sole settings implementation. "
                 "Define the public source_struct and Source implementation in src/source.rs; "
                 "the tool reconstructs src/lib.rs deterministically from source_struct, "
                 "implemented_traits, and the returned module paths. "
                 + listing_instruction
                 + detail_instruction
                 + page_instruction
+                + filter_instruction
                 + "Cargo.toml is forbidden because the tool owns all Cargo metadata. Use only "
                 "allowed dependencies and do not omit required core behavior.\n\n"
                 + json.dumps(source_payload, ensure_ascii=False)
@@ -999,6 +1011,13 @@ class OpenAICompatibleClient:
         diagnostics: str,
         manifest_history: list[dict[str, Any]] | None = None,
     ) -> AIResult[GenerationManifest]:
+        deterministic_filters = deterministic_dynamic_filters_available(ir)
+        filter_instruction = (
+            "DynamicFilters is tool-owned for this source; omit its implementation, trait, "
+            "endpoint, and DTOs. "
+            if deterministic_filters
+            else ""
+        )
         messages = [
             {
                 "role": "system",
@@ -1006,7 +1025,9 @@ class OpenAICompatibleClient:
                     "You repair a generated current Aidoku Rust source. Return a complete "
                     "Rust-only replacement manifest, not a diff and never shell commands. "
                     "Return only src/**/*.rs; filters/settings are tool-owned and preserved. "
-                    "src/c2a_listing.rs, src/c2a_manga_detail.rs, and src/c2a_pages.rs are also "
+                    "Do not implement DynamicSettings or Rust setting item types. "
+                    + filter_instruction
+                    + "src/c2a_listing.rs, src/c2a_manga_detail.rs, and src/c2a_pages.rs are also "
                     "tool-owned, omitted from this request, and must not be returned or "
                     "reimplemented. "
                     "Popular/latest ListingProvider behavior "

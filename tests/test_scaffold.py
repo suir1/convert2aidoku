@@ -2466,8 +2466,167 @@ impl Simple {
     assert "struct C2aDynamicFilterResult" in source
     assert 'id: "theme".into()' in source
     assert 'Self::selected_value(&filters, "theme").unwrap_or("")' in source
-    assert 'url.push_str(&format!("&theme={}", c2a_theme))' in source
+    assert 'url.push_str(&aidoku::alloc::format!("&theme={}", c2a_theme))' in source
     assert normalize_generation_manifest(ir, normalized) == normalized
+
+
+def test_manifest_owns_proven_dynamic_filters_with_deterministic_listing() -> None:
+    ir = minimal_source_ir(
+        source_format="decompiled_apk",
+        capabilities=[Capability.DYNAMIC_FILTERS],
+        filter_specs=[
+            SourceFilterSpec(
+                source_class="TypeFilter",
+                id="type",
+                title="Type",
+                kind="select",
+                options=[
+                    SourceFilterOption(title="All", value=""),
+                    SourceFilterOption(title="Name", value="name"),
+                ],
+            )
+        ],
+        files=[
+            SourceFile(
+                path="sources/example/ApiRepo.java",
+                sha256="0",
+                content="""
+                public final String tagList() {
+                    return getApiUrl() + "/theme/comic/count?limit=100";
+                }
+                """,
+            ),
+            SourceFile(
+                path="sources/example/FilterKt.java",
+                sha256="0",
+                content="""
+                public static void resetThemeFilter() {
+                    GET(ApiRepo.INSTANCE.tagList());
+                    Reflection.typeOf(ApiResponse.class,
+                        Reflection.typeOf(ThemeResult.class));
+                    count += themeDetail.getCount();
+                    new Tag(themeDetail.getName() + themeDetail.getCount(),
+                        themeDetail.getPathWord());
+                }
+                """,
+            ),
+            SourceFile(
+                path="sources/example/ThemeFilter.java",
+                sha256="0",
+                content="""
+                public final class ThemeFilter {
+                    ThemeFilter() {
+                        FilterKt.getThemeFilter();
+                        super("Themes", values, 0);
+                    }
+                }
+                """,
+            ),
+            SourceFile(
+                path="sources/example/api/dto/ApiResponse.java",
+                sha256="0",
+                content="""
+                public final class ApiResponse<T> { private final T results; }
+                """,
+            ),
+            SourceFile(
+                path="sources/example/api/dto/ThemeResult.java",
+                sha256="0",
+                content="""
+                // Serialized field names:
+                // themeList -> "list"
+                public final class ThemeResult {
+                    private final List<ThemeDetail> themeList;
+                }
+                """,
+            ),
+            SourceFile(
+                path="sources/example/api/dto/ThemeDetail.java",
+                sha256="0",
+                content="""
+                // Serialized field names:
+                // pathWord -> "path_word"
+                public final class ThemeDetail {
+                    private final String name;
+                    private final int count;
+                    private final String pathWord;
+                }
+                """,
+            ),
+        ],
+    )
+    manifest = GenerationManifest(
+        source_struct="Example",
+        implemented_traits=["DynamicFilters"],
+        files=[
+            GeneratedFile(path="src/lib.rs", content="mod source;\nmod c2a_listing;"),
+            GeneratedFile(
+                path="src/source.rs",
+                content="""
+use aidoku::{DynamicFilters, Filter, Result};
+use aidoku::prelude::{SelectFilter, Value};
+pub struct Example;
+impl DynamicFilters for Example {
+    fn get_dynamic_filters(&self) -> Result<Vec<Filter>> {
+        panic!("AI dynamic filters")
+    }
+}
+""",
+            ),
+            GeneratedFile(
+                path="src/c2a_listing.rs",
+                content="""
+pub(crate) fn api_url(path: &str) -> String { path.into() }
+pub(crate) fn get_json<T>(url: String) -> Result<T> { request(url) }
+fn selected_value<'a>(filters: &'a [FilterValue], id: &str) -> Option<&'a str> {
+    None
+}
+fn get_search_manga_list(filters: Vec<FilterValue>) -> Result<MangaPageResult> {
+    let region = selected_value(&filters, "region").unwrap_or("");
+    let mut url = api_url("/api/v3/comics?limit=21");
+    url.push_str("&_update=true");
+    list(url, region)
+}
+""",
+            ),
+        ],
+    )
+
+    normalized = normalize_generation_manifest(ir, manifest)
+    source = next(item.content for item in normalized.files if item.path == "src/source.rs")
+    listing = next(item.content for item in normalized.files if item.path == "src/c2a_listing.rs")
+
+    assert "AI dynamic filters" not in source
+    assert "impl aidoku::DynamicFilters for Example" in source
+    assert 'crate::c2a_listing::api_url("/api/v3/theme/comic/count?limit=100")' in source
+    assert '#[serde(rename = "results")]' in source
+    assert '#[serde(default, rename = "list")]' in source
+    assert '#[serde(default, rename = "path_word")]' in source
+    assert 'title: Some("Themes".into())' in source
+    assert 'id: "type".into()' in source
+    assert "theme.count" in source
+    assert "SelectFilter" not in source.split("impl aidoku::DynamicFilters", 1)[0]
+    assert "Value" not in source
+    assert normalized.implemented_traits.count("DynamicFilters") == 1
+    assert 'selected_value(&filters, "theme").unwrap_or("")' in listing
+    assert normalize_generation_manifest(ir, normalized) == normalized
+
+    incomplete_ir = ir.model_copy(
+        update={
+            "files": [
+                source.model_copy(update={"content": source.content.replace("getCount()", "")})
+                if source.path.endswith("FilterKt.java")
+                else source
+                for source in ir.files
+            ]
+        }
+    )
+    incomplete = normalize_generation_manifest(incomplete_ir, manifest)
+    incomplete_source = next(
+        item.content for item in incomplete.files if item.path == "src/source.rs"
+    )
+    assert "AI dynamic filters" in incomplete_source
+    assert "struct C2aDynamicFilterEnvelope" not in incomplete_source
 
 
 def test_normalizer_repairs_raw_json_listing_and_consuming_builder_patterns() -> None:
@@ -3662,7 +3821,7 @@ fn items(value: String) -> Vec<String> { vec![value.to_string()] }
     assert normalize_pinned_aidoku_rust(normalized) == normalized
 
 
-def test_manifest_prunes_empty_dynamic_settings_when_static_settings_exist() -> None:
+def test_manifest_prunes_dynamic_settings_when_static_settings_exist() -> None:
     ir = minimal_source_ir()
     manifest = GenerationManifest(
         source_struct="Example",
@@ -3678,9 +3837,15 @@ def test_manifest_prunes_empty_dynamic_settings_when_static_settings_exist() -> 
             GeneratedFile(
                 path="src/source.rs",
                 content="""
+use aidoku::prelude::{SelectSetting, SettingGroup, SettingItem, TextSetting};
 struct Example;
 impl DynamicSettings for Example {
-    fn get_settings(&self) -> Result<Vec<Filter>> { Ok(Vec::new()) }
+    fn get_dynamic_settings(&self) -> Result<Vec<Setting>> {
+        Ok(vec![Setting::Group(SettingGroup {
+            items: vec![SettingItem::Text(TextSetting::default())],
+            ..Default::default()
+        })])
+    }
 }
 """,
             ),
@@ -3697,6 +3862,10 @@ impl DynamicSettings for Example {
 
     assert "DynamicSettings" not in normalized.implemented_traits
     assert "impl DynamicSettings" not in source
+    assert "SelectSetting" not in source
+    assert "SettingGroup" not in source
+    assert "SettingItem" not in source
+    assert "TextSetting" not in source
     assert "DynamicSettings" not in lib
     assert normalize_generation_manifest(ir, normalized) == normalized
 
