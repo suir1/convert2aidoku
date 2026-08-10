@@ -163,7 +163,11 @@ def with_deterministic_source_shell(
         manifest.source_struct,
         listing_provider="ListingProvider" in manifest.implemented_traits,
     )
-    files = [generated for generated in manifest.files if generated.path != rendered.path]
+    files = [
+        generated
+        for generated in manifest.files
+        if not generated.path.endswith(".rs") or generated.path == "src/lib.rs"
+    ]
     files.append(rendered)
     paths = {generated.path for generated in files}
     lib_content = render_generated_lib_rs(
@@ -177,7 +181,7 @@ def with_deterministic_source_shell(
         else generated
         for generated in files
     ]
-    return manifest.model_copy(update={"files": files})
+    return manifest.model_copy(update={"files": files, "dependencies": []})
 
 
 def _last_identifier(node: object | None) -> str | None:

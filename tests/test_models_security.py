@@ -238,6 +238,50 @@ def test_nested_setting_groups_are_promoted_to_schema_valid_top_level_groups() -
     assert normalize_generated_json_resource("res/settings.json", normalized) == normalized
 
 
+def test_page_setting_children_are_wrapped_in_schema_required_groups() -> None:
+    content = """[
+        {"type":"group","title":"General","items":[
+            {"type":"page","title":"API","items":[
+                {"type":"select","key":"domain","title":"Domain",
+                 "values":["api.example"],"default":"api.example"},
+                {"type":"text","key":"custom","title":"Custom","default":""}
+            ]}
+        ]}
+    ]"""
+
+    normalized = normalize_generated_json_resource("res/settings.json", content)
+    page = json.loads(normalized)[0]["items"][0]
+
+    assert [group["type"] for group in page["items"]] == ["group"]
+    assert [item["key"] for item in page["items"][0]["items"]] == ["domain", "custom"]
+    assert normalize_generated_json_resource("res/settings.json", normalized) == normalized
+
+
+def test_generated_resources_reads_settings_nested_below_pages() -> None:
+    manifest = GenerationManifest(
+        source_struct="Example",
+        files=[
+            GeneratedFile(path="src/lib.rs", content="#![no_std]"),
+            GeneratedFile(
+                path="res/settings.json",
+                content="""[
+                    {"type":"group","items":[
+                        {"type":"page","title":"API","items":[
+                            {"type":"select","key":"domain","title":"Domain",
+                             "values":["api.example"],"default":"api.example"}
+                        ]}
+                    ]}
+                ]""",
+            ),
+        ],
+    )
+    resources = GeneratedResources(manifest)
+
+    assert resources.setting_keys() == ("domain",)
+    assert resources.setting_defaults() == {"domain": "api.example"}
+    assert resources.setting_values() == {"domain": ("api.example",)}
+
+
 def test_settings_fill_required_titles_text_defaults_and_protocol_resolution_values() -> None:
     generated = GeneratedFile(
         path="res/settings.json",

@@ -316,10 +316,29 @@ def _normalize_setting_item(raw_item: Any, *, location: str) -> dict[str, Any]:
         children = item.get("items")
         if not isinstance(children, list):
             raise ValueError(f"{location}.items must be an array")
-        item["items"] = [
+        normalized_children = [
             _normalize_setting_item(child, location=f"{location}.items[{index}]")
             for index, child in enumerate(children)
         ]
+        if setting_type == "page":
+            page_groups: list[dict[str, Any]] = []
+            loose_items: list[dict[str, Any]] = []
+
+            def flush_loose_items() -> None:
+                if loose_items:
+                    page_groups.append({"type": "group", "items": list(loose_items)})
+                    loose_items.clear()
+
+            for child in normalized_children:
+                if child.get("type") == "group":
+                    flush_loose_items()
+                    page_groups.append(child)
+                else:
+                    loose_items.append(child)
+            flush_loose_items()
+            item["items"] = _promote_nested_setting_groups(page_groups)
+        else:
+            item["items"] = normalized_children
     return item
 
 
@@ -546,21 +565,26 @@ class GeneratedResources:
             return not self.has_nonempty_setting_items()
         return not self._data.get(path)
 
+    def _setting_items(self) -> tuple[dict[str, Any], ...]:
+        items: list[dict[str, Any]] = []
+        pending = list(reversed(self._data.get(self.SETTINGS, [])))
+        while pending:
+            item = pending.pop()
+            if not isinstance(item, dict):
+                continue
+            children = item.get("items")
+            if item.get("type") in {"group", "page"} and isinstance(children, list):
+                pending.extend(reversed(children))
+            else:
+                items.append(item)
+        return tuple(items)
+
     def has_nonempty_setting_items(self) -> bool:
-        return any(
-            isinstance(group, dict)
-            and isinstance(group.get("items"), list)
-            and bool(group["items"])
-            for group in self._data.get(self.SETTINGS, [])
-        )
+        return bool(self._setting_items())
 
     def setting_keys(self) -> tuple[str, ...]:
         return tuple(
-            item["key"]
-            for group in self._data.get(self.SETTINGS, [])
-            if isinstance(group, dict) and isinstance(group.get("items"), list)
-            for item in group["items"]
-            if isinstance(item, dict) and isinstance(item.get("key"), str)
+            item["key"] for item in self._setting_items() if isinstance(item.get("key"), str)
         )
 
     def contains_text(self, path: str, needle: str) -> bool:
@@ -579,34 +603,24 @@ class GeneratedResources:
 
     def setting_defaults(self) -> dict[str, str]:
         defaults: dict[str, str] = {}
-        for group in self._data.get(self.SETTINGS, []):
-            if not isinstance(group, dict) or not isinstance(group.get("items"), list):
-                continue
-            for item in group["items"]:
-                if not isinstance(item, dict):
-                    continue
-                key = item.get("key")
-                default = item.get("default")
-                if isinstance(key, str) and isinstance(default, str):
-                    defaults[key] = default
+        for item in self._setting_items():
+            key = item.get("key")
+            default = item.get("default")
+            if isinstance(key, str) and isinstance(default, str):
+                defaults[key] = default
         return defaults
 
     def setting_values(self) -> dict[str, tuple[str, ...]]:
         values_by_key: dict[str, tuple[str, ...]] = {}
-        for group in self._data.get(self.SETTINGS, []):
-            if not isinstance(group, dict) or not isinstance(group.get("items"), list):
-                continue
-            for item in group["items"]:
-                if not isinstance(item, dict):
-                    continue
-                key = item.get("key")
-                values = item.get("values")
-                if (
-                    isinstance(key, str)
-                    and isinstance(values, list)
-                    and all(isinstance(value, str) for value in values)
-                ):
-                    values_by_key[key] = tuple(values)
+        for item in self._setting_items():
+            key = item.get("key")
+            values = item.get("values")
+            if (
+                isinstance(key, str)
+                and isinstance(values, list)
+                and all(isinstance(value, str) for value in values)
+            ):
+                values_by_key[key] = tuple(values)
         return values_by_key
 
     def with_source_filters(self, specs: list[SourceFilterSpec]) -> GenerationManifest:

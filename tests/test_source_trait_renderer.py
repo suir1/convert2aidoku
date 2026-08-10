@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from convert2aidoku.models import (
     Capability,
+    DependencyRequest,
     GeneratedFile,
     GenerationManifest,
     ImageUrlPolicy,
@@ -157,7 +158,9 @@ def test_replaces_ai_source_shell_when_all_required_providers_are_proven(
         files=[
             GeneratedFile(path="src/lib.rs", content="AI lib"),
             GeneratedFile(path="src/source.rs", content="AI invalid source shell"),
+            GeneratedFile(path="src/copymanga.rs", content="AI redundant source module"),
         ],
+        dependencies=[DependencyRequest(name="url")],
     )
 
     assert deterministic_source_shell_available(ir)
@@ -165,11 +168,13 @@ def test_replaces_ai_source_shell_when_all_required_providers_are_proven(
     files = {generated.path: generated.content for generated in effective.files}
 
     assert "AI invalid source shell" not in files["src/source.rs"]
+    assert "src/copymanga.rs" not in files
     assert "impl Source for CopyManga" in files["src/source.rs"]
     assert "crate::c2a_listing::get_search_manga_list" in files["src/source.rs"]
     assert "crate::c2a_manga_detail::get_manga_update" in files["src/source.rs"]
     assert "crate::c2a_pages::get_page_list" in files["src/source.rs"]
     assert "mod source;" in files["src/lib.rs"]
+    assert not effective.dependencies
 
 
 def test_source_shell_preserves_unowned_optional_traits(monkeypatch) -> None:
