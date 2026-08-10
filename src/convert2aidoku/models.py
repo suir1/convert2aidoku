@@ -929,6 +929,7 @@ class AIRound(BaseModel):
     purpose: Literal["generate", "repair"]
     repair_mode: RepairMode | None = None
     structured_output: bool
+    provider_called: bool = True
     reasoning_effort: Literal["auto", "off", "low", "medium", "high"] | None = None
     usage: AIUsage | None = None
     warnings: list[str] = Field(default_factory=list)

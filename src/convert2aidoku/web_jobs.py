@@ -94,7 +94,10 @@ class _WebJob:
                 for item in getattr(report, "failed_ai_exchanges", [])
                 if item.usage is not None
             )
-        ai_rounds = max(len(rounds), len(self.ai_usage_by_round))
+        provider_calls = sum(item.provider_called for item in rounds)
+        if report is not None:
+            provider_calls += len(getattr(report, "failed_ai_exchanges", []))
+        ai_rounds = max(provider_calls, len(self.ai_usage_by_round))
         total_tokens = report_tokens or sum(self.ai_usage_by_round.values())
         artifacts: dict[str, str] = {}
         if self.outcome is not None:

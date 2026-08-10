@@ -31,6 +31,7 @@ from .constants import (
     MAX_GENERATED_TOTAL_CHARS,
     TOOL_OWNED_RUST_PATHS,
 )
+from .decompiled_settings import with_deterministic_decompiled_settings
 from .dependency_policy import evaluate_dependency_policy, render_dependency_policy
 from .errors import AIProviderError, SecurityError
 from .generation_context import (
@@ -143,6 +144,7 @@ def _request_deadline(seconds: float):
 class AIResult[T: BaseModel]:
     value: T
     structured_output: bool
+    provider_called: bool = True
     reasoning_effort: ReasoningEffort | None = None
     usage: AIUsage | None = None
     repair_mode: RepairMode | None = None
@@ -162,6 +164,7 @@ class AIResult[T: BaseModel]:
         return AIResult(
             value=value,
             structured_output=self.structured_output,
+            provider_called=self.provider_called,
             reasoning_effort=self.reasoning_effort,
             usage=self.usage,
             repair_mode=repair_mode if repair_mode is not None else self.repair_mode,
@@ -450,7 +453,8 @@ def _deterministic_generation_seed(ir: SourceIR) -> GenerationManifest | None:
     if manifest is None:
         return None
     manifest = GeneratedResources(manifest).with_source_filters(ir.filter_specs)
-    return with_kotlin_settings(ir, manifest)
+    manifest = with_kotlin_settings(ir, manifest)
+    return with_deterministic_decompiled_settings(ir, manifest)
 
 
 def _with_settings_document(
@@ -973,6 +977,7 @@ class OpenAICompatibleClient:
                 structured_output=(
                     settings_result.structured_output if settings_result is not None else True
                 ),
+                provider_called=settings_result is not None,
                 reasoning_effort=(
                     settings_result.reasoning_effort
                     if settings_result is not None
@@ -1216,6 +1221,7 @@ def ai_round[T: BaseModel](number: int, purpose: str, result: AIResult[T]) -> AI
         purpose=purpose,  # type: ignore[arg-type]
         repair_mode=result.repair_mode,
         structured_output=result.structured_output,
+        provider_called=result.provider_called,
         reasoning_effort=result.reasoning_effort,
         usage=result.usage,
         warnings=result.warnings,

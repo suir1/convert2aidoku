@@ -166,7 +166,7 @@ def test_conversion_reports_generation_and_validation_progress(
         progress=progress.append,
     )
 
-    assert progress[0] == "Requesting initial AI generation"
+    assert progress[0] == "Preparing initial generation"
     assert any("AI round 1 returned" in message for message in progress)
     assert any("round 1 validation passed" in message for message in progress)
 

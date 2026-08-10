@@ -17,6 +17,7 @@ from convert2aidoku.errors import AIProviderError
 from convert2aidoku.models import (
     AIUsage,
     Capability,
+    GeneratedFile,
     GenerationManifest,
     RepairPatch,
     SourceFile,
@@ -1030,6 +1031,46 @@ def test_complete_deterministic_source_without_settings_makes_no_provider_reques
     assert result.value == seed
     assert result.reasoning_effort == ReasoningEffort.OFF
     assert result.usage is None
+    assert not result.provider_called
+
+
+def test_complete_source_with_deterministic_decompiled_settings_makes_no_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed = GenerationManifest.model_validate(_manifest())
+    settings = GeneratedFile(
+        path="res/settings.json",
+        content='[{"type":"group","items":[{"type":"text","key":"domain"}]}]',
+    )
+    monkeypatch.setattr(
+        "convert2aidoku.ai.deterministic_source_seed",
+        lambda _ir: seed,
+    )
+    monkeypatch.setattr(
+        "convert2aidoku.ai.with_deterministic_decompiled_settings",
+        lambda _ir, manifest: manifest.model_copy(update={"files": [*manifest.files, settings]}),
+    )
+
+    def unexpected_request(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("deterministic settings must not contact the provider")
+
+    ir = minimal_source_ir(
+        source_format="decompiled_apk",
+        capabilities=[Capability.SETTINGS],
+    )
+    with OpenAICompatibleClient(
+        provider_settings(),
+        transport=httpx.MockTransport(unexpected_request),
+    ) as client:
+        result = client.generate(ir)
+
+    assert result.usage is None
+    assert not result.provider_called
+    assert {generated.path for generated in result.value.files} == {
+        "src/lib.rs",
+        "res/settings.json",
+    }
+    assert initial_generation_request_characters(ir) == 0
 
 
 def test_initial_request_budget_counts_only_requests_that_will_be_sent(

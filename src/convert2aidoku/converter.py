@@ -140,14 +140,19 @@ class _ConversionRoundRunner:
         self.checkpoint.phase = "validated"
         self.store.commit(checkpoint=self.checkpoint)
         round_number = len(self.checkpoint.ai_rounds)
+        round_label = (
+            f"AI round {round_number}"
+            if not self.checkpoint.ai_rounds or self.checkpoint.ai_rounds[-1].provider_called
+            else "Deterministic generation"
+        )
         if repair_required(self.validation, self.capability_gaps, live=self.live):
             failed = next(
                 (stage.name for stage in self.validation.stages if not stage.ok),
                 "contract",
             )
-            self.progress(f"AI round {round_number} validation failed at {failed}")
+            self.progress(f"{round_label} validation failed at {failed}")
         else:
-            self.progress(f"AI round {round_number} validation passed")
+            self.progress(f"{round_label} validation passed")
 
     def accept(self, result: AIResult[GenerationManifest], *, purpose: str) -> None:
         number = len(self.checkpoint.ai_rounds) + 1
@@ -164,7 +169,8 @@ class _ConversionRoundRunner:
         )
         total_tokens = result.usage.total_tokens if result.usage is not None else None
         usage = f" ({total_tokens:,} tokens)" if total_tokens is not None else ""
-        self.progress(f"AI round {number} returned{usage}; validating")
+        label = f"AI round {number}" if result.provider_called else "Deterministic generation"
+        self.progress(f"{label} returned{usage}; validating")
         self.evaluate(result.value)
 
     def record_failed_exchange(self, exc: AIProviderError, *, purpose: str) -> None:
@@ -285,10 +291,10 @@ def convert_source(
         progress=notify,
     )
     if checkpoint.current_manifest is not None:
-        notify(f"Resuming AI round {len(checkpoint.ai_rounds)} from checkpoint")
+        notify(f"Resuming generation round {len(checkpoint.ai_rounds)} from checkpoint")
         rounds.evaluate(rounds.load())
     else:
-        notify("Requesting initial AI generation")
+        notify("Preparing initial generation")
         with OpenAICompatibleClient(settings) as client:
             try:
                 result = client.generate(ir)

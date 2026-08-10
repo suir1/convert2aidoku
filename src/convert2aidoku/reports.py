@@ -63,7 +63,9 @@ def write_report(project: Path, report: ConversionReport) -> None:
     repair_modes: Counter[str] = Counter()
     token_totals: Counter[str] = Counter()
     repair_rounds = 0
+    provider_calls = 0
     for round_result in report.ai_rounds:
+        provider_calls += int(round_result.provider_called)
         normalization_rewrites.update(round_result.normalization_rewrites)
         normalization_rewrites.update(round_result.projection_rewrites)
         contract_rules.update(round_result.contract_rule_ids)
@@ -91,6 +93,7 @@ def write_report(project: Path, report: ConversionReport) -> None:
             "cached_prompt_tokens",
         ):
             token_totals[field] += getattr(failed_exchange.usage, field) or 0
+    provider_calls += len(report.failed_ai_exchanges)
     targeted_repairs = sum(count for mode, count in repair_modes.items() if mode.endswith("_patch"))
     unclassified_repairs = repair_rounds - sum(repair_modes.values())
     lines = [
@@ -98,8 +101,8 @@ def write_report(project: Path, report: ConversionReport) -> None:
         "",
         f"- Status: **{report.status.value}**",
         f"- Input: `{report.input_ref}`",
-        f"- Model: `{report.model or 'not used'}`",
-        f"- AI rounds: {len(report.ai_rounds)}",
+        f"- Model: `{report.model if provider_calls else 'not used'}`",
+        f"- AI calls: {provider_calls}",
         "- AI tokens: "
         f"{token_totals['total_tokens']:,} total "
         f"({token_totals['prompt_tokens']:,} prompt, "

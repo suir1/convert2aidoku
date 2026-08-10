@@ -190,3 +190,26 @@ def test_report_aggregates_deterministic_rewrites_across_ai_rounds(tmp_path: Pat
     assert "`missing_settings`: 1 round(s)" in markdown
     assert "`capability_search`" in markdown
     assert "`preflight_deterministic_listing`" in markdown
+
+
+def test_report_distinguishes_deterministic_generation_from_ai_calls(tmp_path: Path) -> None:
+    report = ConversionReport(
+        status=ConversionStatus.VERIFIED,
+        input_ref="source",
+        source_id="en.example",
+        ai_rounds=[
+            {
+                "round": 1,
+                "purpose": "generate",
+                "structured_output": True,
+                "provider_called": False,
+            }
+        ],
+        validation=ValidationResult(build_ok=True, package_ok=True, live_ok=True),
+    )
+
+    write_report(tmp_path, report)
+
+    markdown = (tmp_path / "report.md").read_text(encoding="utf-8")
+    assert "AI calls: 0" in markdown
+    assert "Model: `not used`" in markdown
