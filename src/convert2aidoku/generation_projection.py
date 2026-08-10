@@ -15,6 +15,15 @@ from .generation_filter_projection import (
     _prune_redundant_dynamic_settings,
     _synthesize_recovered_dynamic_filters,
 )
+from .generation_request_projection import (
+    _prequeried_url_helpers,
+    _project_recovered_chapter_image_resolution,
+    _project_recovered_chapter_page_variants,
+    _project_recovered_detail_api_envelope,
+    _project_recovered_request_headers,
+    _project_user_agent_setting,
+    _request_builder_helpers,
+)
 from .models import Capability, GeneratedFile, GeneratedResources, GenerationManifest, SourceIR
 from .normalization_trace import NormalizationTrace
 from .rust_inspection import RustInspection
@@ -47,8 +56,8 @@ class _ProjectionContext:
             setting_defaults=resources.setting_defaults(),
             setting_keys=resources.setting_keys(),
             setting_values=resources.setting_values(),
-            prequeried_url_helpers=_implementation._prequeried_url_helpers(manifest),
-            request_builder_helpers=_implementation._request_builder_helpers(manifest),
+            prequeried_url_helpers=_prequeried_url_helpers(manifest),
+            request_builder_helpers=_request_builder_helpers(manifest),
             preserve_cover_urls=bool(
                 ir.image_url_policy and ir.image_url_policy.preserve_cover_urls
             ),
@@ -668,7 +677,7 @@ def _project_request_headers(
 ) -> _ProjectionState:
     return _with_files(
         state,
-        _implementation._project_recovered_request_headers(
+        _project_recovered_request_headers(
             context.ir,
             state.files,
             setting_defaults=context.setting_defaults,
@@ -683,7 +692,7 @@ def _project_user_agent(
 ) -> _ProjectionState:
     return _with_files(
         state,
-        _implementation._project_user_agent_setting(
+        _project_user_agent_setting(
             state.files,
             context.setting_defaults,
         ),
@@ -696,7 +705,7 @@ def _project_detail_envelope(
 ) -> _ProjectionState:
     return _with_files(
         state,
-        _implementation._project_recovered_detail_api_envelope(context.ir, state.files),
+        _project_recovered_detail_api_envelope(context.ir, state.files),
     )
 
 
@@ -706,7 +715,7 @@ def _project_chapter_page_variants(
 ) -> _ProjectionState:
     return _with_files(
         state,
-        _implementation._project_recovered_chapter_page_variants(context.ir, state.files),
+        _project_recovered_chapter_page_variants(context.ir, state.files),
     )
 
 
@@ -716,7 +725,7 @@ def _project_chapter_image_resolution(
 ) -> _ProjectionState:
     return _with_files(
         state,
-        _implementation._project_recovered_chapter_image_resolution(
+        _project_recovered_chapter_image_resolution(
             context.ir,
             state.files,
             setting_defaults=context.setting_defaults,

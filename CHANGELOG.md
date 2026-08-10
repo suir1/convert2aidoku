@@ -10,13 +10,15 @@
   the scaffold implementation so their behavior and tests have one local Module owner.
 - Give deterministic filter availability, dynamic trait synthesis, public-only pruning, query
   projection, and checkbox consumption one Generation Filter Projection Module owner.
+- Centralize recovered request headers, User-Agent settings, detail envelopes, chapter endpoint
+  variants, and image-resolution rewrites in one Generation Request Projection Module.
 
 ### Regression results
 
 - Copymanga remains live `verified` from a clean APK conversion with zero AI calls and zero tokens.
-- Komiic replay passes WASM, Clippy, packaging, verification, and its static-filter smoke test; its
-  latest core live smoke is correctly `blocked` after the site returned HTTP 200 browser-challenge
-  content to the isolated runner.
+- Komiic request projection is byte-identical to the pre-refactor output and passes WASM, Clippy,
+  packaging, and verification. Its latest live smoke is `failed`, not verified, while the local
+  network also reports `SSL_ERROR_SYSCALL` when connecting to the site.
 
 ## 0.1.0b3 — 2026-08-11
 

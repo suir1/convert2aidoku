@@ -8,6 +8,7 @@ from typing import Literal
 
 from jinja2 import Environment, StrictUndefined
 
+from .generation_request_projection import _PLATFORM_PROTOCOL_VALUES
 from .implementation_ir import (
     DataFieldIR,
     DataShapeIR,
@@ -31,7 +32,7 @@ from .models import (
 )
 from .rust_identifiers import RUST_KEYWORDS
 from .rust_inspection import RustInspection
-from .scaffold import _PLATFORM_PROTOCOL_VALUES, render_generated_lib_rs
+from .scaffold import render_generated_lib_rs
 
 
 @dataclass(frozen=True)
