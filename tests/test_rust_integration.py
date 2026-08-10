@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from convert2aidoku.listing_renderer import render_search_listing
-from convert2aidoku.manga_detail_renderer import render_manga_detail
+from convert2aidoku.manga_detail_renderer import with_deterministic_manga_detail
 from convert2aidoku.models import (
     Capability,
     DependencyRequest,
@@ -18,6 +18,7 @@ from convert2aidoku.toolchain import find_tool
 from convert2aidoku.validator import validate_project
 from tests.scenarios import minimal_source_ir, scaffold_project
 from tests.test_implementation_ir import (
+    _copymanga_chapter_page_routes,
     _copymanga_detail_files,
     _copymanga_filter_specs,
     _copymanga_listing_files,
@@ -147,6 +148,39 @@ impl aidoku::ListingProvider for Example {
 
 register_source!(Example, ListingProvider);""",
 )
+
+MANGA_UPDATE_RUST_SOURCE = """
+use aidoku::alloc::{String, Vec};
+use aidoku::{Chapter, FilterValue, Manga, MangaPageResult, Page, Result, Source};
+
+pub struct Example;
+
+impl Source for Example {
+    fn new() -> Self { Self }
+
+    fn get_search_manga_list(
+        &self,
+        query: Option<String>,
+        page: i32,
+        filters: Vec<FilterValue>,
+    ) -> Result<MangaPageResult> {
+        crate::c2a_listing::get_search_manga_list(query, page, filters)
+    }
+
+    fn get_manga_update(
+        &self,
+        manga: Manga,
+        _needs_details: bool,
+        _needs_chapters: bool,
+    ) -> Result<Manga> {
+        Ok(manga)
+    }
+
+    fn get_page_list(&self, _manga: Manga, _chapter: Chapter) -> Result<Vec<Page>> {
+        Ok(Vec::new())
+    }
+}
+"""
 
 pytestmark = pytest.mark.skipif(
     os.getenv("C2A_RUN_RUST_INTEGRATION") != "1",
@@ -297,30 +331,32 @@ def test_deterministic_manga_detail_helper_compiles_for_wasm(tmp_path: Path) -> 
         source_format="decompiled_apk",
         feature_scope="public_only",
         main_class="CopyManga",
-        capabilities=[Capability.DETAILS],
+        capabilities=[Capability.DETAILS, Capability.CHAPTERS],
         files=_copymanga_detail_files(),
+        chapter_page_routes=_copymanga_chapter_page_routes(),
         image_url_policy=ImageUrlPolicy(preserve_cover_urls=True),
         unsupported_features=[
             "Android ChineseUtils script conversion setting (excluded by public-only APK scope)"
         ],
     )
-    source = LISTING_RUST_SOURCE.replace(
-        "mod c2a_listing;",
-        "mod c2a_listing;\nmod c2a_manga_detail;",
-    )
     project, scaffold_ir = scaffold_project(tmp_path, name="manga-detail-project")
-    apply_generation_manifest(
-        project,
-        scaffold_ir,
+    manifest = with_deterministic_manga_detail(
+        detail_ir,
         GenerationManifest(
             source_struct="Example",
             files=[
-                GeneratedFile(path="src/lib.rs", content=source),
+                GeneratedFile(path="src/lib.rs", content="mod source;"),
+                GeneratedFile(path="src/source.rs", content=MANGA_UPDATE_RUST_SOURCE),
                 render_search_listing(listing_ir),
-                render_manga_detail(detail_ir),
             ],
-            dependencies=[DependencyRequest(name="serde", features=["derive"])],
         ),
+    )
+    source = next(item.content for item in manifest.files if item.path == "src/source.rs")
+    assert "crate::c2a_manga_detail::get_manga_update(" in source
+    apply_generation_manifest(
+        project,
+        scaffold_ir,
+        manifest,
         query=None,
     )
 

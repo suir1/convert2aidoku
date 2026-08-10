@@ -8,7 +8,8 @@ from typing import Any
 
 from .decompiled_input import decompiled_dto_shapes, project_java_behavior
 from .errors import InputError
-from .listing_renderer import SearchListingOwnership, search_listing_ownership
+from .listing_renderer import search_listing_ownership
+from .manga_detail_renderer import manga_update_ownership
 from .models import Capability, SourceFile, SourceIR
 
 DEFAULT_GENERATION_EVIDENCE_CHARS = 110_000
@@ -97,7 +98,8 @@ def _source_evidence(
     ir: SourceIR,
     source: SourceFile,
     *,
-    ownership: SearchListingOwnership | None,
+    excluded_methods: frozenset[str],
+    excluded_method_prefixes: tuple[str, ...],
 ) -> dict[str, Any]:
     content = source.content
     representation = "complete"
@@ -107,10 +109,15 @@ def _source_evidence(
             content,
             main=main,
             public_only=ir.feature_scope == "public_only",
-            excluded_methods=ownership.java_methods if ownership is not None else frozenset(),
-            excluded_method_prefixes=("initPreferences", "setupPreferenceScreen")
-            if Capability.SETTINGS in ir.capabilities
-            else (),
+            excluded_methods=excluded_methods,
+            excluded_method_prefixes=(
+                *excluded_method_prefixes,
+                *(
+                    ("initPreferences", "setupPreferenceScreen")
+                    if Capability.SETTINGS in ir.capabilities
+                    else ()
+                ),
+            ),
         )
         if sliced != content:
             content = sliced
@@ -145,8 +152,22 @@ def build_generation_context(
             },
         )
 
-    ownership = search_listing_ownership(ir)
-    owned_dto_types = ownership.dto_types if ownership is not None else frozenset()
+    listing_ownership = search_listing_ownership(ir)
+    update_ownership = manga_update_ownership(ir)
+    listing_dto_types = (
+        listing_ownership.dto_types if listing_ownership is not None else frozenset()
+    )
+    update_dto_types = update_ownership.dto_types if update_ownership is not None else frozenset()
+    owned_dto_types = listing_dto_types | update_dto_types
+    excluded_methods = frozenset(
+        {
+            *(listing_ownership.java_methods if listing_ownership is not None else ()),
+            *(update_ownership.java_methods if update_ownership is not None else ()),
+        }
+    )
+    excluded_method_prefixes = (
+        update_ownership.java_method_prefixes if update_ownership is not None else ()
+    )
     dto_shapes = [
         shape.render()
         for shape in decompiled_dto_shapes(ir.files)
@@ -174,7 +195,11 @@ def build_generation_context(
                     "path": source.path,
                     "sha256": source.sha256,
                     "chars": len(source.content),
-                    "reason": "represented_in_deterministic_search_listing",
+                    "reason": (
+                        "represented_in_deterministic_search_listing"
+                        if PurePosixPath(source.path).stem in listing_dto_types
+                        else "represented_in_deterministic_manga_update"
+                    ),
                 }
             )
             continue
@@ -191,7 +216,12 @@ def build_generation_context(
                 }
             )
             continue
-        evidence = _source_evidence(ir, source, ownership=ownership)
+        evidence = _source_evidence(
+            ir,
+            source,
+            excluded_methods=excluded_methods,
+            excluded_method_prefixes=excluded_method_prefixes,
+        )
         candidates.append((_evidence_priority(ir, source), index, source, evidence))
 
     essential = next(
@@ -239,7 +269,8 @@ def build_generation_context(
             "evidence_chars": total,
             "max_evidence_chars": max_chars,
             "dto_shapes": len(dto_shapes),
-            "deterministic_search_listing_dto_shapes": len(owned_dto_types),
+            "deterministic_search_listing_dto_shapes": len(listing_dto_types),
+            "deterministic_manga_update_dto_shapes": len(update_dto_types),
         },
     )
 

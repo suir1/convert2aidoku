@@ -21,11 +21,14 @@ from convert2aidoku.listing_renderer import (
     with_deterministic_search_listing,
 )
 from convert2aidoku.manga_detail_renderer import (
+    deterministic_manga_update_available,
     render_manga_detail,
     with_deterministic_manga_detail,
 )
 from convert2aidoku.models import (
     Capability,
+    ChapterPageRoute,
+    ChapterPageRouteVariant,
     GeneratedFile,
     GenerationManifest,
     ImageUrlPolicy,
@@ -425,6 +428,10 @@ def _copymanga_detail_files() -> list[SourceFile]:
                 public String comicDetailUrl(String comicPath) {
                     return getApiUrl() + "/comic2/" + comicPath;
                 }
+                public String chapterListUrl(String comicPath, String group, int offset) {
+                    return getApiUrl() + "/comic/" + comicPath + "/group/" + group
+                        + "/chapters?limit=100&offset=" + offset + "&_update=true";
+                }
                 public String url2comicPath(String value) { return normalize(value); }
             }
             """,
@@ -445,6 +452,33 @@ def _copymanga_detail_files() -> list[SourceFile]:
                     );
                     return ((ComicDetailResult) ((ApiResponse) decode(type))
                         .getResults()).getComic().toSManga("1500", language());
+                }
+                public static List fetchChapterList$lambda$6(CopyManga source, SManga manga) {
+                    ComicDetailResult comicDetailResult = detail(manga);
+                    for (GroupInfo groupInfo : comicDetailResult.getGroups().entrySet()) {
+                        int i = 0;
+                        int total = Integer.MAX_VALUE;
+                        while (i < total) {
+                            Response response = GET(ApiRepo.INSTANCE.chapterListUrl(
+                                comicPath(manga), groupInfo.getPathWord(), i
+                            ));
+                            KType type = Reflection.typeOf(
+                                ApiResponse.class,
+                                Reflection.typeOf(ChapterListResult.class)
+                            );
+                            ChapterListResult chapterListResult =
+                                (ChapterListResult) ((ApiResponse) decode(type)).getResults();
+                            chapters.addAll(chapterListResult.getList());
+                            total = chapterListResult.getTotal();
+                            i += 100;
+                        }
+                        sort((left, right) -> ComparisonsKt.compareValues(
+                            Integer.valueOf(((ChapterInfo) right).getIndex()),
+                            Integer.valueOf(((ChapterInfo) left).getIndex())
+                        ));
+                        chapter.toSChapter(position, language(), groupInfo.getName());
+                    }
+                    return chapters;
                 }
             }
             """,
@@ -515,6 +549,66 @@ def _copymanga_detail_files() -> list[SourceFile]:
             }
             """,
         ),
+        _file(
+            "sources/example/api/dto/ChapterInfo.java",
+            """
+            // C2A compacted JADX DTO: generated constructors and value methods removed.
+            public final class ChapterInfo {
+                // Serialized field names:
+                // comicPathWord -> "comic_path_word"
+                // datetimeCreated -> "datetime_created"
+                // groupPathWord -> "group_path_word"
+                private final String comicPathWord;
+                private final String datetimeCreated;
+                private final String groupPathWord;
+                private final int index;
+                private final String name;
+                private final String uuid;
+                public SChapter toSChapter(int index, CCOption language, String group) {
+                    SChapter chapter = SChapter.create();
+                    String prefix;
+                    if (group == null || group.length() == 0
+                        || Intrinsics.areEqual(this.groupPathWord, "default")) {
+                        prefix = "";
+                    } else {
+                        prefix = group + (char) 65306;
+                    }
+                    chapter.setUrl(this.comicPathWord + "/chapter/" + this.uuid);
+                    StringBuilder title = new StringBuilder();
+                    title.append(prefix);
+                    title.append(this.name);
+                    chapter.setName(TranslateKt.translate(title.toString(), language));
+                    chapter.setDate_upload(
+                        ChapterListResultKt.parseDate(this.datetimeCreated) + ((long) index)
+                    );
+                    return chapter;
+                }
+            }
+            """,
+        ),
+        _file(
+            "sources/example/api/dto/ChapterListResult.java",
+            """
+            // C2A compacted JADX DTO: generated constructors and value methods removed.
+            public final class ChapterListResult {
+                private final int limit;
+                private final List<ChapterInfo> list;
+                private final int offset;
+                private final int total;
+            }
+            """,
+        ),
+        _file(
+            "sources/example/api/dto/ChapterListResultKt.java",
+            """
+            public final class ChapterListResultKt {
+                public DateFormat invoke() {
+                    return new SimpleDateFormat("yyyy-MM-dd", Locale.getDefault());
+                }
+                public static long parseDate(String value) { return parse(value); }
+            }
+            """,
+        ),
         *[
             _file(
                 f"sources/example/api/dto/{name}.java",
@@ -534,6 +628,24 @@ def _copymanga_detail_files() -> list[SourceFile]:
                 ),
             )
         ],
+    ]
+
+
+def _copymanga_chapter_page_routes() -> list[ChapterPageRoute]:
+    return [
+        ChapterPageRoute(
+            source_method="chapterContentDetailUrl(fixChapterId(chapter.url))",
+            chapter_key_template="/comic/{comic_path}/chapter/{chapter_id}",
+            endpoint_template="/api/v3/comic/{normalized_chapter_key}",
+            variants=[
+                ChapterPageRouteVariant(
+                    name="default",
+                    condition="selected API domain is not HotManga",
+                    is_default=True,
+                    strip_prefix="/comic/",
+                )
+            ],
+        )
     ]
 
 
@@ -1385,8 +1497,9 @@ def test_projects_copymanga_detail_contract_from_parser_evidence() -> None:
         source_format="decompiled_apk",
         feature_scope="public_only",
         main_class="CopyManga",
-        capabilities=[Capability.DETAILS],
+        capabilities=[Capability.DETAILS, Capability.CHAPTERS],
         files=_copymanga_detail_files(),
+        chapter_page_routes=_copymanga_chapter_page_routes(),
         image_url_policy=ImageUrlPolicy(preserve_cover_urls=True),
         unsupported_features=[
             "Android ChineseUtils script conversion setting (excluded by public-only APK scope)"
@@ -1427,6 +1540,54 @@ def test_projects_copymanga_detail_contract_from_parser_evidence() -> None:
         )
         == 4
     )
+    assert detail.chapter_list is not None
+    chapters = detail.chapter_list
+    assert chapters.endpoint.path == "/api/v3/comic/{comic_path}/group/{group}/chapters"
+    assert [
+        (parameter.name, parameter.value_template)
+        for parameter in chapters.endpoint.query_parameters
+    ] == [("limit", "100"), ("offset", "{offset}"), ("_update", "true")]
+    assert chapters.endpoint.pagination.page_size == 100
+    assert chapters.endpoint.response_type == "ChapterListResult"
+    assert chapters.endpoint.envelope_path == "results"
+    assert chapters.endpoint.items_path == "list"
+    assert chapters.endpoint.total_path == "total"
+    assert chapters.detail_groups_path == "groups"
+    assert chapters.group_type == "GroupInfo"
+    assert chapters.group_name_path == "name"
+    assert chapters.group_key_path == "pathWord"
+    assert chapters.mapping.key_template == "/comic/{comic_path}/chapter/{chapter_id}"
+    assert chapters.mapping.comic_path_path == "comicPathWord"
+    assert chapters.mapping.chapter_id_path == "uuid"
+    assert chapters.mapping.title_path == "name"
+    assert chapters.mapping.group_path_path == "groupPathWord"
+    assert chapters.mapping.default_group_value == "default"
+    assert chapters.mapping.title_separator == "："
+    assert chapters.mapping.date_path == "datetimeCreated"
+    assert chapters.mapping.date_format == "yyyy-MM-dd"
+    assert chapters.mapping.add_position_to_date
+    assert chapters.mapping.sort_path == "index"
+    assert chapters.mapping.sort_descending
+    assert chapters.mapping.unresolved_fields == []
+    assert chapters.mapping.policy_fallback_fields == ["title"]
+    assert not [fact for fact in implementation.unresolved_facts if "chapter" in fact]
+    context = build_generation_context(ir).as_payload()
+    evidence = {item["path"]: item["content"] for item in context["source_evidence"]}
+    main_evidence = evidence["sources/example/CopyManga.java"]
+    assert "mangaDetailsRequest" not in main_evidence
+    assert "mangaDetailsParse" not in main_evidence
+    assert "fetchChapterList" not in main_evidence
+    api_evidence = evidence["sources/example/ApiRepo.java"]
+    assert "comicDetailUrl" not in api_evidence
+    assert "chapterListUrl" not in api_evidence
+    omitted = {item["path"]: item["reason"] for item in context["omitted_source_files"]}
+    assert omitted["sources/example/api/dto/ComicDetail.java"] == (
+        "represented_in_deterministic_manga_update"
+    )
+    assert omitted["sources/example/api/dto/ChapterInfo.java"] == (
+        "represented_in_deterministic_manga_update"
+    )
+    assert context["context_stats"]["deterministic_manga_update_dto_shapes"] >= 8
     rendered = render_manga_detail(ir, implementation)
     assert rendered.path == "src/c2a_manga_detail.rs"
     assert '"/api/v3/comic2/{}"' in rendered.content
@@ -1439,13 +1600,38 @@ def test_projects_copymanga_detail_contract_from_parser_evidence() -> None:
     assert "manga.description = Some(item.brief);" in rendered.content
     assert "0 => MangaStatus::Ongoing" in rendered.content
     assert "1 => MangaStatus::Completed" in rendered.content
+    assert "pub(crate) fn get_manga_update(" in rendered.content
+    assert "groups: &BTreeMap<String, GroupInfo>" in rendered.content
+    assert '"/api/v3/comic/{}/group/{}/chapters?limit=100&offset={}&_update=true"' in (
+        rendered.content
+    )
+    assert "items.sort_by_key(|item| core::cmp::Reverse(item.index));" in rendered.content
+    assert 'let key = format!("/comic/{}/chapter/{}"' in rendered.content
+    assert 'title.push_str("：");' in rendered.content
+    assert "&item.datetime_created," in rendered.content
+    assert '"yyyy-MM-dd",' in rendered.content
     effective = with_deterministic_manga_detail(
         ir,
         GenerationManifest(
             source_struct="CopyManga",
             files=[
                 GeneratedFile(path="src/lib.rs", content="mod source;"),
-                GeneratedFile(path="src/source.rs", content="pub struct CopyManga;"),
+                GeneratedFile(
+                    path="src/source.rs",
+                    content="""
+                    pub struct CopyManga;
+                    impl Source for CopyManga {
+                        fn get_manga_update(
+                            &self,
+                            manga: Manga,
+                            needs_details: bool,
+                            needs_chapters: bool,
+                        ) -> Result<Manga> {
+                            panic!("AI update")
+                        }
+                    }
+                    """,
+                ),
                 GeneratedFile(path="src/c2a_listing.rs", content="fn listing() {}"),
                 GeneratedFile(
                     path="src/c2a_manga_detail.rs",
@@ -1456,6 +1642,8 @@ def test_projects_copymanga_detail_contract_from_parser_evidence() -> None:
     )
     effective_files = {generated.path: generated.content for generated in effective.files}
     assert "compile_error!" not in effective_files["src/c2a_manga_detail.rs"]
+    assert "AI update" not in effective_files["src/source.rs"]
+    assert "crate::c2a_manga_detail::get_manga_update(" in effective_files["src/source.rs"]
     assert "mod c2a_manga_detail;" in effective_files["src/lib.rs"]
     assert any(dependency.name == "serde" for dependency in effective.dependencies)
     assert any(warning.startswith("Deterministic manga detail") for warning in effective.warnings)
@@ -1520,6 +1708,67 @@ def test_ambiguous_detail_url_helper_stays_unresolved() -> None:
     assert "manga detail request or response contract is unresolved" in (
         implementation.unresolved_facts
     )
+
+
+def test_unknown_chapter_title_transform_blocks_update_ownership() -> None:
+    files = _copymanga_detail_files()
+    chapter = next(file for file in files if file.path.endswith("ChapterInfo.java"))
+    chapter.content = chapter.content.replace(
+        "TranslateKt.translate(title.toString(), language)",
+        "decrypt(title.toString(), language)",
+    )
+    chapter.sha256 = hashlib.sha256(chapter.content.encode()).hexdigest()
+    ir = minimal_source_ir(
+        source_format="decompiled_apk",
+        feature_scope="public_only",
+        capabilities=[Capability.DETAILS, Capability.CHAPTERS],
+        files=files,
+        chapter_page_routes=_copymanga_chapter_page_routes(),
+        image_url_policy=ImageUrlPolicy(preserve_cover_urls=True),
+        unsupported_features=[
+            "Android ChineseUtils script conversion setting (excluded by public-only APK scope)"
+        ],
+    )
+
+    implementation = project_implementation_ir(ir)
+
+    assert implementation.manga_detail is not None
+    assert implementation.manga_detail.chapter_list is not None
+    assert implementation.manga_detail.chapter_list.mapping.title_path is None
+    assert "chapter title mapping is unresolved for ChapterInfo" in implementation.unresolved_facts
+    assert not deterministic_manga_update_available(ir)
+
+
+def test_ambiguous_chapter_endpoint_blocks_update_ownership() -> None:
+    files = _copymanga_detail_files()
+    files.append(
+        _file(
+            "sources/example/MirrorChapters.java",
+            """
+            public final class MirrorChapters {
+                public String chapterListUrl(String comicPath, String group, int offset) {
+                    return getApiUrl() + "/mirror/" + comicPath + "/" + group
+                        + "?limit=100&offset=" + offset;
+                }
+            }
+            """,
+        )
+    )
+    ir = minimal_source_ir(
+        source_format="decompiled_apk",
+        capabilities=[Capability.DETAILS, Capability.CHAPTERS],
+        files=files,
+        chapter_page_routes=_copymanga_chapter_page_routes(),
+    )
+
+    implementation = project_implementation_ir(ir)
+
+    assert implementation.manga_detail is not None
+    assert implementation.manga_detail.chapter_list is None
+    assert "chapter list request or response contract is unresolved" in (
+        implementation.unresolved_facts
+    )
+    assert not deterministic_manga_update_available(ir)
 
 
 def test_non_string_next_field_does_not_emit_string_cursor_logic() -> None:

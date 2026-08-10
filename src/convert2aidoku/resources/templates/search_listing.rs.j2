@@ -1,4 +1,7 @@
 use aidoku::alloc::string::ToString;
+{% if uses_btree_map %}
+use aidoku::alloc::collections::BTreeMap;
+{% endif %}
 use aidoku::alloc::{format, String, Vec};
 use aidoku::helpers::uri::encode_uri_component;
 use aidoku::imports::defaults::defaults_get;

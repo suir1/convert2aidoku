@@ -253,12 +253,101 @@ class MangaDetailEndpointIR(BaseModel):
         return self
 
 
+ChapterProjectionField = Literal["key", "title", "date"]
+
+
+class ChapterMappingIR(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item_type: str
+    key_template: str | None = None
+    comic_path_path: str | None = None
+    chapter_id_path: str | None = None
+    title_path: str | None = None
+    group_path_path: str | None = None
+    default_group_value: str | None = None
+    title_separator: str | None = None
+    date_path: str | None = None
+    date_format: str | None = None
+    add_position_to_date: bool = False
+    sort_path: str | None = None
+    sort_descending: bool = False
+    unresolved_fields: list[ChapterProjectionField] = Field(default_factory=list)
+    policy_fallback_fields: list[ChapterProjectionField] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def mapping_contract_is_consistent(self) -> ChapterMappingIR:
+        if len(self.unresolved_fields) != len(set(self.unresolved_fields)):
+            raise ValueError("unresolved chapter fields must be unique")
+        if len(self.policy_fallback_fields) != len(set(self.policy_fallback_fields)):
+            raise ValueError("policy fallback chapter fields must be unique")
+        if overlap := set(self.unresolved_fields) & set(self.policy_fallback_fields):
+            raise ValueError(
+                "chapter fields cannot be unresolved and policy fallbacks: "
+                + ", ".join(sorted(overlap))
+            )
+        key_parts = (self.key_template, self.comic_path_path, self.chapter_id_path)
+        if any(value is not None for value in key_parts) and not all(
+            value is not None for value in key_parts
+        ):
+            raise ValueError("chapter key template and field paths must be declared together")
+        group_parts = (self.group_path_path, self.default_group_value, self.title_separator)
+        if any(value is not None for value in group_parts) and not all(
+            value is not None for value in group_parts
+        ):
+            raise ValueError("chapter group title fields must be declared together")
+        date_parts = (self.date_path, self.date_format)
+        if any(value is not None for value in date_parts) and not all(
+            value is not None for value in date_parts
+        ):
+            raise ValueError("chapter date path and format must be declared together")
+        projections = {
+            "key": self.key_template,
+            "title": self.title_path,
+            "date": self.date_path,
+        }
+        missing = [field for field in self.policy_fallback_fields if projections[field] is None]
+        if missing:
+            raise ValueError(
+                "policy fallback chapter fields require a recovered projection: "
+                + ", ".join(missing)
+            )
+        return self
+
+
+class ChapterListEndpointIR(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_method: str = Field(min_length=1)
+    path: str = Field(pattern=r"^/")
+    query_parameters: list[QueryParameterIR] = Field(default_factory=list)
+    pagination: PaginationIR
+    response_type: str
+    response_evidence: Literal["parser_path"]
+    envelope_path: str | None = None
+    items_path: str
+    total_path: str
+
+
+class ChapterListImplementationIR(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    endpoint: ChapterListEndpointIR
+    detail_groups_path: str
+    group_type: str
+    group_name_path: str
+    group_key_path: str
+    data_shapes: list[DataShapeIR] = Field(default_factory=list)
+    mapping: ChapterMappingIR
+
+
 class MangaDetailImplementationIR(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     endpoint: MangaDetailEndpointIR
     data_shapes: list[DataShapeIR] = Field(default_factory=list)
     mapping: MangaDetailMappingIR
+    chapter_list: ChapterListImplementationIR | None = None
 
 
 class ListingSelectionIR(BaseModel):
@@ -1395,6 +1484,14 @@ def _list_item_type(source_type: str) -> str | None:
     return found.group(1).strip() if found else None
 
 
+def _map_value_type(source_type: str) -> str | None:
+    found = re.fullmatch(
+        r"(?:java\.util\.)?Map<\s*[^,<>]+\s*,\s*([^<>]+?)\s*>",
+        source_type,
+    )
+    return found.group(1).strip() if found else None
+
+
 def _response_envelope_paths(
     java: str,
     shapes: tuple[DecompiledDtoShape, ...],
@@ -1641,6 +1738,26 @@ def _string_template(argument: str, shape: DecompiledDtoShape) -> str | None:
         result += f"{{{field.name}}}"
         has_field = True
     return result if has_field and result.startswith("/") and "://" not in result else None
+
+
+def _field_string_template(argument: str, shape: DecompiledDtoShape) -> str | None:
+    result = ""
+    has_field = False
+    for token in _split_java_concatenation(argument):
+        literal = _string_literal(token)
+        if literal is not None:
+            if "{" in literal or "}" in literal:
+                return None
+            result += literal
+            continue
+        field_match = re.fullmatch(r"\s*this\.([A-Za-z_][A-Za-z0-9_]*)\s*", token)
+        if field_match is None or not any(
+            field.name == field_match.group(1) for field in shape.fields
+        ):
+            return None
+        result += "{" + field_match.group(1) + "}"
+        has_field = True
+    return result if has_field and "://" not in result else None
 
 
 def _setter_collection_projection(
@@ -2190,6 +2307,397 @@ def _manga_detail_mapping(
     )
 
 
+def _chapter_list_method_block(java: str) -> str:
+    candidates: list[str] = []
+    for declaration in re.finditer(
+        r"\b(?:public|protected|private)\s+(?:static\s+)?(?:final\s+)?"
+        r"[^;{}]+?\s+(fetchChapterList[A-Za-z0-9_$]*)\s*\([^)]*\)"
+        r"\s*(?:throws\s+[^\{]+)?\{",
+        java,
+    ):
+        block = _brace_block(java, declaration.start())
+        if "chapterListUrl" in block and "ChapterListResult" in block:
+            candidates.append(block)
+    return candidates[0] if len(candidates) == 1 else ""
+
+
+def _chapter_key_projection(
+    ir: SourceIR,
+    block: str,
+    shape: DecompiledDtoShape,
+) -> tuple[str | None, str | None, str | None]:
+    argument = _setter_argument(block, "setUrl")
+    source_template = _field_string_template(argument, shape) if argument else None
+    if source_template is None:
+        return None, None, None
+    source_fields = re.findall(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", source_template)
+    if len(source_fields) != 2:
+        return None, None, None
+    source_canonical = (
+        source_template if source_template.startswith("/") else "/comic/" + source_template
+    )
+    source_shape = re.sub(r"\{[A-Za-z_][A-Za-z0-9_]*\}", "{}", source_canonical)
+    routes = [
+        route
+        for route in ir.chapter_page_routes
+        if len(re.findall(r"\{[A-Za-z_][A-Za-z0-9_]*\}", route.chapter_key_template)) == 2
+        and re.sub(
+            r"\{[A-Za-z_][A-Za-z0-9_]*\}",
+            "{}",
+            route.chapter_key_template,
+        )
+        == source_shape
+    ]
+    if len(routes) != 1:
+        return None, None, None
+    return routes[0].chapter_key_template, source_fields[0], source_fields[1]
+
+
+def _chapter_title_projection(
+    block: str,
+    shape: DecompiledDtoShape,
+    *,
+    allowed_wrapper_variables: frozenset[str],
+) -> tuple[str | None, str | None, str | None, str | None, bool]:
+    argument = _setter_argument(block, "setName")
+    if argument is None:
+        return None, None, None, None, False
+    direct = re.fullmatch(r"\s*this\.([A-Za-z_][A-Za-z0-9_]*)\s*", argument)
+    if direct is not None and any(field.name == direct.group(1) for field in shape.fields):
+        return direct.group(1), None, None, None, False
+    expression, policy_fallback = _unwrap_script_conversion(
+        argument,
+        allowed_wrapper_variables,
+    )
+    builder = re.fullmatch(r"\s*([A-Za-z_][A-Za-z0-9_]*)\.toString\s*\(\s*\)\s*", expression)
+    if builder is None or not policy_fallback:
+        return None, None, None, None, False
+    builder_name = builder.group(1)
+    append_fields = re.findall(
+        rf"\b{re.escape(builder_name)}\.append\(\s*this\."
+        r"([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*;",
+        block,
+    )
+    if len(append_fields) != 1 or not any(field.name == append_fields[0] for field in shape.fields):
+        return None, None, None, None, False
+    default = re.search(
+        r"Intrinsics\.areEqual\(\s*this\.([A-Za-z_][A-Za-z0-9_]*)\s*,\s*"
+        r'"((?:\\.|[^"\\])*)"\s*\)',
+        block,
+    )
+    separator = re.search(
+        r"[A-Za-z_][A-Za-z0-9_]*\s*\+\s*\(char\)\s*(\d+)",
+        block,
+    )
+    if default is None or separator is None:
+        return None, None, None, None, False
+    group_path = default.group(1)
+    if not any(field.name == group_path for field in shape.fields):
+        return None, None, None, None, False
+    codepoint = int(separator.group(1))
+    if not 0 <= codepoint <= 0x10FFFF:
+        return None, None, None, None, False
+    return (
+        append_fields[0],
+        group_path,
+        _decode_java_string(default.group(2)),
+        chr(codepoint),
+        True,
+    )
+
+
+def _chapter_date_projection(
+    block: str,
+    shape: DecompiledDtoShape,
+    files: tuple[SourceFile, ...],
+    position_variables: frozenset[str],
+) -> tuple[str | None, str | None, bool]:
+    argument = _setter_argument(block, "setDate_upload")
+    found = re.fullmatch(
+        r"\s*(?:(?:[A-Za-z_][A-Za-z0-9_$]*)\.)*"
+        r"([A-Za-z_][A-Za-z0-9_]*)\.parseDate\(\s*this\."
+        r"([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*\+\s*"
+        r"\(\(long\)\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*",
+        argument or "",
+    )
+    if (
+        found is None
+        or found.group(3) not in position_variables
+        or not any(field.name == found.group(2) for field in shape.fields)
+    ):
+        return None, None, False
+    helper = next(
+        (source.content for source in files if PurePosixPath(source.path).stem == found.group(1)),
+        None,
+    )
+    formats = set(
+        _decode_java_string(value)
+        for value in re.findall(
+            r'new\s+SimpleDateFormat\(\s*"((?:\\.|[^"\\])*)"',
+            helper or "",
+        )
+    )
+    if len(formats) != 1:
+        return None, None, False
+    return found.group(2), next(iter(formats)), True
+
+
+def _chapter_sort_path(block: str, item_type: str) -> str | None:
+    found = re.search(
+        rf"compareValues\([\s\S]*?\(\({re.escape(item_type)}\)\s*"
+        r"[A-Za-z_][A-Za-z0-9_]*\)\.get([A-Z][A-Za-z0-9_]*)\(\)\)[\s\S]*?"
+        rf"\(\({re.escape(item_type)}\)\s*[A-Za-z_][A-Za-z0-9_]*\)\.get"
+        r"([A-Z][A-Za-z0-9_]*)\(\)\)",
+        block,
+    )
+    if found is None or found.group(1) != found.group(2):
+        return None
+    return found.group(1)[:1].lower() + found.group(1)[1:]
+
+
+def _chapter_mapping(
+    ir: SourceIR,
+    files: tuple[SourceFile, ...],
+    shapes: tuple[DecompiledDtoShape, ...],
+    *,
+    item_type: str,
+    chapter_block: str,
+) -> ChapterMappingIR | None:
+    shape = next((shape for shape in shapes if shape.name == item_type), None)
+    source = next(
+        (source for source in files if PurePosixPath(source.path).stem == item_type),
+        None,
+    )
+    if shape is None or source is None:
+        return None
+    found = re.search(r"\btoSChapter\s*\(([^)]*)\)\s*\{", source.content)
+    if found is None:
+        return None
+    block = _brace_block(source.content, found.start())
+    allow_script_fallback = ir.feature_scope == "public_only" and any(
+        "ChineseUtils script conversion" in feature for feature in ir.unsupported_features
+    )
+    wrapper_variables = (
+        frozenset(
+            match.group(1)
+            for match in re.finditer(
+                r"\bCCOption\s+([A-Za-z_][A-Za-z0-9_]*)",
+                found.group(1),
+            )
+        )
+        if allow_script_fallback
+        else frozenset()
+    )
+    key_template, comic_path_path, chapter_id_path = _chapter_key_projection(ir, block, shape)
+    (
+        title_path,
+        group_path,
+        default_group_value,
+        title_separator,
+        title_fallback,
+    ) = _chapter_title_projection(
+        block,
+        shape,
+        allowed_wrapper_variables=wrapper_variables,
+    )
+    date_path, date_format, add_position = _chapter_date_projection(
+        block,
+        shape,
+        files,
+        frozenset(
+            match.group(1)
+            for match in re.finditer(
+                r"\bint\s+([A-Za-z_][A-Za-z0-9_]*)",
+                found.group(1),
+            )
+        ),
+    )
+    sort_path = _chapter_sort_path(chapter_block, item_type)
+    if sort_path is not None and not any(field.name == sort_path for field in shape.fields):
+        sort_path = None
+    unresolved: list[ChapterProjectionField] = []
+    for field, projection, setter in (
+        ("key", key_template, "setUrl"),
+        ("title", title_path, "setName"),
+        ("date", date_path, "setDate_upload"),
+    ):
+        if re.search(rf"\b{setter}\s*\(", block) and projection is None:
+            unresolved.append(field)  # type: ignore[arg-type]
+    return ChapterMappingIR(
+        item_type=item_type,
+        key_template=key_template,
+        comic_path_path=comic_path_path,
+        chapter_id_path=chapter_id_path,
+        title_path=title_path,
+        group_path_path=group_path,
+        default_group_value=default_group_value,
+        title_separator=title_separator,
+        date_path=date_path,
+        date_format=date_format,
+        add_position_to_date=add_position,
+        sort_path=sort_path,
+        sort_descending=sort_path is not None,
+        unresolved_fields=unresolved,
+        policy_fallback_fields=["title"] if title_fallback else [],
+    )
+
+
+def _project_chapter_list(
+    ir: SourceIR,
+    java: str,
+    shapes: tuple[DecompiledDtoShape, ...],
+    api_base: ApiBaseIR,
+    detail: MangaDetailImplementationIR,
+) -> ChapterListImplementationIR | None:
+    block = _chapter_list_method_block(java)
+    if not block:
+        return None
+    called_methods = set(_api_repo_method_calls(block))
+    endpoints: list[tuple[str, str]] = []
+    for name, parameters, method_block in _java_string_methods(java):
+        if name not in called_methods:
+            continue
+        expression = _return_expression(method_block)
+        template = (
+            _expression_path(expression, parameters=parameters, base_path=api_base.path_prefix)
+            if expression is not None
+            else None
+        )
+        if template is not None and {"{comic_path}", "{group}", "{offset}"}.issubset(
+            set(re.findall(r"\{[A-Za-z_][A-Za-z0-9_]*\}", template))
+        ):
+            endpoints.append((name, template))
+    if len(endpoints) != 1:
+        return None
+    source_method, template = endpoints[0]
+    path, _, query = template.partition("?")
+    query_parameters = _query_parameters(query)
+    pagination = _pagination(query_parameters, page_size=100)
+    if pagination is None or pagination.kind != "offset" or pagination.page_size is None:
+        return None
+    segment = block[block.find(source_method) :]
+    envelope_types = {
+        shape.name for shape in shapes if any(field.java_type == "T" for field in shape.fields)
+    }
+    response_types = {
+        type_name
+        for type_name in re.findall(
+            r"Reflection\.typeOf\(\s*([A-Za-z_][A-Za-z0-9_]*)\.class",
+            segment,
+        )
+        if any(shape.name == type_name for shape in shapes) and type_name not in envelope_types
+    }
+    if len(response_types) != 1:
+        return None
+    response_type = next(iter(response_types))
+    response_shape = next(shape for shape in shapes if shape.name == response_type)
+    getter_names = {
+        getter[:1].lower() + getter[1:]
+        for getter in re.findall(
+            rf"\b{re.escape(response_type[:1].lower() + response_type[1:])}\.get"
+            r"([A-Z][A-Za-z0-9_]*)\s*\(",
+            segment,
+        )
+    }
+    items_fields = [
+        field
+        for field in response_shape.fields
+        if field.name in getter_names and _list_item_type(field.java_type) is not None
+    ]
+    total_fields = [
+        field
+        for field in response_shape.fields
+        if field.name in getter_names and field.java_type in {"int", "Integer"}
+    ]
+    if len(items_fields) != 1 or len(total_fields) != 1:
+        return None
+    item_type = _list_item_type(items_fields[0].java_type)
+    detail_shape = next(
+        (shape for shape in shapes if shape.name == detail.endpoint.response_type),
+        None,
+    )
+    detail_variable = detail.endpoint.response_type[:1].lower() + detail.endpoint.response_type[1:]
+    group_getter = re.search(
+        rf"\b{re.escape(detail_variable)}"
+        r"\.get([A-Z][A-Za-z0-9_]*)\(\)\.entrySet\(\)",
+        block,
+    )
+    if item_type is None or detail_shape is None or group_getter is None:
+        return None
+    groups_path = group_getter.group(1)[:1].lower() + group_getter.group(1)[1:]
+    groups_field = next((field for field in detail_shape.fields if field.name == groups_path), None)
+    group_type = _map_value_type(groups_field.java_type) if groups_field is not None else None
+    group_shape = next((shape for shape in shapes if shape.name == group_type), None)
+    if group_type is None or group_shape is None:
+        return None
+    group_getters = {
+        getter[:1].lower() + getter[1:]
+        for getter in re.findall(
+            rf"\b{re.escape(group_type[:1].lower() + group_type[1:])}\.get"
+            r"([A-Z][A-Za-z0-9_]*)\s*\(",
+            block,
+        )
+    }
+    group_name = next(
+        (
+            field.name
+            for field in group_shape.fields
+            if field.name == "name" and field.name in group_getters
+        ),
+        None,
+    )
+    group_key = next(
+        (
+            field.name
+            for field in group_shape.fields
+            if field.name in {"pathWord", "key", "id"} and field.name in group_getters
+        ),
+        None,
+    )
+    if group_name is None or group_key is None:
+        return None
+    group_variable = group_type[:1].lower() + group_type[1:]
+    group_name_getter = group_name[:1].upper() + group_name[1:]
+    if (
+        re.search(
+            rf"\.toSChapter\([\s\S]{{0,300}}?\b{re.escape(group_variable)}\.get"
+            rf"{re.escape(group_name_getter)}\(\)\s*\)",
+            block,
+        )
+        is None
+    ):
+        return None
+    mapping = _chapter_mapping(
+        ir,
+        tuple(ir.files),
+        shapes,
+        item_type=item_type,
+        chapter_block=block,
+    )
+    if mapping is None:
+        return None
+    endpoint = ChapterListEndpointIR(
+        source_method=source_method,
+        path=path,
+        query_parameters=query_parameters,
+        pagination=pagination,
+        response_type=response_type,
+        response_evidence="parser_path",
+        envelope_path=_response_envelope_paths(java, shapes).get(response_type),
+        items_path=items_fields[0].name,
+        total_path=total_fields[0].name,
+    )
+    return ChapterListImplementationIR(
+        endpoint=endpoint,
+        detail_groups_path=groups_path,
+        group_type=group_type,
+        group_name_path=group_name,
+        group_key_path=group_key,
+        data_shapes=_data_shape_closure(shapes, {response_type, item_type, group_type}),
+        mapping=mapping,
+    )
+
+
 def _data_shape_closure(
     shapes: tuple[DecompiledDtoShape, ...],
     roots: set[str],
@@ -2235,11 +2743,13 @@ def _project_manga_detail(
     )
     if mapping is None:
         return None
-    return MangaDetailImplementationIR(
+    detail = MangaDetailImplementationIR(
         endpoint=endpoint,
         data_shapes=_data_shape_closure(shapes, {endpoint.response_type, item_type}),
         mapping=mapping,
     )
+    chapter_list = _project_chapter_list(ir, java, shapes, api_base, detail)
+    return detail.model_copy(update={"chapter_list": chapter_list})
 
 
 def _listing_data_shapes(
@@ -2357,6 +2867,21 @@ def project_implementation_ir(ir: SourceIR) -> ImplementationIR:
                 policy_fallbacks.append(
                     f"manga detail {field} uses the raw API field for "
                     f"{manga_detail.mapping.item_type} because its presentation transform is "
+                    "excluded by SourceIR policy"
+                )
+    if Capability.CHAPTERS in ir.capabilities:
+        chapter_list = manga_detail.chapter_list if manga_detail is not None else None
+        if chapter_list is None:
+            unresolved.append("chapter list request or response contract is unresolved")
+        else:
+            for field in chapter_list.mapping.unresolved_fields:
+                unresolved.append(
+                    f"chapter {field} mapping is unresolved for {chapter_list.mapping.item_type}"
+                )
+            for field in chapter_list.mapping.policy_fallback_fields:
+                policy_fallbacks.append(
+                    f"chapter {field} uses the raw API field for "
+                    f"{chapter_list.mapping.item_type} because its presentation transform is "
                     "excluded by SourceIR policy"
                 )
     return ImplementationIR(

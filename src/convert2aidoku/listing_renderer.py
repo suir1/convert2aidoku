@@ -252,11 +252,22 @@ def _inner_list_type(source_type: str) -> str | None:
     return found.group(1).strip() if found else None
 
 
+def _inner_map_types(source_type: str) -> tuple[str, str] | None:
+    found = re.fullmatch(
+        r"(?:java\.util\.)?Map<\s*([^,<>]+?)\s*,\s*([^<>]+?)\s*>",
+        source_type,
+    )
+    return (found.group(1).strip(), found.group(2).strip()) if found else None
+
+
 def _rust_type(source_type: str) -> str:
     source_type = source_type.strip()
     inner = _inner_list_type(source_type)
     if inner is not None:
         return f"Vec<{_rust_type(inner)}>"
+    map_types = _inner_map_types(source_type)
+    if map_types is not None:
+        return f"BTreeMap<{_rust_type(map_types[0])}, {_rust_type(map_types[1])}>"
     return {
         "String": "String",
         "int": "i32",
@@ -707,6 +718,7 @@ def render_search_listing(
         if endpoint.response_type is not None
     }
     mapping_views = [_mapping_view(mappings[type_name], shapes) for type_name in mapping_types]
+    structs = _required_structs(selected, containers, mappings, shapes)
     global_headers, default_profile, conditional_profiles = _header_views(
         ir,
         listing.api_base.default_host,
@@ -735,7 +747,12 @@ def render_search_listing(
                 f"{listing.api_base.setting_key}_custom" if listing.api_base.setting_key else None
             ),
             api_default_host=listing.api_base.default_host,
-            structs=_required_structs(selected, containers, mappings, shapes),
+            structs=structs,
+            uses_btree_map=any(
+                field.rust_type.startswith("BTreeMap<")
+                for struct in structs
+                for field in struct.fields
+            ),
             mappings=sorted(mapping_views, key=lambda item: item.type_name),
             endpoints=views,
             query_endpoint=views_by_id[dispatch.query_endpoint_id],

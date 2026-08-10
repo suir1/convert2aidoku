@@ -43,7 +43,10 @@ from .listing_renderer import (
     deterministic_listing_provider_available,
     deterministic_search_listing_available,
 )
-from .manga_detail_renderer import deterministic_manga_detail_available
+from .manga_detail_renderer import (
+    deterministic_manga_detail_available,
+    deterministic_manga_update_available,
+)
 from .models import (
     AIRound,
     AIUsage,
@@ -307,6 +310,7 @@ def _generation_messages(
     deterministic_listing = deterministic_search_listing_available(ir)
     deterministic_provider = deterministic_listing_provider_available(ir)
     deterministic_detail = deterministic_listing and deterministic_manga_detail_available(ir)
+    deterministic_update = deterministic_listing and deterministic_manga_update_available(ir)
     listing_instruction = (
         "The tool deterministically owns src/c2a_listing.rs for search, rank, and browse. "
         "Do not return that file or reimplement its exclusive endpoints and DTOs. Implement "
@@ -321,14 +325,22 @@ def _generation_messages(
             "ListingProvider; do not implement get_manga_list or include ListingProvider "
             "in implemented_traits. "
         )
-    detail_instruction = (
-        "The tool also owns src/c2a_manga_detail.rs. Do not return that file or duplicate its "
-        "detail endpoint and DTOs. When needs_details is true, assign "
-        "manga = crate::c2a_manga_detail::get_manga_details(manga)?; the helper preserves existing "
-        "chapters and other Manga state. Continue to implement chapter fetching yourself. "
-        if deterministic_detail
-        else ""
-    )
+    if deterministic_update:
+        detail_instruction = (
+            "The tool also owns src/c2a_manga_detail.rs for details and chapters. Do not return "
+            "that file or duplicate its endpoints and DTOs. Implement Source::get_manga_update "
+            "as the single delegation expression crate::c2a_manga_detail::get_manga_update("
+            "manga, needs_details, needs_chapters). "
+        )
+    elif deterministic_detail:
+        detail_instruction = (
+            "The tool also owns src/c2a_manga_detail.rs. Do not return that file or duplicate its "
+            "detail endpoint and DTOs. When needs_details is true, assign manga = "
+            "crate::c2a_manga_detail::get_manga_details(manga)?; the helper preserves existing "
+            "chapters and other Manga state. Continue to implement chapter fetching yourself. "
+        )
+    else:
+        detail_instruction = ""
     return [
         {
             "role": "system",

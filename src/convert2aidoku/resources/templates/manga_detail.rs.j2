@@ -1,6 +1,21 @@
+{% if uses_btree_map %}
+use aidoku::alloc::collections::BTreeMap;
+{% endif %}
 use aidoku::alloc::{format, String{% if uses_vec %}, Vec{% endif %}};
+{% if detail.chapter and detail.chapter.date_field %}
+use aidoku::imports::std::parse_date;
+{% endif %}
 use aidoku::serde::Deserialize;
-use aidoku::{Manga{% if detail.status %}, MangaStatus{% endif %}, Result};
+use aidoku::{
+{% if detail.chapter %}
+    Chapter,
+{% endif %}
+    Manga,
+{% if detail.status %}
+    MangaStatus,
+{% endif %}
+    Result,
+};
 
 const DETAIL_SITE_URL: &str = {{ site_url | rust_string }};
 
@@ -22,7 +37,100 @@ struct DetailEnvelope {
 }
 
 {% endif %}
+{% if detail.chapter and detail.chapter.envelope_path %}
+#[derive(Deserialize)]
+struct ChapterEnvelope {
+    #[serde(rename = {{ detail.chapter.envelope_path | rust_string }})]
+    value: {{ detail.chapter.response_type }},
+}
+
+{% endif %}
+{% if detail.chapter %}
+fn fetch_chapters(
+    manga_path: &str,
+    groups: &BTreeMap<String, {{ detail.chapter.group_type }}>,
+) -> Result<Vec<Chapter>> {
+    let mut chapters = Vec::new();
+    for group in groups.values() {
+        let mut offset = 0_i32;
+        let mut position = 0_i64;
+        loop {
+            let endpoint = crate::c2a_listing::api_url(&format!(
+                {{ detail.chapter.endpoint_format | rust_string }},
+{% for argument in detail.chapter.endpoint_arguments %}
+                {{ argument }},
+{% endfor %}
+            ));
+{% if detail.chapter.envelope_path %}
+            let response: ChapterEnvelope = crate::c2a_listing::get_json(endpoint)?;
+            let result = response.value;
+{% else %}
+            let result: {{ detail.chapter.response_type }} =
+                crate::c2a_listing::get_json(endpoint)?;
+{% endif %}
+            let received = result.{{ detail.chapter.items_field }}.len() as i32;
+            let total = result.{{ detail.chapter.total_field }};
+            let mut items = result.{{ detail.chapter.items_field }};
+{% if detail.chapter.sort_field %}
+{% if detail.chapter.sort_descending %}
+            items.sort_by_key(|item| core::cmp::Reverse(item.{{ detail.chapter.sort_field }}));
+{% else %}
+            items.sort_by_key(|item| item.{{ detail.chapter.sort_field }});
+{% endif %}
+{% endif %}
+            for item in items {
+                let chapter_comic_path = if item.{{ detail.chapter.comic_path_field }}.is_empty() {
+                    manga_path
+                } else {
+                    item.{{ detail.chapter.comic_path_field }}
+                        .trim_start_matches("/comic/")
+                        .trim_start_matches('/')
+                };
+                let mut title = String::new();
+{% if detail.chapter.group_path_field %}
+                if !group.{{ detail.chapter.group_name_field }}.is_empty()
+                    && item.{{ detail.chapter.group_path_field }} != {{ detail.chapter.default_group_value | rust_string }}
+                {
+                    title.push_str(&group.{{ detail.chapter.group_name_field }});
+                    title.push_str({{ detail.chapter.title_separator | rust_string }});
+                }
+{% endif %}
+                title.push_str(&item.{{ detail.chapter.title_field }});
+                let key = {{ detail.chapter.key_expression }};
+                chapters.push(Chapter {
+                    key: key.clone(),
+                    url: Some(format!("{DETAIL_SITE_URL}{key}")),
+                    title: Some(title),
+{% if detail.chapter.date_field and detail.chapter.date_format %}
+                    date_uploaded: parse_date(
+                        &item.{{ detail.chapter.date_field }},
+                        {{ detail.chapter.date_format | rust_string }},
+                    ){% if detail.chapter.add_position_to_date %}.map(|date| date + position){% endif %},
+{% endif %}
+                    ..Default::default()
+                });
+                position += 1;
+            }
+            offset += {{ detail.chapter.page_size }};
+            if received == 0 || offset >= total {
+                break;
+            }
+        }
+    }
+    Ok(chapters)
+}
+
+pub(crate) fn get_manga_update(
+    mut manga: Manga,
+    needs_details: bool,
+    needs_chapters: bool,
+) -> Result<Manga> {
+    if !needs_details && !needs_chapters {
+        return Ok(manga);
+    }
+{% else %}
 pub(crate) fn get_manga_details(mut manga: Manga) -> Result<Manga> {
+{% endif %}
     let key = manga.key.strip_prefix(DETAIL_SITE_URL).unwrap_or(&manga.key);
     let key = key.strip_prefix({{ detail.key_prefix | rust_string }}).unwrap_or(key);
 {% if detail.key_suffix %}
@@ -39,6 +147,12 @@ pub(crate) fn get_manga_details(mut manga: Manga) -> Result<Manga> {
     let result = response.value;
 {% else %}
     let result: {{ detail.response_type }} = crate::c2a_listing::get_json(endpoint)?;
+{% endif %}
+{% if detail.chapter %}
+    if needs_chapters {
+        manga.chapters = Some(fetch_chapters(manga_path, &result.{{ detail.chapter.groups_field }})?);
+    }
+    if needs_details {
 {% endif %}
     let item = result.{{ detail.item_field }};
 {% if detail.authors %}
@@ -105,6 +219,9 @@ pub(crate) fn get_manga_details(mut manga: Manga) -> Result<Manga> {
 {% endfor %}
         _ => MangaStatus::Unknown,
     };
+{% endif %}
+{% if detail.chapter %}
+    }
 {% endif %}
     Ok(manga)
 }
