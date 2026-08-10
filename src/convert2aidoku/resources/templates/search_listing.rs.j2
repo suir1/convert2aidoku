@@ -35,7 +35,7 @@ fn api_domain() -> String {
 {% endif %}
 }
 
-fn api_url(path: &str) -> String {
+pub(crate) fn api_url(path: &str) -> String {
     format!("{{ api_scheme }}://{}{}", api_domain(), path)
 }
 
@@ -104,7 +104,7 @@ fn request(url: String) -> Result<Request> {
     Ok(request)
 }
 
-fn get_json<T: for<'a> Deserialize<'a>>(url: String) -> Result<T> {
+pub(crate) fn get_json<T: for<'a> Deserialize<'a>>(url: String) -> Result<T> {
     let response = match request(url.clone())?.send() {
         Ok(response) => response,
         Err(_) => request(url)?.send()?,

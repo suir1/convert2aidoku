@@ -9,7 +9,7 @@ from typing import Literal
 
 from .ai import AIResult, OpenAICompatibleClient, combine_ai_usage
 from .checkpoint_store import CheckpointStore
-from .constants import MAX_AI_DIAGNOSTIC_CHARS, MAX_REPAIR_PATCH_EDITS
+from .constants import MAX_AI_DIAGNOSTIC_CHARS, MAX_REPAIR_PATCH_EDITS, TOOL_OWNED_RUST_PATHS
 from .errors import AIProviderError, SecurityError
 from .manifest_contract import ContractEvaluation
 from .models import (
@@ -64,7 +64,7 @@ def diagnostic_file_excerpts(
     locations: dict[str, set[int]] = {}
     for match in _RUST_DIAGNOSTIC_LOCATION.finditer(diagnostics):
         path = match.group("path")
-        if path in {"src/c2a_listing.rs", "src/generated_smoke.rs"} or ".." in Path(path).parts:
+        if path in TOOL_OWNED_RUST_PATHS or ".." in Path(path).parts:
             continue
         locations.setdefault(path, set()).add(int(match.group("line")))
 

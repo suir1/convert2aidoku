@@ -14,6 +14,7 @@ from .errors import AIProviderError, InputError
 from .generated_source_metadata import GeneratedSourceMetadata
 from .kotlin_settings import with_kotlin_settings
 from .listing_renderer import with_deterministic_search_listing
+from .manga_detail_renderer import with_deterministic_manga_detail
 from .manifest_contract import (
     ContractEvaluation,
     evaluate_manifest_contract,
@@ -108,6 +109,7 @@ class _ConversionRoundRunner:
             filter_specs=self.ir.filter_specs,
         )
         effective = with_deterministic_search_listing(self.ir, effective)
+        effective = with_deterministic_manga_detail(self.ir, effective)
         return normalize_generation_manifest(self.ir, effective, trace=trace)
 
     def evaluate(self, manifest: GenerationManifest) -> None:

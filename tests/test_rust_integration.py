@@ -4,11 +4,13 @@ from pathlib import Path
 import pytest
 
 from convert2aidoku.listing_renderer import render_search_listing
+from convert2aidoku.manga_detail_renderer import render_manga_detail
 from convert2aidoku.models import (
     Capability,
     DependencyRequest,
     GeneratedFile,
     GenerationManifest,
+    ImageUrlPolicy,
     RequestHeaderProfile,
 )
 from convert2aidoku.scaffold import apply_generation_manifest
@@ -16,6 +18,7 @@ from convert2aidoku.toolchain import find_tool
 from convert2aidoku.validator import validate_project
 from tests.scenarios import minimal_source_ir, scaffold_project
 from tests.test_implementation_ir import (
+    _copymanga_detail_files,
     _copymanga_filter_specs,
     _copymanga_listing_files,
     _serializable_listing_files,
@@ -271,6 +274,50 @@ def test_deterministic_listing_module_and_provider_compile_for_wasm(tmp_path: Pa
             files=[
                 GeneratedFile(path="src/lib.rs", content=LISTING_PROVIDER_RUST_SOURCE),
                 rendered,
+            ],
+            dependencies=[DependencyRequest(name="serde", features=["derive"])],
+        ),
+        query=None,
+    )
+
+    validation = validate_project(project, live=False)
+    assert validation.build_ok, validation.diagnostics
+    assert validation.package_ok, validation.diagnostics
+
+
+def test_deterministic_manga_detail_helper_compiles_for_wasm(tmp_path: Path) -> None:
+    assert find_tool("cargo")
+    listing_ir = minimal_source_ir(
+        source_format="decompiled_apk",
+        main_class="CopyManga",
+        files=_copymanga_listing_files(),
+        filter_specs=_copymanga_filter_specs(),
+    )
+    detail_ir = minimal_source_ir(
+        source_format="decompiled_apk",
+        feature_scope="public_only",
+        main_class="CopyManga",
+        capabilities=[Capability.DETAILS],
+        files=_copymanga_detail_files(),
+        image_url_policy=ImageUrlPolicy(preserve_cover_urls=True),
+        unsupported_features=[
+            "Android ChineseUtils script conversion setting (excluded by public-only APK scope)"
+        ],
+    )
+    source = LISTING_RUST_SOURCE.replace(
+        "mod c2a_listing;",
+        "mod c2a_listing;\nmod c2a_manga_detail;",
+    )
+    project, scaffold_ir = scaffold_project(tmp_path, name="manga-detail-project")
+    apply_generation_manifest(
+        project,
+        scaffold_ir,
+        GenerationManifest(
+            source_struct="Example",
+            files=[
+                GeneratedFile(path="src/lib.rs", content=source),
+                render_search_listing(listing_ir),
+                render_manga_detail(detail_ir),
             ],
             dependencies=[DependencyRequest(name="serde", features=["derive"])],
         ),

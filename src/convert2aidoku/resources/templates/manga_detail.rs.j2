@@ -1,0 +1,110 @@
+use aidoku::alloc::{format, String{% if uses_vec %}, Vec{% endif %}};
+use aidoku::serde::Deserialize;
+use aidoku::{Manga{% if detail.status %}, MangaStatus{% endif %}, Result};
+
+const DETAIL_SITE_URL: &str = {{ site_url | rust_string }};
+
+{% for struct in structs %}
+#[derive(Deserialize, Default)]
+struct {{ struct.name }} {
+{% for field in struct.fields %}
+    #[serde(default{% if field.renamed %}, rename = {{ field.serialized_name | rust_string }}{% endif %})]
+    {{ field.name }}: {{ field.rust_type }},
+{% endfor %}
+}
+
+{% endfor %}
+{% if detail.envelope_path %}
+#[derive(Deserialize)]
+struct DetailEnvelope {
+    #[serde(rename = {{ detail.envelope_path | rust_string }})]
+    value: {{ detail.response_type }},
+}
+
+{% endif %}
+pub(crate) fn get_manga_details(mut manga: Manga) -> Result<Manga> {
+    let key = manga.key.strip_prefix(DETAIL_SITE_URL).unwrap_or(&manga.key);
+    let key = key.strip_prefix({{ detail.key_prefix | rust_string }}).unwrap_or(key);
+{% if detail.key_suffix %}
+    let manga_path = key.strip_suffix({{ detail.key_suffix | rust_string }}).unwrap_or(key);
+{% else %}
+    let manga_path = key;
+{% endif %}
+    let endpoint = crate::c2a_listing::api_url(&format!(
+        {{ detail.endpoint_format | rust_string }},
+        {{ detail.endpoint_argument }},
+    ));
+{% if detail.envelope_path %}
+    let response: DetailEnvelope = crate::c2a_listing::get_json(endpoint)?;
+    let result = response.value;
+{% else %}
+    let result: {{ detail.response_type }} = crate::c2a_listing::get_json(endpoint)?;
+{% endif %}
+    let item = result.{{ detail.item_field }};
+{% if detail.authors %}
+{% if detail.authors.collection %}
+{% if detail.authors.child %}
+    let authors: Vec<String> = item.{{ detail.authors.field }}
+        .into_iter()
+        .map(|value| value.{{ detail.authors.child }})
+        .collect();
+{% else %}
+    let authors: Vec<String> = item.{{ detail.authors.field }};
+{% endif %}
+{% else %}
+    let authors = Vec::from([item.{{ detail.authors.field }}]);
+{% endif %}
+{% endif %}
+{% if detail.tags %}
+    let mut tags: Vec<String> = Vec::new();
+{% for tag in detail.tags %}
+{% if tag.collection %}
+{% if tag.child %}
+    tags.extend(item.{{ tag.field }}.into_iter().map(|value| value.{{ tag.child }}));
+{% else %}
+    tags.extend(item.{{ tag.field }});
+{% endif %}
+{% elif tag.child %}
+    if !item.{{ tag.field }}.{{ tag.child }}.is_empty() {
+        tags.push(item.{{ tag.field }}.{{ tag.child }});
+    }
+{% else %}
+    if !item.{{ tag.field }}.is_empty() {
+        tags.push(item.{{ tag.field }});
+    }
+{% endif %}
+{% endfor %}
+{% endif %}
+{% if detail.status %}
+{% if detail.status.child %}
+    let status_value = item.{{ detail.status.field }}.{{ detail.status.child }};
+{% else %}
+    let status_value = item.{{ detail.status.field }};
+{% endif %}
+{% endif %}
+    let key = {{ detail.key_expression }};
+    manga.key = key.clone();
+    manga.url = Some(format!("{DETAIL_SITE_URL}{key}"));
+    manga.title = item.{{ detail.title_field }};
+{% if detail.cover_field %}
+    manga.cover = Some(item.{{ detail.cover_field }});
+{% endif %}
+{% if detail.authors %}
+    manga.authors = (!authors.is_empty()).then_some(authors);
+{% endif %}
+{% if detail.tags %}
+    manga.tags = (!tags.is_empty()).then_some(tags);
+{% endif %}
+{% if detail.description_field %}
+    manga.description = Some(item.{{ detail.description_field }});
+{% endif %}
+{% if detail.status %}
+    manga.status = match status_value {
+{% for status in detail.status_values %}
+        {{ status.value }} => MangaStatus::{{ status.status }},
+{% endfor %}
+        _ => MangaStatus::Unknown,
+    };
+{% endif %}
+    Ok(manga)
+}

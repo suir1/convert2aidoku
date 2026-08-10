@@ -29,6 +29,7 @@ from .constants import (
     MAX_GENERATED_FILE_CHARS,
     MAX_GENERATED_FILES,
     MAX_GENERATED_TOTAL_CHARS,
+    TOOL_OWNED_RUST_PATHS,
 )
 from .dependency_policy import evaluate_dependency_policy, render_dependency_policy
 from .errors import AIProviderError, SecurityError
@@ -42,6 +43,7 @@ from .listing_renderer import (
     deterministic_listing_provider_available,
     deterministic_search_listing_available,
 )
+from .manga_detail_renderer import deterministic_manga_detail_available
 from .models import (
     AIRound,
     AIUsage,
@@ -304,6 +306,7 @@ def _generation_messages(
         )
     deterministic_listing = deterministic_search_listing_available(ir)
     deterministic_provider = deterministic_listing_provider_available(ir)
+    deterministic_detail = deterministic_listing and deterministic_manga_detail_available(ir)
     listing_instruction = (
         "The tool deterministically owns src/c2a_listing.rs for search, rank, and browse. "
         "Do not return that file or reimplement its exclusive endpoints and DTOs. Implement "
@@ -318,6 +321,14 @@ def _generation_messages(
             "ListingProvider; do not implement get_manga_list or include ListingProvider "
             "in implemented_traits. "
         )
+    detail_instruction = (
+        "The tool also owns src/c2a_manga_detail.rs. Do not return that file or duplicate its "
+        "detail endpoint and DTOs. When needs_details is true, assign "
+        "manga = crate::c2a_manga_detail::get_manga_details(manga)?; the helper preserves existing "
+        "chapters and other Manga state. Continue to implement chapter fetching yourself. "
+        if deterministic_detail
+        else ""
+    )
     return [
         {
             "role": "system",
@@ -340,6 +351,7 @@ def _generation_messages(
                 "the tool reconstructs src/lib.rs deterministically from source_struct, "
                 "implemented_traits, and the returned module paths. "
                 + listing_instruction
+                + detail_instruction
                 + "Cargo.toml is forbidden because the tool owns all Cargo metadata. Use only "
                 "allowed dependencies and do not omit required core behavior.\n\n"
                 + json.dumps(source_payload, ensure_ascii=False)
@@ -972,8 +984,9 @@ class OpenAICompatibleClient:
                     "You repair a generated current Aidoku Rust source. Return a complete "
                     "Rust-only replacement manifest, not a diff and never shell commands. "
                     "Return only src/**/*.rs; filters/settings are tool-owned and preserved. "
-                    "src/c2a_listing.rs is also tool-owned, omitted from this request, and must "
-                    "not be returned or reimplemented. Popular/latest ListingProvider behavior "
+                    "src/c2a_listing.rs and src/c2a_manga_detail.rs are also tool-owned, omitted "
+                    "from this request, and must not be returned or reimplemented. "
+                    "Popular/latest ListingProvider behavior "
                     "may also be tool-owned; preserve its current delegation and trait entry. "
                     "Make only the minimum "
                     "changes required by the supplied diagnostics. Preserve working code, "
@@ -999,7 +1012,8 @@ class OpenAICompatibleClient:
                         "current_files": [
                             item
                             for item in current_files
-                            if item["path"].endswith(".rs") and item["path"] != "src/c2a_listing.rs"
+                            if item["path"].endswith(".rs")
+                            and item["path"] not in TOOL_OWNED_RUST_PATHS
                         ],
                         "prior_generation_manifests": _compact_manifest_history(manifest_history),
                         "validation_diagnostics": diagnostics,

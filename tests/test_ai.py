@@ -878,6 +878,10 @@ def test_generate_reserves_tool_owned_search_listing_module(
         "convert2aidoku.ai.deterministic_listing_provider_available",
         lambda _ir: True,
     )
+    monkeypatch.setattr(
+        "convert2aidoku.ai.deterministic_manga_detail_available",
+        lambda _ir: True,
+    )
 
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
@@ -885,6 +889,8 @@ def test_generate_reserves_tool_owned_search_listing_module(
         assert "deterministically owns src/c2a_listing.rs" in prompt
         assert "crate::c2a_listing::get_search_manga_list(query, page, filters)" in prompt
         assert "will synthesize ListingProvider" in prompt
+        assert "owns src/c2a_manga_detail.rs" in prompt
+        assert "crate::c2a_manga_detail::get_manga_details(manga)" in prompt
         return httpx.Response(
             200,
             json={"choices": [{"message": {"content": json.dumps(_manifest())}}]},
@@ -1208,6 +1214,7 @@ def test_repair_uses_compact_context_without_original_source_bodies() -> None:
         assert repair_payload["current_files"][0]["content"] == "current rust"
         assert len(repair_payload["current_files"]) == 1
         assert b"current-resource-marker" not in request.content
+        assert b"tool-owned-detail-marker" not in request.content
         assert repair_payload["prior_generation_manifests"][0]["round"] == 1
         assert "resource_files" not in repair_payload["prior_generation_manifests"][0]
         assert b"original-source-body-marker" not in request.content
@@ -1234,6 +1241,10 @@ def test_repair_uses_compact_context_without_original_source_bodies() -> None:
             current_files=[
                 {"path": "src/lib.rs", "content": "current rust"},
                 {"path": "src/c2a_listing.rs", "content": "tool-owned listing"},
+                {
+                    "path": "src/c2a_manga_detail.rs",
+                    "content": "tool-owned-detail-marker",
+                },
                 {"path": "res/settings.json", "content": "current-resource-marker"},
             ],
             diagnostics="compile error",

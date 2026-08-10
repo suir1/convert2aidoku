@@ -20,6 +20,10 @@ from convert2aidoku.listing_renderer import (
     render_search_listing,
     with_deterministic_search_listing,
 )
+from convert2aidoku.manga_detail_renderer import (
+    render_manga_detail,
+    with_deterministic_manga_detail,
+)
 from convert2aidoku.models import (
     Capability,
     GeneratedFile,
@@ -408,6 +412,128 @@ def _serializable_listing_files() -> list[SourceFile]:
             }
             """,
         ),
+    ]
+
+
+def _copymanga_detail_files() -> list[SourceFile]:
+    return [
+        _file(
+            "sources/example/ApiRepo.java",
+            """
+            public final class ApiRepo {
+                private String getApiUrl() { return domain() + "/api/v3"; }
+                public String comicDetailUrl(String comicPath) {
+                    return getApiUrl() + "/comic2/" + comicPath;
+                }
+                public String url2comicPath(String value) { return normalize(value); }
+            }
+            """,
+        ),
+        _file(
+            "sources/example/CopyManga.java",
+            """
+            public final class CopyManga extends HttpSource {
+                public Request mangaDetailsRequest(SManga manga) {
+                    return GET(ApiRepo.INSTANCE.comicDetailUrl(
+                        ApiRepo.INSTANCE.url2comicPath(manga.getUrl())
+                    ));
+                }
+                protected SManga mangaDetailsParse(Response response) {
+                    KType type = Reflection.typeOf(
+                        ApiResponse.class,
+                        Reflection.typeOf(ComicDetailResult.class)
+                    );
+                    return ((ComicDetailResult) ((ApiResponse) decode(type))
+                        .getResults()).getComic().toSManga("1500", language());
+                }
+            }
+            """,
+        ),
+        _file(
+            "sources/example/api/ApiResponse.java",
+            """
+            // C2A compacted JADX DTO: generated constructors and value methods removed.
+            public final class ApiResponse<T> { private final T results; }
+            """,
+        ),
+        _file(
+            "sources/example/api/dto/ComicDetailResult.java",
+            """
+            // C2A compacted JADX DTO: generated constructors and value methods removed.
+            public final class ComicDetailResult {
+                private final ComicDetail comic;
+                private final Map<String, GroupInfo> groups;
+            }
+            """,
+        ),
+        _file(
+            "sources/example/api/dto/ComicDetail.java",
+            """
+            // C2A compacted JADX DTO: generated constructors and value methods removed.
+            public final class ComicDetail {
+                // Serialized field names:
+                // pathWord -> "path_word"
+                private final String pathWord;
+                private final String name;
+                private final String cover;
+                private final String brief;
+                private final List<AuthorInfo> author;
+                private final Region region;
+                private final List<ThemeInfo> theme;
+                private final Status status;
+                public SManga toSManga(String resolution, CCOption language) {
+                    SManga manga = SManga.create();
+                    manga.setUrl("/comic/" + this.pathWord);
+                    manga.setTitle(TranslateKt.translate(this.name, language));
+                    manga.setAuthor(join(this.author, value -> value.getName()));
+                    manga.setDescription(TranslateKt.translate(this.brief, language));
+                    manga.setGenre(TranslateKt.translate(
+                        this.region.getDisplay() + ", "
+                            + join(this.theme, value -> value.getName()),
+                        language
+                    ));
+                    manga.setStatus(MangaStatusManager.INSTANCE.parseStatus(
+                        this.status.getValue()
+                    ));
+                    manga.setThumbnail_url(ResolutionOption.INSTANCE.translate(
+                        this.cover,
+                        resolution
+                    ));
+                    return manga;
+                }
+            }
+            """,
+        ),
+        _file(
+            "sources/example/MangaStatusManager.java",
+            """
+            public final class MangaStatusManager {
+                public int parseStatus(int status) {
+                    if (status == 0) { return 1; }
+                    return (1 > status || status >= 3) ? 0 : 2;
+                }
+            }
+            """,
+        ),
+        *[
+            _file(
+                f"sources/example/api/dto/{name}.java",
+                f"""
+                // C2A compacted JADX DTO: generated constructors and value methods removed.
+                public final class {name} {{ {fields} }}
+                """,
+            )
+            for name, fields in (
+                ("AuthorInfo", "private final String name;"),
+                ("ThemeInfo", "private final String name;"),
+                ("Region", "private final String display;"),
+                ("Status", "private final int value;"),
+                (
+                    "GroupInfo",
+                    "private final String name; private final String pathWord;",
+                ),
+            )
+        ],
     ]
 
 
@@ -1251,6 +1377,149 @@ def test_nested_mapping_field_uses_java_identity_before_serialized_name() -> Non
     author_struct = rendered.content.split("struct AuthorInfo {", 1)[1].split("}\n", 1)[0]
     assert "    label: String," in author_struct
     assert "    name: String," not in author_struct
+
+
+def test_projects_copymanga_detail_contract_from_parser_evidence() -> None:
+    ir = minimal_source_ir(
+        source_id="zh.copymanga",
+        source_format="decompiled_apk",
+        feature_scope="public_only",
+        main_class="CopyManga",
+        capabilities=[Capability.DETAILS],
+        files=_copymanga_detail_files(),
+        image_url_policy=ImageUrlPolicy(preserve_cover_urls=True),
+        unsupported_features=[
+            "Android ChineseUtils script conversion setting (excluded by public-only APK scope)"
+        ],
+    )
+
+    implementation = project_implementation_ir(ir)
+
+    assert implementation.manga_detail is not None
+    detail = implementation.manga_detail
+    assert detail.endpoint.model_dump(mode="json") == {
+        "source_method": "comicDetailUrl",
+        "path": "/api/v3/comic2/{comic_path}",
+        "key_parameter": "comic_path",
+        "response_type": "ComicDetailResult",
+        "response_evidence": "parser_path",
+        "envelope_path": "results",
+        "item_path": "comic",
+    }
+    assert detail.mapping.key_template == "/comic/{pathWord}"
+    assert detail.mapping.title_path == "name"
+    assert detail.mapping.cover_path == "cover"
+    assert detail.mapping.authors_path == "author[].name"
+    assert detail.mapping.tags_paths == ["region.display", "theme[].name"]
+    assert detail.mapping.description_path == "brief"
+    assert detail.mapping.status_path == "status.value"
+    assert detail.mapping.status_values == {0: "ongoing", 1: "completed", 2: "completed"}
+    assert detail.mapping.unresolved_fields == []
+    assert detail.mapping.policy_fallback_fields == ["title", "cover", "tags", "description"]
+    assert not [fact for fact in implementation.unresolved_facts if "detail" in fact]
+    assert (
+        len(
+            [
+                fact
+                for fact in implementation.policy_fallback_facts
+                if fact.startswith("manga detail")
+            ]
+        )
+        == 4
+    )
+    rendered = render_manga_detail(ir, implementation)
+    assert rendered.path == "src/c2a_manga_detail.rs"
+    assert '"/api/v3/comic2/{}"' in rendered.content
+    assert "        manga_path," in rendered.content
+    assert "let response: DetailEnvelope" in rendered.content
+    assert "let item = result.comic;" in rendered.content
+    assert ".map(|value| value.name)" in rendered.content
+    assert "tags.push(item.region.display);" in rendered.content
+    assert "tags.extend(item.theme.into_iter().map(|value| value.name));" in rendered.content
+    assert "manga.description = Some(item.brief);" in rendered.content
+    assert "0 => MangaStatus::Ongoing" in rendered.content
+    assert "1 => MangaStatus::Completed" in rendered.content
+    effective = with_deterministic_manga_detail(
+        ir,
+        GenerationManifest(
+            source_struct="CopyManga",
+            files=[
+                GeneratedFile(path="src/lib.rs", content="mod source;"),
+                GeneratedFile(path="src/source.rs", content="pub struct CopyManga;"),
+                GeneratedFile(path="src/c2a_listing.rs", content="fn listing() {}"),
+                GeneratedFile(
+                    path="src/c2a_manga_detail.rs",
+                    content='compile_error!("AI must not own this file");',
+                ),
+            ],
+        ),
+    )
+    effective_files = {generated.path: generated.content for generated in effective.files}
+    assert "compile_error!" not in effective_files["src/c2a_manga_detail.rs"]
+    assert "mod c2a_manga_detail;" in effective_files["src/lib.rs"]
+    assert any(dependency.name == "serde" for dependency in effective.dependencies)
+    assert any(warning.startswith("Deterministic manga detail") for warning in effective.warnings)
+
+
+def test_unknown_detail_transform_stays_unresolved() -> None:
+    files = _copymanga_detail_files()
+    detail = next(file for file in files if file.path.endswith("ComicDetail.java"))
+    detail.content = detail.content.replace(
+        "TranslateKt.translate(this.name, language)",
+        "decrypt(this.name, language)",
+    )
+    detail.sha256 = hashlib.sha256(detail.content.encode()).hexdigest()
+    ir = minimal_source_ir(
+        source_format="decompiled_apk",
+        feature_scope="public_only",
+        capabilities=[Capability.DETAILS],
+        files=files,
+        image_url_policy=ImageUrlPolicy(preserve_cover_urls=True),
+        unsupported_features=[
+            "Android ChineseUtils script conversion setting (excluded by public-only APK scope)"
+        ],
+    )
+
+    implementation = project_implementation_ir(ir)
+
+    assert implementation.manga_detail is not None
+    assert implementation.manga_detail.mapping.title_path is None
+    assert implementation.manga_detail.mapping.policy_fallback_fields == [
+        "cover",
+        "tags",
+        "description",
+    ]
+    assert "manga detail title mapping is unresolved for ComicDetail" in (
+        implementation.unresolved_facts
+    )
+
+
+def test_ambiguous_detail_url_helper_stays_unresolved() -> None:
+    files = _copymanga_detail_files()
+    files.append(
+        _file(
+            "sources/example/MirrorApi.java",
+            """
+            public final class MirrorApi {
+                public String comicDetailUrl(String comicPath) {
+                    return getApiUrl() + "/mirror/" + comicPath;
+                }
+            }
+            """,
+        )
+    )
+    ir = minimal_source_ir(
+        source_format="decompiled_apk",
+        capabilities=[Capability.DETAILS],
+        files=files,
+    )
+
+    implementation = project_implementation_ir(ir)
+
+    assert implementation.manga_detail is None
+    assert "manga detail request or response contract is unresolved" in (
+        implementation.unresolved_facts
+    )
 
 
 def test_non_string_next_field_does_not_emit_string_cursor_logic() -> None:

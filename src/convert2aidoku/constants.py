@@ -18,6 +18,13 @@ MAX_REPAIR_PATCH_EDITS = 12
 MAX_GENERATED_FILES = 64
 MAX_GENERATED_FILE_CHARS = 500_000
 MAX_GENERATED_TOTAL_CHARS = 2_000_000
+TOOL_OWNED_RUST_PATHS = frozenset(
+    {
+        "src/c2a_listing.rs",
+        "src/c2a_manga_detail.rs",
+        "src/generated_smoke.rs",
+    }
+)
 
 # Aidoku's networking runtime negotiates and decodes response compression. Forwarding this
 # source-client header can leave get_html/get_json_owned with raw compressed bytes.

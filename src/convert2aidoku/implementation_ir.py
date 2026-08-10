@@ -11,7 +11,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .decompiled_input import DecompiledDtoShape, decompiled_dto_shapes
-from .models import SourceFile, SourceFilterSpec, SourceIR
+from .models import Capability, SourceFile, SourceFilterSpec, SourceIR
 
 
 class ListingRole(StrEnum):
@@ -171,6 +171,96 @@ class MangaMappingIR(BaseModel):
         return self
 
 
+DetailProjectionField = Literal[
+    "key",
+    "title",
+    "cover",
+    "authors",
+    "tags",
+    "description",
+    "status",
+]
+MangaStatusIR = Literal["unknown", "ongoing", "completed", "cancelled", "hiatus"]
+
+
+class MangaDetailMappingIR(BaseModel):
+    """Field-level detail mapping recovered from one DTO conversion method."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    item_type: str
+    key_template: str | None = None
+    title_path: str | None = None
+    cover_path: str | None = None
+    authors_path: str | None = None
+    tags_paths: list[str] = Field(default_factory=list)
+    description_path: str | None = None
+    status_path: str | None = None
+    status_values: dict[int, MangaStatusIR] = Field(default_factory=dict)
+    unresolved_fields: list[DetailProjectionField] = Field(default_factory=list)
+    policy_fallback_fields: list[DetailProjectionField] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def projection_contract_is_consistent(self) -> MangaDetailMappingIR:
+        for label, values in (
+            ("detail tag paths", self.tags_paths),
+            ("unresolved detail fields", self.unresolved_fields),
+            ("policy fallback detail fields", self.policy_fallback_fields),
+        ):
+            if len(values) != len(set(values)):
+                raise ValueError(f"{label} must be unique")
+        overlap = set(self.unresolved_fields) & set(self.policy_fallback_fields)
+        if overlap:
+            raise ValueError(
+                "detail fields cannot be unresolved and policy fallbacks: "
+                + ", ".join(sorted(overlap))
+            )
+        projections = {
+            "key": self.key_template,
+            "title": self.title_path,
+            "cover": self.cover_path,
+            "authors": self.authors_path,
+            "tags": self.tags_paths or None,
+            "description": self.description_path,
+            "status": self.status_path,
+        }
+        missing = [field for field in self.policy_fallback_fields if projections[field] is None]
+        if missing:
+            raise ValueError(
+                "policy fallback detail fields require a recovered projection: "
+                + ", ".join(missing)
+            )
+        if (self.status_path is None) != (not self.status_values):
+            raise ValueError("detail status path and values must be declared together")
+        return self
+
+
+class MangaDetailEndpointIR(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_method: str = Field(min_length=1)
+    path: str = Field(pattern=r"^/")
+    key_parameter: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
+    response_type: str
+    response_evidence: Literal["parser_path"]
+    envelope_path: str | None = None
+    item_path: str
+
+    @model_validator(mode="after")
+    def endpoint_contains_its_key(self) -> MangaDetailEndpointIR:
+        if f"{{{self.key_parameter}}}" not in self.path:
+            raise ValueError("detail endpoint path must reference its key parameter")
+        return self
+
+
+class MangaDetailImplementationIR(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    endpoint: MangaDetailEndpointIR
+    data_shapes: list[DataShapeIR] = Field(default_factory=list)
+    mapping: MangaDetailMappingIR
+
+
 class ListingSelectionIR(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -283,6 +373,7 @@ class ImplementationIR(BaseModel):
     schema_version: Literal[1] = 1
     source_id: str
     listing: ListingImplementationIR | None = None
+    manga_detail: MangaDetailImplementationIR | None = None
     unresolved_facts: list[str] = Field(default_factory=list)
     policy_fallback_facts: list[str] = Field(default_factory=list)
 
@@ -373,6 +464,34 @@ def _split_java_concatenation(expression: str) -> list[str]:
         elif char == ")":
             depth = max(0, depth - 1)
         elif char == "+" and depth == 0:
+            parts.append(expression[start:index].strip())
+            start = index + 1
+    parts.append(expression[start:].strip())
+    return [part for part in parts if part]
+
+
+def _split_java_arguments(expression: str) -> list[str]:
+    parts: list[str] = []
+    start = 0
+    depth = 0
+    quote: str | None = None
+    escaped = False
+    for index, char in enumerate(expression):
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in {'"', "'"}:
+            quote = char
+        elif char in "([{":
+            depth += 1
+        elif char in ")]}" and depth > 0:
+            depth -= 1
+        elif char == "," and depth == 0:
             parts.append(expression[start:index].strip())
             start = index + 1
     parts.append(expression[start:].strip())
@@ -1437,6 +1556,26 @@ def _script_conversion_fallback_field(
     return found.group(1)
 
 
+def _unwrap_script_conversion(
+    argument: str,
+    allowed_wrapper_variables: frozenset[str],
+) -> tuple[str, bool]:
+    if not allowed_wrapper_variables:
+        return argument, False
+    found = re.fullmatch(
+        r"\s*(?:(?:[A-Za-z_][A-Za-z0-9_$]*)\.)*(?:translate|convert)\s*\("
+        r"([\s\S]*)\)\s*",
+        argument,
+        re.IGNORECASE,
+    )
+    if found is None:
+        return argument, False
+    arguments = _split_java_arguments(found.group(1))
+    if len(arguments) != 2 or arguments[1].strip() not in allowed_wrapper_variables:
+        return argument, False
+    return arguments[0], True
+
+
 def _setter_projection_field(
     block: str,
     setter: str,
@@ -1725,29 +1864,395 @@ def _manga_mappings(
     return mappings
 
 
-def _listing_data_shapes(
+def _nested_getter_path(
+    expression: str,
+    shape: DecompiledDtoShape,
+    shapes: dict[str, DecompiledDtoShape],
+) -> str | None:
+    found = re.fullmatch(
+        r"\s*this\.([A-Za-z_][A-Za-z0-9_]*)\.get"
+        r"([A-Z][A-Za-z0-9_]*)\s*\(\s*\)\s*",
+        expression,
+    )
+    if found is None:
+        return None
+    root_name = found.group(1)
+    child_name = found.group(2)[:1].lower() + found.group(2)[1:]
+    root = next((field for field in shape.fields if field.name == root_name), None)
+    nested = shapes.get(root.java_type.rsplit(".", 1)[-1]) if root is not None else None
+    if nested is None or not any(field.name == child_name for field in nested.fields):
+        return None
+    return f"{root_name}.{child_name}"
+
+
+def _detail_tag_projection(
+    block: str,
+    shape: DecompiledDtoShape,
+    shapes: dict[str, DecompiledDtoShape],
+    kotlin_data_classes: frozenset[str],
+    allowed_wrapper_variables: frozenset[str],
+) -> tuple[list[str] | None, bool]:
+    argument = _setter_argument(block, "setGenre")
+    if argument is None:
+        return None, False
+    expression, policy_fallback = _unwrap_script_conversion(
+        argument,
+        allowed_wrapper_variables,
+    )
+    paths: list[str] = []
+    for token in _split_java_concatenation(expression):
+        if _string_literal(token) is not None:
+            continue
+        if nested := _nested_getter_path(token, shape, shapes):
+            paths.append(nested)
+            continue
+        synthetic = "{ manga.setGenre(" + token + "); }"
+        path, _item_projection, collection_fallback = _setter_collection_projection(
+            synthetic,
+            shape,
+            "setGenre",
+            shapes,
+            kotlin_data_classes,
+            allowed_wrapper_variables,
+        )
+        if path is None:
+            return None, False
+        paths.append(path)
+        policy_fallback = policy_fallback or collection_fallback
+    return (list(dict.fromkeys(paths)), policy_fallback) if paths else (None, False)
+
+
+_TACHI_STATUS_VALUES: dict[int, MangaStatusIR] = {
+    0: "unknown",
+    1: "ongoing",
+    2: "completed",
+    5: "cancelled",
+    6: "hiatus",
+}
+
+
+def _detail_status_projection(
+    block: str,
+    shape: DecompiledDtoShape,
+    shapes: dict[str, DecompiledDtoShape],
+    files: tuple[SourceFile, ...],
+) -> tuple[str | None, dict[int, MangaStatusIR]]:
+    argument = _setter_argument(block, "setStatus")
+    found = re.fullmatch(
+        r"\s*(?:(?:[A-Za-z_][A-Za-z0-9_$]*)\.)*"
+        r"([A-Za-z_][A-Za-z0-9_]*)\.INSTANCE\.parseStatus\s*\("
+        r"\s*this\.([A-Za-z_][A-Za-z0-9_]*)\.get"
+        r"([A-Z][A-Za-z0-9_]*)\s*\(\s*\)\s*\)\s*",
+        argument or "",
+    )
+    if found is None:
+        return None, {}
+    owner, root_name = found.group(1), found.group(2)
+    child_name = found.group(3)[:1].lower() + found.group(3)[1:]
+    root = next((field for field in shape.fields if field.name == root_name), None)
+    nested = shapes.get(root.java_type.rsplit(".", 1)[-1]) if root is not None else None
+    if nested is None or not any(field.name == child_name for field in nested.fields):
+        return None, {}
+    manager = next(
+        (source.content for source in files if PurePosixPath(source.path).stem == owner),
+        None,
+    )
+    method = _java_method_block(manager or "", "parseStatus")
+    declaration = re.search(r"\bparseStatus\s*\(\s*int\s+([A-Za-z_][A-Za-z0-9_]*)", method)
+    if declaration is None:
+        return None, {}
+    parameter = re.escape(declaration.group(1))
+    direct = re.search(
+        rf"\bif\s*\(\s*{parameter}\s*==\s*(-?\d+)\s*\)\s*\{{?\s*"
+        r"return\s+(-?\d+)\s*;",
+        method,
+    )
+    ranged = re.search(
+        rf"return\s*\(\s*(-?\d+)\s*>\s*{parameter}\s*\|\|\s*"
+        rf"{parameter}\s*>=\s*(-?\d+)\s*\)\s*\?\s*"
+        r"(-?\d+)\s*:\s*(-?\d+)\s*;",
+        method,
+    )
+    if ranged is None:
+        return None, {}
+    lower, upper, outside, inside = (int(value) for value in ranged.groups())
+    outside_status = _TACHI_STATUS_VALUES.get(outside)
+    inside_status = _TACHI_STATUS_VALUES.get(inside)
+    if lower >= upper or outside_status is None or inside_status is None:
+        return None, {}
+    values = {value: inside_status for value in range(lower, upper)}
+    if direct is not None:
+        source_value, output_value = (int(value) for value in direct.groups())
+        status = _TACHI_STATUS_VALUES.get(output_value)
+        if status is None:
+            return None, {}
+        values[source_value] = status
+    return f"{root_name}.{child_name}", values
+
+
+def _detail_endpoint(
+    java: str,
     shapes: tuple[DecompiledDtoShape, ...],
-    containers: list[ListingContainerIR],
-) -> list[DataShapeIR]:
-    """Keep only the DTO closure required by the deterministic listing slice."""
-    by_name = {shape.name: shape for shape in shapes}
-    selected = {
-        *[container.type_name for container in containers],
-        *[container.item_type for container in containers],
-        *[container.manga_item_type for container in containers],
+    api_base: ApiBaseIR,
+) -> tuple[MangaDetailEndpointIR, str] | None:
+    request = _java_method_block(java, "mangaDetailsRequest")
+    parser = _java_method_block(java, "mangaDetailsParse")
+    if not request or not parser:
+        return None
+    called_methods = set(_api_repo_method_calls(request))
+    endpoints: list[tuple[str, str, tuple[str, ...]]] = []
+    for name, parameters, block in _java_string_methods(java):
+        if name not in called_methods:
+            continue
+        expression = _return_expression(block)
+        path = (
+            _expression_path(expression, parameters=parameters, base_path=api_base.path_prefix)
+            if expression is not None
+            else None
+        )
+        if path is not None and len(re.findall(r"\{[^{}]+\}", path)) == 1:
+            endpoints.append((name, path, parameters))
+    if len(endpoints) != 1:
+        return None
+    source_method, path, parameters = endpoints[0]
+    envelope_types = {
+        shape.name for shape in shapes if any(field.java_type == "T" for field in shape.fields)
     }
+    response_types = {
+        type_name
+        for type_name in re.findall(
+            r"Reflection\.typeOf\(\s*([A-Za-z_][A-Za-z0-9_]*)\.class",
+            parser,
+        )
+        if any(shape.name == type_name for shape in shapes) and type_name not in envelope_types
+    }
+    if len(response_types) != 1:
+        return None
+    response_type = next(iter(response_types))
+    item_getters = {
+        getter[:1].lower() + getter[1:]
+        for getter in re.findall(
+            rf"\(\({re.escape(response_type)}\)[\s\S]*?\)\.get"
+            r"([A-Z][A-Za-z0-9_]*)\s*\(\s*\)\.toSManga\s*\(",
+            parser,
+        )
+    }
+    response_shape = next(shape for shape in shapes if shape.name == response_type)
+    item_fields = [field for field in response_shape.fields if field.name in item_getters]
+    if len(item_fields) != 1:
+        return None
+    key_parameter = _snake_case(parameters[0]) if len(parameters) == 1 else ""
+    if not key_parameter:
+        return None
+    return (
+        MangaDetailEndpointIR(
+            source_method=source_method,
+            path=path,
+            key_parameter=key_parameter,
+            response_type=response_type,
+            response_evidence="parser_path",
+            envelope_path=_response_envelope_paths(java, shapes).get(response_type),
+            item_path=item_fields[0].name,
+        ),
+        item_fields[0].java_type.rsplit(".", 1)[-1],
+    )
+
+
+def _manga_detail_mapping(
+    files: tuple[SourceFile, ...],
+    shapes: tuple[DecompiledDtoShape, ...],
+    *,
+    item_type: str,
+    allow_script_conversion_fallback: bool,
+    preserve_cover_urls: bool,
+) -> MangaDetailMappingIR | None:
+    by_name = {shape.name: shape for shape in shapes}
+    shape = by_name.get(item_type)
+    source = next(
+        (source for source in files if PurePosixPath(source.path).stem == item_type),
+        None,
+    )
+    if shape is None or source is None:
+        return None
+    found = re.search(r"\btoSManga\s*\(([^)]*)\)\s*\{", source.content)
+    if found is None:
+        return None
+    block = _brace_block(source.content, found.start())
+    wrapper_variables = (
+        frozenset(
+            match.group(1)
+            for match in re.finditer(
+                r"\bCCOption\s+([A-Za-z_][A-Za-z0-9_]*)",
+                found.group(1),
+            )
+        )
+        if allow_script_conversion_fallback
+        else frozenset()
+    )
+    kotlin_data_classes = frozenset(
+        PurePosixPath(candidate.path).stem
+        for candidate in files
+        if candidate.path.endswith(".java")
+        and re.search(r"\bfinal\s+/\*\s*data\s*\*/\s+class\b", candidate.content)
+    )
+    url_argument = _setter_argument(block, "setUrl")
+    key_template = _string_template(url_argument, shape) if url_argument else None
+    scalar = {
+        "title": _setter_path(
+            block,
+            shape,
+            "setTitle",
+            allowed_wrapper_variables=wrapper_variables,
+        ),
+        "cover": _setter_path(
+            block,
+            shape,
+            "setThumbnail_url",
+            allow_wrapper=preserve_cover_urls,
+        ),
+        "description": _setter_path(
+            block,
+            shape,
+            "setDescription",
+            allowed_wrapper_variables=wrapper_variables,
+        ),
+    }
+    authors_path, _authors_projection, authors_fallback = _setter_collection_projection(
+        block,
+        shape,
+        "setAuthor",
+        by_name,
+        kotlin_data_classes,
+        wrapper_variables,
+    )
+    tags_paths, tags_fallback = _detail_tag_projection(
+        block,
+        shape,
+        by_name,
+        kotlin_data_classes,
+        wrapper_variables,
+    )
+    status_path, status_values = _detail_status_projection(
+        block,
+        shape,
+        by_name,
+        files,
+    )
+    projections: dict[str, object] = {
+        "key": key_template,
+        "title": scalar["title"].java_name,
+        "cover": scalar["cover"].java_name,
+        "authors": authors_path,
+        "tags": tags_paths,
+        "description": scalar["description"].java_name,
+        "status": status_path,
+    }
+    setters = {
+        "key": "setUrl",
+        "title": "setTitle",
+        "cover": "setThumbnail_url",
+        "authors": "setAuthor",
+        "tags": "setGenre",
+        "description": "setDescription",
+        "status": "setStatus",
+    }
+    unresolved: list[DetailProjectionField] = []
+    for field, setter in setters.items():
+        argument = _setter_argument(block, setter)
+        is_empty = argument is not None and _string_literal(argument.strip()) == ""
+        if (
+            re.search(rf"\b{re.escape(setter)}\s*\(", block)
+            and projections[field] is None
+            and not is_empty
+        ):
+            unresolved.append(field)  # type: ignore[arg-type]
+    fallbacks = {field for field, projection in scalar.items() if projection.policy_fallback}
+    if authors_fallback:
+        fallbacks.add("authors")
+    if tags_fallback:
+        fallbacks.add("tags")
+    return MangaDetailMappingIR(
+        item_type=item_type,
+        key_template=key_template,
+        title_path=scalar["title"].java_name,
+        cover_path=scalar["cover"].java_name,
+        authors_path=authors_path,
+        tags_paths=tags_paths or [],
+        description_path=scalar["description"].java_name,
+        status_path=status_path,
+        status_values=status_values,
+        unresolved_fields=unresolved,
+        policy_fallback_fields=[
+            field
+            for field in ("title", "cover", "authors", "tags", "description")
+            if field in fallbacks
+        ],
+    )
+
+
+def _data_shape_closure(
+    shapes: tuple[DecompiledDtoShape, ...],
+    roots: set[str],
+) -> list[DataShapeIR]:
+    by_name = {shape.name: shape for shape in shapes}
+    selected = set(roots)
     pending = list(selected)
     while pending:
         shape = by_name.get(pending.pop())
         if shape is None:
             continue
         for field in shape.fields:
-            candidates = re.findall(r"\b[A-Z][A-Za-z0-9_]*\b", field.java_type)
-            for candidate in candidates:
+            for candidate in re.findall(r"\b[A-Z][A-Za-z0-9_]*\b", field.java_type):
                 if candidate in by_name and candidate not in selected:
                     selected.add(candidate)
                     pending.append(candidate)
     return _data_shapes(shape for shape in shapes if shape.name in selected)
+
+
+def _project_manga_detail(
+    ir: SourceIR,
+    java: str,
+    shapes: tuple[DecompiledDtoShape, ...],
+    api_base: ApiBaseIR,
+) -> MangaDetailImplementationIR | None:
+    recovered = _detail_endpoint(java, shapes, api_base)
+    if recovered is None:
+        return None
+    endpoint, item_type = recovered
+    mapping = _manga_detail_mapping(
+        tuple(ir.files),
+        shapes,
+        item_type=item_type,
+        allow_script_conversion_fallback=(
+            ir.feature_scope == "public_only"
+            and any(
+                "ChineseUtils script conversion" in feature for feature in ir.unsupported_features
+            )
+        ),
+        preserve_cover_urls=(
+            ir.image_url_policy is not None and ir.image_url_policy.preserve_cover_urls
+        ),
+    )
+    if mapping is None:
+        return None
+    return MangaDetailImplementationIR(
+        endpoint=endpoint,
+        data_shapes=_data_shape_closure(shapes, {endpoint.response_type, item_type}),
+        mapping=mapping,
+    )
+
+
+def _listing_data_shapes(
+    shapes: tuple[DecompiledDtoShape, ...],
+    containers: list[ListingContainerIR],
+) -> list[DataShapeIR]:
+    """Keep only the DTO closure required by the deterministic listing slice."""
+    selected = {
+        *[container.type_name for container in containers],
+        *[container.item_type for container in containers],
+        *[container.manga_item_type for container in containers],
+    }
+    return _data_shape_closure(shapes, selected)
 
 
 def project_implementation_ir(ir: SourceIR) -> ImplementationIR:
@@ -1790,6 +2295,7 @@ def project_implementation_ir(ir: SourceIR) -> ImplementationIR:
             ir.image_url_policy is not None and ir.image_url_policy.preserve_cover_urls
         ),
     )
+    manga_detail = _project_manga_detail(ir, java, shapes, base)
     unresolved: list[str] = []
     policy_fallbacks: list[str] = []
     filter_ids = {spec.id for spec in ir.filter_specs}
@@ -1838,6 +2344,21 @@ def project_implementation_ir(ir: SourceIR) -> ImplementationIR:
                 f"listing manga {field} uses the raw API field for {mapping.item_type} "
                 "because its presentation transform is excluded by SourceIR policy"
             )
+    if Capability.DETAILS in ir.capabilities:
+        if manga_detail is None:
+            unresolved.append("manga detail request or response contract is unresolved")
+        else:
+            for field in manga_detail.mapping.unresolved_fields:
+                unresolved.append(
+                    f"manga detail {field} mapping is unresolved for "
+                    f"{manga_detail.mapping.item_type}"
+                )
+            for field in manga_detail.mapping.policy_fallback_fields:
+                policy_fallbacks.append(
+                    f"manga detail {field} uses the raw API field for "
+                    f"{manga_detail.mapping.item_type} because its presentation transform is "
+                    "excluded by SourceIR policy"
+                )
     return ImplementationIR(
         source_id=ir.metadata.source_id,
         listing=ListingImplementationIR(
@@ -1849,6 +2370,7 @@ def project_implementation_ir(ir: SourceIR) -> ImplementationIR:
             search_dispatch=search_dispatch,
             provider=_listing_provider(java, endpoints),
         ),
+        manga_detail=manga_detail,
         unresolved_facts=unresolved,
         policy_fallback_facts=policy_fallbacks,
     )
