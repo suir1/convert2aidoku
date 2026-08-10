@@ -1,4 +1,9 @@
-from convert2aidoku.rust_inspection import RustInspection
+from convert2aidoku.rust_inspection import (
+    RustInspection,
+    first_rust_identifier,
+    last_rust_identifier,
+    rust_identifier,
+)
 
 
 def test_indexes_functions_calls_headers_and_routes_across_files() -> None:
@@ -95,3 +100,13 @@ def test_indexes_struct_serialized_field_names() -> None:
 
     assert field is not None
     assert field.serialized_name == "themeList"
+
+
+def test_reads_first_last_and_raw_rust_identifiers() -> None:
+    inspection = RustInspection.from_content("use aidoku::{alloc::r#type, Source};")
+    declaration = next(inspection.nodes("use_declaration"))
+    raw = next(node for node in inspection.nodes("identifier") if node.text == b"r#type")
+
+    assert first_rust_identifier(declaration) == "aidoku"
+    assert last_rust_identifier(declaration) == "Source"
+    assert rust_identifier(raw) == "type"

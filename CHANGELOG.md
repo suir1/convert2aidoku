@@ -8,12 +8,15 @@
   one deterministic registry while preserving the existing normalization interface.
 - Move generated return ownership, module topology, and recovered Kotlin chapter projection out of
   the scaffold implementation so their behavior and tests have one local Module owner.
+- Give deterministic filter availability, dynamic trait synthesis, public-only pruning, query
+  projection, and checkbox consumption one Generation Filter Projection Module owner.
 
-### Verified regressions
+### Regression results
 
-- Komiic remains live `verified` when replayed from its saved 43,714-token manifest without a new
-  provider call; Copymanga remains live `verified` from a clean APK conversion with zero AI calls
-  and zero tokens.
+- Copymanga remains live `verified` from a clean APK conversion with zero AI calls and zero tokens.
+- Komiic replay passes WASM, Clippy, packaging, verification, and its static-filter smoke test; its
+  latest core live smoke is correctly `blocked` after the site returned HTTP 200 browser-challenge
+  content to the isolated runner.
 
 ## 0.1.0b3 — 2026-08-11
 

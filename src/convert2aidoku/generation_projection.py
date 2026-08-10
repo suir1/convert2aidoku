@@ -5,12 +5,20 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import Any
 
 from . import scaffold as _implementation
+from .generation_filter_projection import (
+    _project_recovered_check_filter_mappings,
+    _project_recovered_dynamic_filter_queries,
+    _project_recovered_dynamic_filters,
+    _prune_public_only_dynamic_filters,
+    _prune_redundant_dynamic_settings,
+    _synthesize_recovered_dynamic_filters,
+)
 from .models import Capability, GeneratedFile, GeneratedResources, GenerationManifest, SourceIR
 from .normalization_trace import NormalizationTrace
 from .rust_inspection import RustInspection
+from .rust_inspection import last_rust_identifier as _last_rust_identifier
 
 
 @dataclass(frozen=True)
@@ -379,22 +387,6 @@ impl {chapter_dto.name} {{
     ]
 
 
-_RUST_IDENTIFIER_NODES = {"identifier", "raw_identifier", "type_identifier"}
-
-
-def _last_rust_identifier(node: Any) -> str | None:
-    if node is None:
-        return None
-    found: str | None = None
-    stack = [node]
-    while stack:
-        current = stack.pop()
-        if current.type in _RUST_IDENTIFIER_NODES:
-            found = current.text.decode("utf-8", errors="replace").removeprefix("r#")
-        stack.extend(reversed(current.children))
-    return found
-
-
 def _inject_import(content: str, statement: str) -> str:
     crate_attributes = re.match(r"(?:\s*#!\[[^\n]*\]\s*\n)+", content)
     if crate_attributes is None:
@@ -559,7 +551,7 @@ def _synthesize_dynamic_filters(
     context: _ProjectionContext,
     state: _ProjectionState,
 ) -> _ProjectionState:
-    files, traits = _implementation._synthesize_recovered_dynamic_filters(
+    files, traits = _synthesize_recovered_dynamic_filters(
         context.ir,
         state.files,
         source_struct=context.manifest.source_struct,
@@ -572,7 +564,7 @@ def _prune_dynamic_settings(
     _context: _ProjectionContext,
     state: _ProjectionState,
 ) -> _ProjectionState:
-    files, traits = _implementation._prune_redundant_dynamic_settings(
+    files, traits = _prune_redundant_dynamic_settings(
         state.files,
         state.implemented_traits,
     )
@@ -585,7 +577,7 @@ def _prune_public_only_filters(
 ) -> _ProjectionState:
     return _with_files(
         state,
-        _implementation._prune_public_only_dynamic_filters(context.ir, state.files),
+        _prune_public_only_dynamic_filters(context.ir, state.files),
     )
 
 
@@ -739,7 +731,7 @@ def _project_dynamic_filters(
 ) -> _ProjectionState:
     return _with_files(
         state,
-        _implementation._project_recovered_dynamic_filters(
+        _project_recovered_dynamic_filters(
             context.ir,
             state.files,
             implemented_traits=state.implemented_traits,
@@ -753,7 +745,7 @@ def _project_dynamic_filter_queries(
 ) -> _ProjectionState:
     return _with_files(
         state,
-        _implementation._project_recovered_dynamic_filter_queries(context.ir, state.files),
+        _project_recovered_dynamic_filter_queries(context.ir, state.files),
     )
 
 
@@ -763,7 +755,7 @@ def _project_check_filter_mappings(
 ) -> _ProjectionState:
     return _with_files(
         state,
-        _implementation._project_recovered_check_filter_mappings(context.ir, state.files),
+        _project_recovered_check_filter_mappings(context.ir, state.files),
     )
 
 

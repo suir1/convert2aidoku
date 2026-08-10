@@ -10,6 +10,38 @@ from tree_sitter_language_pack import get_parser
 _FUNCTION_CALL = re.compile(r"\b(?:self\.)?([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 _ROUTE_LITERAL = re.compile(r'"(/[^"\\]*(?:\\.[^"\\]*)*)"')
 _REQUEST_CALL_TOKENS = frozenset({"delete", "fetch", "get", "patch", "post", "put", "request"})
+_RUST_IDENTIFIER_NODES = frozenset({"identifier", "raw_identifier", "type_identifier"})
+
+
+def rust_identifier(node: Node | None) -> str | None:
+    if node is None or node.type not in _RUST_IDENTIFIER_NODES:
+        return None
+    return node.text.decode("utf-8", errors="replace").removeprefix("r#")
+
+
+def first_rust_identifier(node: Node | None) -> str | None:
+    if node is None:
+        return None
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if (identifier := rust_identifier(current)) is not None:
+            return identifier
+        stack.extend(reversed(current.children))
+    return None
+
+
+def last_rust_identifier(node: Node | None) -> str | None:
+    if node is None:
+        return None
+    found: str | None = None
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if (identifier := rust_identifier(current)) is not None:
+            found = identifier
+        stack.extend(reversed(current.children))
+    return found
 
 
 @dataclass(frozen=True)

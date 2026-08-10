@@ -39,6 +39,7 @@ from .generation_context import (
     build_settings_context,
     source_ir_prompt_payload,
 )
+from .generation_filter_projection import deterministic_dynamic_filters_available
 from .kotlin_settings import with_kotlin_settings
 from .listing_renderer import (
     deterministic_listing_provider_available,
@@ -65,7 +66,6 @@ from .models import (
 from .normalization_trace import NormalizationTrace
 from .page_renderer import deterministic_page_list_available
 from .scaffold import (
-    deterministic_dynamic_filters_available,
     normalize_pinned_aidoku_rust,
     render_generated_lib_rs,
     validate_generated_content,

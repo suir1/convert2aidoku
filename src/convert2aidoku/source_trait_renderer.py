@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
+from .generation_filter_projection import deterministic_dynamic_filters_available
 from .implementation_ir import project_implementation_ir
 from .listing_renderer import (
     deterministic_listing_provider_available,
@@ -16,7 +17,6 @@ from .rust_identifiers import is_plain_rust_identifier
 from .rust_inspection import RustInspection
 from .scaffold import (
     _environment,
-    deterministic_dynamic_filters_available,
     render_generated_lib_rs,
 )
 
