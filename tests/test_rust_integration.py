@@ -13,6 +13,7 @@ from convert2aidoku.models import (
     ImageUrlPolicy,
     RequestHeaderProfile,
 )
+from convert2aidoku.page_renderer import with_deterministic_page_list
 from convert2aidoku.scaffold import apply_generation_manifest
 from convert2aidoku.toolchain import find_tool
 from convert2aidoku.validator import validate_project
@@ -22,6 +23,8 @@ from tests.test_implementation_ir import (
     _copymanga_detail_files,
     _copymanga_filter_specs,
     _copymanga_listing_files,
+    _copymanga_page_files,
+    _copymanga_page_routes,
     _serializable_listing_files,
 )
 
@@ -353,6 +356,57 @@ def test_deterministic_manga_detail_helper_compiles_for_wasm(tmp_path: Path) -> 
     )
     source = next(item.content for item in manifest.files if item.path == "src/source.rs")
     assert "crate::c2a_manga_detail::get_manga_update(" in source
+    apply_generation_manifest(
+        project,
+        scaffold_ir,
+        manifest,
+        query=None,
+    )
+
+    validation = validate_project(project, live=False)
+    assert validation.build_ok, validation.diagnostics
+    assert validation.package_ok, validation.diagnostics
+
+
+def test_deterministic_page_list_helper_compiles_for_wasm(tmp_path: Path) -> None:
+    assert find_tool("cargo")
+    listing_ir = minimal_source_ir(
+        source_format="decompiled_apk",
+        main_class="CopyManga",
+        files=_copymanga_listing_files(),
+        filter_specs=_copymanga_filter_specs(),
+    )
+    page_ir = minimal_source_ir(
+        source_format="decompiled_apk",
+        main_class="CopyManga",
+        capabilities=[Capability.PAGES],
+        files=_copymanga_page_files(),
+        chapter_page_routes=_copymanga_page_routes(),
+        image_url_policy=ImageUrlPolicy(
+            preserve_cover_urls=True,
+            chapter_resolution_regex=r"\d+(?=x\.(?:jpg|webp)$)",
+        ),
+        request_header_profiles=[
+            RequestHeaderProfile(
+                name="HOT_MANGA_HEADER",
+                domains=["api.hot.example", "mapi.hot.example"],
+            )
+        ],
+    )
+    project, scaffold_ir = scaffold_project(tmp_path, name="page-list-project")
+    manifest = with_deterministic_page_list(
+        page_ir,
+        GenerationManifest(
+            source_struct="Example",
+            files=[
+                GeneratedFile(path="src/lib.rs", content="mod source;"),
+                GeneratedFile(path="src/source.rs", content=MANGA_UPDATE_RUST_SOURCE),
+                render_search_listing(listing_ir),
+            ],
+        ),
+    )
+    source = next(item.content for item in manifest.files if item.path == "src/source.rs")
+    assert "crate::c2a_pages::get_page_list(" in source
     apply_generation_manifest(
         project,
         scaffold_ir,

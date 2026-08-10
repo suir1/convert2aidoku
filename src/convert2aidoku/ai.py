@@ -62,6 +62,7 @@ from .models import (
     validate_generated_path,
 )
 from .normalization_trace import NormalizationTrace
+from .page_renderer import deterministic_page_list_available
 from .scaffold import (
     normalize_pinned_aidoku_rust,
     render_generated_lib_rs,
@@ -311,6 +312,7 @@ def _generation_messages(
     deterministic_provider = deterministic_listing_provider_available(ir)
     deterministic_detail = deterministic_listing and deterministic_manga_detail_available(ir)
     deterministic_update = deterministic_listing and deterministic_manga_update_available(ir)
+    deterministic_pages = deterministic_listing and deterministic_page_list_available(ir)
     listing_instruction = (
         "The tool deterministically owns src/c2a_listing.rs for search, rank, and browse. "
         "Do not return that file or reimplement its exclusive endpoints and DTOs. Implement "
@@ -341,6 +343,13 @@ def _generation_messages(
         )
     else:
         detail_instruction = ""
+    page_instruction = (
+        "The tool also owns src/c2a_pages.rs for chapter pages. Do not return that file or "
+        "duplicate its endpoint and DTOs. Implement Source::get_page_list as the single "
+        "delegation expression crate::c2a_pages::get_page_list(chapter). "
+        if deterministic_pages
+        else ""
+    )
     return [
         {
             "role": "system",
@@ -364,6 +373,7 @@ def _generation_messages(
                 "implemented_traits, and the returned module paths. "
                 + listing_instruction
                 + detail_instruction
+                + page_instruction
                 + "Cargo.toml is forbidden because the tool owns all Cargo metadata. Use only "
                 "allowed dependencies and do not omit required core behavior.\n\n"
                 + json.dumps(source_payload, ensure_ascii=False)
@@ -996,8 +1006,9 @@ class OpenAICompatibleClient:
                     "You repair a generated current Aidoku Rust source. Return a complete "
                     "Rust-only replacement manifest, not a diff and never shell commands. "
                     "Return only src/**/*.rs; filters/settings are tool-owned and preserved. "
-                    "src/c2a_listing.rs and src/c2a_manga_detail.rs are also tool-owned, omitted "
-                    "from this request, and must not be returned or reimplemented. "
+                    "src/c2a_listing.rs, src/c2a_manga_detail.rs, and src/c2a_pages.rs are also "
+                    "tool-owned, omitted from this request, and must not be returned or "
+                    "reimplemented. "
                     "Popular/latest ListingProvider behavior "
                     "may also be tool-owned; preserve its current delegation and trait entry. "
                     "Make only the minimum "

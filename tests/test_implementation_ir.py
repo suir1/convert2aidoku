@@ -33,9 +33,15 @@ from convert2aidoku.models import (
     GenerationManifest,
     ImageUrlPolicy,
     RequestHeaderProfile,
+    RouteReplacement,
     SourceFile,
     SourceFilterOption,
     SourceFilterSpec,
+)
+from convert2aidoku.page_renderer import (
+    deterministic_page_list_available,
+    render_page_list,
+    with_deterministic_page_list,
 )
 from tests.scenarios import minimal_source_ir
 
@@ -647,6 +653,120 @@ def _copymanga_chapter_page_routes() -> list[ChapterPageRoute]:
             ],
         )
     ]
+
+
+def _copymanga_page_routes() -> list[ChapterPageRoute]:
+    return [
+        ChapterPageRoute(
+            source_method="chapterContentDetailUrl(fixChapterId(chapter.url))",
+            chapter_key_template="/comic/{comic_path}/chapter/{chapter_id}",
+            endpoint_template="/api/v3/comic/{normalized_chapter_key}",
+            variants=[
+                ChapterPageRouteVariant(
+                    name="default",
+                    condition="selected API domain is not HotManga",
+                    is_default=True,
+                    strip_prefix="/comic/",
+                    replacements=[RouteReplacement(old="/chapter/", new="/chapter2/")],
+                ),
+                ChapterPageRouteVariant(
+                    name="hot_manga",
+                    condition="selected API domain is HotManga",
+                    strip_prefix="/comic/",
+                ),
+            ],
+        )
+    ]
+
+
+def _copymanga_page_files() -> list[SourceFile]:
+    files = _copymanga_detail_files()
+    main = next(file for file in files if file.path.endswith("CopyManga.java"))
+    main.content = main.content.replace(
+        "return chapters;\n                }",
+        "return chapters;\n                }\n"
+        "public Observable fetchPageList(SChapter chapter) {\n"
+        "    return call(() -> fetchPageList$lambda$22(this, chapter));\n"
+        "}\n"
+        "public static List fetchPageList$lambda$22(CopyManga source, SChapter chapter) {\n"
+        '    throw new UnsupportedOperationException("Method not decompiled");\n'
+        "}",
+    )
+    main.sha256 = hashlib.sha256(main.content.encode()).hexdigest()
+    files.extend(
+        [
+            _file(
+                "sources/example/ResolutionOption.java",
+                r"""
+                public final class ResolutionOption {
+                    PIXEL800("800", "resolution.r800"),
+                    PIXEL1200("1200", "resolution.r1200"),
+                    PIXEL1500("1500", "resolution.r1500");
+                    public static final String KEY = "v2.pref.resolution";
+                    private static final String DEFAULT =
+                        new ResolutionOption("1500", "resolution.r1500").entryKey;
+                    private static final Regex CHAPTER_IMAGE_RESOLUTION_REGEX =
+                        new Regex("\\d+(?=x\\.(?:jpg|webp)$)");
+                    public String translate(String imageUrl, String resolution) {
+                        return CHAPTER_IMAGE_RESOLUTION_REGEX.replaceFirst(imageUrl, resolution);
+                    }
+                }
+                """,
+            ),
+            _file(
+                "sources/example/api/dto/ContentResult.java",
+                """
+                // C2A compacted JADX DTO: generated constructors and value methods removed.
+                public final class ContentResult {
+                    private final ChapterDetail chapter;
+                    private final boolean isVip;
+                }
+                """,
+            ),
+            _file(
+                "sources/example/api/dto/ChapterDetail.java",
+                """
+                // C2A compacted JADX DTO: generated constructors and value methods removed.
+                public final class ChapterDetail {
+                    private final List<ContentItem> contents;
+                    private final List<Integer> words;
+                    public final List<Page> toPageList(String resolution) {
+                        String url = ((ContentItem) CollectionsKt.first(this.contents)).getUrl();
+                        if (url == null || url.length() == 0) {
+                            return null;
+                        }
+                        List<Integer> list = this.words;
+                        if (list == null || list.isEmpty()) {
+                            for (ContentItem content : this.contents) {
+                                ResolutionOption.INSTANCE.translate(content.getUrl(), resolution);
+                            }
+                            return pages;
+                        }
+                        List ordered = CollectionsKt.sortedWith(
+                            CollectionsKt.zip(this.contents, this.words),
+                            (left, right) -> ComparisonsKt.compareValues(
+                                left.getSecond(), right.getSecond()
+                            )
+                        );
+                        for (Pair pair : ordered) {
+                            ContentItem content = (ContentItem) pair.component1();
+                            ResolutionOption.INSTANCE.translate(content.getUrl(), resolution);
+                        }
+                        return pages;
+                    }
+                }
+                """,
+            ),
+            _file(
+                "sources/example/api/dto/ContentItem.java",
+                """
+                // C2A compacted JADX DTO: generated constructors and value methods removed.
+                public final class ContentItem { private final String url; }
+                """,
+            ),
+        ]
+    )
+    return files
 
 
 def _copymanga_filter_specs() -> list[SourceFilterSpec]:
@@ -1680,6 +1800,171 @@ def test_unknown_detail_transform_stays_unresolved() -> None:
     assert "manga detail title mapping is unresolved for ComicDetail" in (
         implementation.unresolved_facts
     )
+
+
+def test_copymanga_page_list_is_projected_rendered_and_owned() -> None:
+    ir = minimal_source_ir(
+        source_format="decompiled_apk",
+        main_class="CopyManga",
+        capabilities=[Capability.PAGES],
+        files=_copymanga_page_files(),
+        chapter_page_routes=_copymanga_page_routes(),
+        image_url_policy=ImageUrlPolicy(
+            preserve_cover_urls=True,
+            chapter_resolution_regex=r"\d+(?=x\.(?:jpg|webp)$)",
+        ),
+        request_header_profiles=[
+            RequestHeaderProfile(
+                name="HOT_MANGA_HEADER",
+                domains=["api.hot.example", "mapi.hot.example"],
+            )
+        ],
+    )
+
+    implementation = project_implementation_ir(ir)
+
+    assert implementation.page_list is not None
+    page = implementation.page_list
+    assert page.endpoint_template == "/api/v3/comic/{normalized_chapter_key}"
+    assert page.normalized_key_parameter == "normalized_chapter_key"
+    assert page.envelope_path == "results"
+    assert [(variant.name, variant.domains) for variant in page.variants] == [
+        ("default", []),
+        ("hot_manga", ["api.hot.example", "mapi.hot.example"]),
+    ]
+    assert page.variants[0].replacements == [("/chapter/", "/chapter2/")]
+    mapping = page.mapping
+    assert mapping.response_type == "ContentResult"
+    assert mapping.chapter_path == "chapter"
+    assert mapping.chapter_type == "ChapterDetail"
+    assert mapping.contents_path == "contents"
+    assert mapping.content_item_type == "ContentItem"
+    assert mapping.url_path == "url"
+    assert mapping.words_path == "words"
+    assert mapping.words_nullable
+    assert mapping.reject_empty_first_url
+    assert mapping.sort_by_words
+    assert mapping.resolution_setting_key == "v2.pref.resolution"
+    assert mapping.resolution_default == "resolution.r1500"
+    assert mapping.resolution_values == {
+        "resolution.r800": "800",
+        "resolution.r1200": "1200",
+        "resolution.r1500": "1500",
+    }
+    assert not [fact for fact in implementation.unresolved_facts if "page list" in fact]
+    assert deterministic_page_list_available(ir)
+
+    rendered = render_page_list(ir, implementation)
+    assert rendered.path == "src/c2a_pages.rs"
+    assert '"api.hot.example" | "mapi.hot.example"' in rendered.content
+    assert 'String::from(key.strip_prefix("/comic/").unwrap_or(key))' in rendered.content
+    assert '.replace("/chapter/", "/chapter2/")' in rendered.content
+    assert '"/api/v3/comic/{}"' in rendered.content
+    assert "contents.into_iter().zip(words)" in rendered.content
+    assert "ordered.sort_by_key(|entry| entry.1);" in rendered.content
+    assert 'Some("resolution.r1200") => "1200"' in rendered.content
+    assert 'url.ends_with(".webp")' in rendered.content
+
+    effective = with_deterministic_page_list(
+        ir,
+        GenerationManifest(
+            source_struct="CopyManga",
+            files=[
+                GeneratedFile(path="src/lib.rs", content="mod source;"),
+                GeneratedFile(
+                    path="src/source.rs",
+                    content="""
+                    pub struct CopyManga;
+                    impl Source for CopyManga {
+                        fn get_page_list(
+                            &self,
+                            _manga: Manga,
+                            chapter: Chapter,
+                        ) -> Result<Vec<Page>> {
+                            panic!("AI pages")
+                        }
+                    }
+                    """,
+                ),
+                GeneratedFile(path="src/c2a_listing.rs", content="fn listing() {}"),
+                GeneratedFile(
+                    path="src/c2a_pages.rs",
+                    content='compile_error!("AI must not own this file");',
+                ),
+            ],
+        ),
+    )
+    effective_files = {generated.path: generated.content for generated in effective.files}
+    assert "AI pages" not in effective_files["src/source.rs"]
+    assert "crate::c2a_pages::get_page_list(chapter)" in effective_files["src/source.rs"]
+    assert "compile_error!" not in effective_files["src/c2a_pages.rs"]
+    assert "mod c2a_pages;" in effective_files["src/lib.rs"]
+    assert any(dependency.name == "serde" for dependency in effective.dependencies)
+
+    context = build_generation_context(ir).as_payload()
+    omitted = {item["path"]: item["reason"] for item in context["omitted_source_files"]}
+    for name in ("ContentResult", "ChapterDetail", "ContentItem"):
+        assert omitted[f"sources/example/api/dto/{name}.java"] == (
+            "represented_in_deterministic_page_list"
+        )
+    assert omitted["sources/example/ResolutionOption.java"] == (
+        "represented_in_deterministic_page_list"
+    )
+    assert context["context_stats"]["deterministic_page_list_dto_shapes"] == 3
+    main_evidence = next(
+        item["content"]
+        for item in context["source_evidence"]
+        if item["path"].endswith("CopyManga.java")
+    )
+    assert "fetchPageList" not in main_evidence
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["missing_order", "ambiguous_wrapper", "missing_variant_domains"],
+)
+def test_incomplete_page_evidence_stays_ai_owned(mutation: str) -> None:
+    files = _copymanga_page_files()
+    profiles = [RequestHeaderProfile(name="HOT_MANGA_HEADER", domains=["api.hot.example"])]
+    if mutation == "missing_order":
+        detail = next(file for file in files if file.path.endswith("ChapterDetail.java"))
+        detail.content = detail.content.replace(
+            "left.getSecond(), right.getSecond()", "left, right"
+        )
+        detail.sha256 = hashlib.sha256(detail.content.encode()).hexdigest()
+    elif mutation == "ambiguous_wrapper":
+        files.append(
+            _file(
+                "sources/example/api/dto/OtherEnvelope.java",
+                """
+                    public final class OtherEnvelope<T> {
+                        private final T data;
+                    }
+                    """,
+            )
+        )
+    else:
+        profiles = []
+    ir = minimal_source_ir(
+        source_format="decompiled_apk",
+        main_class="CopyManga",
+        capabilities=[Capability.PAGES],
+        files=files,
+        chapter_page_routes=_copymanga_page_routes(),
+        image_url_policy=ImageUrlPolicy(
+            preserve_cover_urls=True,
+            chapter_resolution_regex=r"\d+(?=x\.(?:jpg|webp)$)",
+        ),
+        request_header_profiles=profiles,
+    )
+
+    implementation = project_implementation_ir(ir)
+
+    assert implementation.page_list is None
+    assert "page list request, DTO, ordering, or resolution contract is unresolved" in (
+        implementation.unresolved_facts
+    )
+    assert not deterministic_page_list_available(ir)
 
 
 def test_ambiguous_detail_url_helper_stays_unresolved() -> None:

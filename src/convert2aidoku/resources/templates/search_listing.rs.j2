@@ -21,7 +21,7 @@ struct {{ struct.name }} {
 }
 
 {% endfor %}
-fn api_domain() -> String {
+pub(crate) fn api_domain() -> String {
 {% if api_setting_key %}
     let selected = defaults_get::<String>({{ api_setting_key | rust_string }})
         .unwrap_or_else(|| String::from({{ api_default_host | rust_string }}));

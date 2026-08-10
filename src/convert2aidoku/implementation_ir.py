@@ -10,7 +10,11 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .decompiled_input import DecompiledDtoShape, decompiled_dto_shapes
+from .decompiled_input import (
+    DecompiledDtoShape,
+    decompiled_dto_shapes,
+    decompiled_nullable_dto_fields,
+)
 from .models import Capability, SourceFile, SourceFilterSpec, SourceIR
 
 
@@ -350,6 +354,79 @@ class MangaDetailImplementationIR(BaseModel):
     chapter_list: ChapterListImplementationIR | None = None
 
 
+class PageRouteVariantIR(BaseModel):
+    """One proven chapter-key normalization branch for a selected API origin."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
+    is_default: bool = False
+    domains: list[str] = Field(default_factory=list)
+    strip_prefix: str = ""
+    replacements: list[tuple[str, str]] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def branch_is_unambiguous(self) -> PageRouteVariantIR:
+        if self.is_default and self.domains:
+            raise ValueError("default page route variant cannot declare domains")
+        if not self.is_default and not self.domains:
+            raise ValueError("non-default page route variant requires recovered domains")
+        if len(self.domains) != len(set(self.domains)):
+            raise ValueError("page route variant domains must be unique")
+        return self
+
+
+class PageMappingIR(BaseModel):
+    """DTO and ordering behavior recovered from one complete toPageList method."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    response_type: str
+    chapter_path: str
+    chapter_type: str
+    contents_path: str
+    content_item_type: str
+    url_path: str
+    words_path: str
+    words_nullable: bool
+    reject_empty_first_url: bool
+    sort_by_words: bool
+    resolution_setting_key: str
+    resolution_default: str
+    resolution_values: dict[str, str] = Field(min_length=1)
+    resolution_regex: str
+
+    @model_validator(mode="after")
+    def resolution_contract_is_complete(self) -> PageMappingIR:
+        if self.resolution_default not in self.resolution_values:
+            raise ValueError("page resolution default must be one of the recovered values")
+        if len(set(self.resolution_values.values())) != len(self.resolution_values):
+            raise ValueError("page resolution values must map to unique pixel widths")
+        if not all(value.isdecimal() for value in self.resolution_values.values()):
+            raise ValueError("page resolution values must be decimal pixel widths")
+        return self
+
+
+class PageListImplementationIR(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    endpoint_template: str = Field(pattern=r"^/")
+    normalized_key_parameter: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
+    variants: list[PageRouteVariantIR] = Field(min_length=1)
+    envelope_path: str
+    data_shapes: list[DataShapeIR] = Field(default_factory=list)
+    mapping: PageMappingIR
+
+    @model_validator(mode="after")
+    def route_contract_is_complete(self) -> PageListImplementationIR:
+        marker = "{" + self.normalized_key_parameter + "}"
+        if self.endpoint_template.count(marker) != 1:
+            raise ValueError("page endpoint must contain its normalized key exactly once")
+        if sum(variant.is_default for variant in self.variants) != 1:
+            raise ValueError("page route requires exactly one default variant")
+        return self
+
+
 class ListingSelectionIR(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -463,6 +540,7 @@ class ImplementationIR(BaseModel):
     source_id: str
     listing: ListingImplementationIR | None = None
     manga_detail: MangaDetailImplementationIR | None = None
+    page_list: PageListImplementationIR | None = None
     unresolved_facts: list[str] = Field(default_factory=list)
     policy_fallback_facts: list[str] = Field(default_factory=list)
 
@@ -2752,6 +2830,240 @@ def _project_manga_detail(
     return detail.model_copy(update={"chapter_list": chapter_list})
 
 
+def _page_variant_domains(ir: SourceIR, variant_name: str) -> list[str]:
+    token = re.sub(r"[^a-z0-9]", "", variant_name.lower())
+    domains: list[str] = []
+    for profile in ir.request_header_profiles:
+        profile_token = re.sub(r"[^a-z0-9]", "", profile.name.lower())
+        if token and token in profile_token:
+            domains.extend(domain for domain in profile.domains if domain != "custom")
+    return list(dict.fromkeys(domains))
+
+
+def _page_route_variants(ir: SourceIR) -> tuple[str, str, list[PageRouteVariantIR]] | None:
+    if len(ir.chapter_page_routes) != 1:
+        return None
+    route = ir.chapter_page_routes[0]
+    placeholders = re.findall(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", route.endpoint_template)
+    if len(placeholders) != 1:
+        return None
+    variants: list[PageRouteVariantIR] = []
+    for variant in route.variants:
+        domains = [] if variant.is_default else _page_variant_domains(ir, variant.name)
+        if not variant.is_default and not domains:
+            return None
+        variants.append(
+            PageRouteVariantIR(
+                name=variant.name,
+                is_default=variant.is_default,
+                domains=domains,
+                strip_prefix=variant.strip_prefix,
+                replacements=[
+                    (replacement.old, replacement.new) for replacement in variant.replacements
+                ],
+            )
+        )
+    return route.endpoint_template, placeholders[0], variants
+
+
+def _page_resolution_contract(
+    ir: SourceIR,
+    page_block: str,
+) -> tuple[str, str, dict[str, str], str] | None:
+    policy = ir.image_url_policy
+    if policy is None or policy.chapter_resolution_regex is None:
+        return None
+    class_names = set(
+        re.findall(
+            r"\b([A-Za-z_][A-Za-z0-9_]*)\.INSTANCE\.translate\s*\(",
+            page_block,
+        )
+    )
+    if len(class_names) != 1:
+        return None
+    class_name = next(iter(class_names))
+    candidates = [
+        source.content for source in ir.files if PurePosixPath(source.path).stem == class_name
+    ]
+    if len(candidates) != 1:
+        return None
+    content = candidates[0]
+    key_match = re.search(
+        r'\bpublic\s+static\s+final\s+String\s+KEY\s*=\s*"((?:\\.|[^"\\])*)"',
+        content,
+    )
+    regex_match = re.search(r'new\s+Regex\(\s*"((?:\\.|[^"\\])*)"\s*\)', content)
+    if key_match is None or regex_match is None:
+        return None
+    recovered_regex = _decode_java_string(regex_match.group(1))
+    if recovered_regex != policy.chapter_resolution_regex:
+        return None
+    options = {
+        stored: pixels
+        for _name, pixels, stored in re.findall(
+            r'^\s*([A-Z][A-Z0-9_]*)\(\s*"([1-9][0-9]*)"\s*,\s*'
+            r'"((?:\\.|[^"\\])*)"\s*\)',
+            content,
+            re.MULTILINE,
+        )
+    }
+    if not options:
+        return None
+    default_match = re.search(
+        rf"\bDEFAULT\s*=\s*new\s+{re.escape(class_name)}\(\s*"
+        r'"[1-9][0-9]*"\s*,\s*"((?:\\.|[^"\\])*)"\s*\)\.entryKey',
+        content,
+    )
+    default = _decode_java_string(default_match.group(1)) if default_match else None
+    if default is None:
+        named_options = {
+            name: stored
+            for name, _pixels, stored in re.findall(
+                r'^\s*([A-Z][A-Z0-9_]*)\(\s*"([1-9][0-9]*)"\s*,\s*'
+                r'"((?:\\.|[^"\\])*)"\s*\)',
+                content,
+                re.MULTILINE,
+            )
+        }
+        named_default = re.search(
+            r"\bDEFAULT\s*=\s*([A-Z][A-Z0-9_]*)\.(?:entryKey|getEntryKey\(\))",
+            content,
+        )
+        default = named_options.get(named_default.group(1)) if named_default else None
+    if default not in options:
+        return None
+    return _decode_java_string(key_match.group(1)), default, options, recovered_regex
+
+
+def _project_page_mapping(
+    ir: SourceIR,
+    shapes: tuple[DecompiledDtoShape, ...],
+) -> tuple[PageMappingIR, str, list[DataShapeIR]] | None:
+    by_name = {shape.name: shape for shape in shapes}
+    candidates: list[tuple[DecompiledDtoShape, str]] = []
+    for source in ir.files:
+        shape = by_name.get(PurePosixPath(source.path).stem)
+        if shape is None:
+            continue
+        found = re.search(r"\btoPageList\s*\([^)]*\)\s*\{", source.content)
+        if found is not None:
+            candidates.append((shape, _brace_block(source.content, found.start())))
+    if len(candidates) != 1:
+        return None
+    chapter_shape, block = candidates[0]
+    first = re.search(
+        r"CollectionsKt\.first\(\s*this\.([A-Za-z_][A-Za-z0-9_]*)\s*\)"
+        r"\)\.get([A-Z][A-Za-z0-9_]*)\(\)",
+        block,
+    )
+    words_binding = re.search(
+        r"\bList(?:<[^>]+>)?\s+[A-Za-z_][A-Za-z0-9_]*\s*=\s*this\."
+        r"([A-Za-z_][A-Za-z0-9_]*)\s*;",
+        block,
+    )
+    if first is None or words_binding is None:
+        return None
+    contents_path = first.group(1)
+    words_path = words_binding.group(1)
+    url_path = first.group(2)[:1].lower() + first.group(2)[1:]
+    contents_field = next(
+        (field for field in chapter_shape.fields if field.name == contents_path),
+        None,
+    )
+    words_field = next((field for field in chapter_shape.fields if field.name == words_path), None)
+    content_item_type = (
+        _list_item_type(contents_field.java_type) if contents_field is not None else None
+    )
+    content_shape = by_name.get(content_item_type or "")
+    if (
+        words_field is None
+        or _list_item_type(words_field.java_type) not in {"Integer", "int"}
+        or content_shape is None
+        or not any(
+            field.name == url_path and field.java_type == "String" for field in content_shape.fields
+        )
+    ):
+        return None
+    required_behavior = (
+        re.search(r"\breturn\s+null\s*;", block) is not None,
+        re.search(r"\b(?:url|[A-Za-z_]\w*)\.length\(\)\s*==\s*0", block) is not None,
+        re.search(r"\b[A-Za-z_]\w*\s*==\s*null\s*\|\|\s*[A-Za-z_]\w*\.isEmpty\(\)", block)
+        is not None,
+        re.search(
+            rf"CollectionsKt\.zip\(\s*this\.{re.escape(contents_path)}\s*,\s*"
+            rf"this\.{re.escape(words_path)}\s*\)",
+            block,
+        )
+        is not None,
+        "CollectionsKt.sortedWith" in block and ".getSecond()" in block,
+        block.count(".INSTANCE.translate(") >= 2,
+    )
+    if not all(required_behavior):
+        return None
+    parents = [
+        (shape, field)
+        for shape in shapes
+        for field in shape.fields
+        if field.java_type.rsplit(".", 1)[-1] == chapter_shape.name
+    ]
+    generic_fields = [
+        field.serialized_name
+        for shape in shapes
+        for field in shape.fields
+        if field.java_type == "T"
+    ]
+    resolution = _page_resolution_contract(ir, block)
+    if len(parents) != 1 or len(generic_fields) != 1 or resolution is None:
+        return None
+    response_shape, chapter_field = parents[0]
+    setting_key, default, values, resolution_regex = resolution
+    nullable = decompiled_nullable_dto_fields(ir.files)
+    mapping = PageMappingIR(
+        response_type=response_shape.name,
+        chapter_path=chapter_field.name,
+        chapter_type=chapter_shape.name,
+        contents_path=contents_path,
+        content_item_type=content_shape.name,
+        url_path=url_path,
+        words_path=words_path,
+        words_nullable=(chapter_shape.name, words_field.serialized_name) in nullable,
+        reject_empty_first_url=True,
+        sort_by_words=True,
+        resolution_setting_key=setting_key,
+        resolution_default=default,
+        resolution_values=values,
+        resolution_regex=resolution_regex,
+    )
+    return (
+        mapping,
+        generic_fields[0],
+        _data_shape_closure(
+            shapes,
+            {response_shape.name, chapter_shape.name, content_shape.name},
+        ),
+    )
+
+
+def _project_page_list(
+    ir: SourceIR,
+    shapes: tuple[DecompiledDtoShape, ...],
+) -> PageListImplementationIR | None:
+    route = _page_route_variants(ir)
+    mapping = _project_page_mapping(ir, shapes)
+    if route is None or mapping is None:
+        return None
+    endpoint_template, normalized_key_parameter, variants = route
+    page_mapping, envelope_path, data_shapes = mapping
+    return PageListImplementationIR(
+        endpoint_template=endpoint_template,
+        normalized_key_parameter=normalized_key_parameter,
+        variants=variants,
+        envelope_path=envelope_path,
+        data_shapes=data_shapes,
+        mapping=page_mapping,
+    )
+
+
 def _listing_data_shapes(
     shapes: tuple[DecompiledDtoShape, ...],
     containers: list[ListingContainerIR],
@@ -2766,7 +3078,7 @@ def _listing_data_shapes(
 
 
 def project_implementation_ir(ir: SourceIR) -> ImplementationIR:
-    """Project the deterministic listing slice without consulting an AI provider."""
+    """Project proven implementation slices without consulting an AI provider."""
     if ir.source_format != "decompiled_apk":
         return ImplementationIR(
             source_id=ir.metadata.source_id,
@@ -2806,6 +3118,7 @@ def project_implementation_ir(ir: SourceIR) -> ImplementationIR:
         ),
     )
     manga_detail = _project_manga_detail(ir, java, shapes, base)
+    page_list = _project_page_list(ir, shapes) if Capability.PAGES in ir.capabilities else None
     unresolved: list[str] = []
     policy_fallbacks: list[str] = []
     filter_ids = {spec.id for spec in ir.filter_specs}
@@ -2884,6 +3197,8 @@ def project_implementation_ir(ir: SourceIR) -> ImplementationIR:
                     f"{chapter_list.mapping.item_type} because its presentation transform is "
                     "excluded by SourceIR policy"
                 )
+    if Capability.PAGES in ir.capabilities and page_list is None:
+        unresolved.append("page list request, DTO, ordering, or resolution contract is unresolved")
     return ImplementationIR(
         source_id=ir.metadata.source_id,
         listing=ListingImplementationIR(
@@ -2896,6 +3211,7 @@ def project_implementation_ir(ir: SourceIR) -> ImplementationIR:
             provider=_listing_provider(java, endpoints),
         ),
         manga_detail=manga_detail,
+        page_list=page_list,
         unresolved_facts=unresolved,
         policy_fallback_facts=policy_fallbacks,
     )

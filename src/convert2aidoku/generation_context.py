@@ -11,6 +11,7 @@ from .errors import InputError
 from .listing_renderer import search_listing_ownership
 from .manga_detail_renderer import manga_update_ownership
 from .models import Capability, SourceFile, SourceIR
+from .page_renderer import page_list_ownership
 
 DEFAULT_GENERATION_EVIDENCE_CHARS = 110_000
 DEFAULT_SETTINGS_EVIDENCE_CHARS = 50_000
@@ -154,19 +155,30 @@ def build_generation_context(
 
     listing_ownership = search_listing_ownership(ir)
     update_ownership = manga_update_ownership(ir)
+    page_ownership = page_list_ownership(ir)
     listing_dto_types = (
         listing_ownership.dto_types if listing_ownership is not None else frozenset()
     )
     update_dto_types = update_ownership.dto_types if update_ownership is not None else frozenset()
-    owned_dto_types = listing_dto_types | update_dto_types
+    page_dto_types = page_ownership.dto_types if page_ownership is not None else frozenset()
+    page_source_stems = (
+        page_ownership.source_stems if page_ownership is not None else frozenset()
+    )
+    owned_dto_types = listing_dto_types | update_dto_types | page_dto_types
     excluded_methods = frozenset(
         {
             *(listing_ownership.java_methods if listing_ownership is not None else ()),
             *(update_ownership.java_methods if update_ownership is not None else ()),
+            *(page_ownership.java_methods if page_ownership is not None else ()),
         }
     )
-    excluded_method_prefixes = (
-        update_ownership.java_method_prefixes if update_ownership is not None else ()
+    excluded_method_prefixes = tuple(
+        dict.fromkeys(
+            [
+                *(update_ownership.java_method_prefixes if update_ownership is not None else ()),
+                *(page_ownership.java_method_prefixes if page_ownership is not None else ()),
+            ]
+        )
     )
     dto_shapes = [
         shape.render()
@@ -176,6 +188,16 @@ def build_generation_context(
     candidates: list[tuple[int, int, SourceFile, dict[str, Any]]] = []
     omitted: list[dict[str, Any]] = []
     for index, source in enumerate(ir.files):
+        if PurePosixPath(source.path).stem in page_source_stems:
+            omitted.append(
+                {
+                    "path": source.path,
+                    "sha256": source.sha256,
+                    "chars": len(source.content),
+                    "reason": "represented_in_deterministic_page_list",
+                }
+            )
+            continue
         if source.path == "resources/AndroidManifest.xml":
             omitted.append(
                 {
@@ -198,7 +220,11 @@ def build_generation_context(
                     "reason": (
                         "represented_in_deterministic_search_listing"
                         if PurePosixPath(source.path).stem in listing_dto_types
-                        else "represented_in_deterministic_manga_update"
+                        else (
+                            "represented_in_deterministic_manga_update"
+                            if PurePosixPath(source.path).stem in update_dto_types
+                            else "represented_in_deterministic_page_list"
+                        )
                     ),
                 }
             )
@@ -271,6 +297,7 @@ def build_generation_context(
             "dto_shapes": len(dto_shapes),
             "deterministic_search_listing_dto_shapes": len(listing_dto_types),
             "deterministic_manga_update_dto_shapes": len(update_dto_types),
+            "deterministic_page_list_dto_shapes": len(page_dto_types),
         },
     )
 

@@ -1,0 +1,126 @@
+use aidoku::alloc::{format, String, Vec};
+use aidoku::imports::defaults::defaults_get;
+use aidoku::serde::Deserialize;
+use aidoku::{Chapter, Page, PageContent, Result};
+
+const PAGE_SITE_URL: &str = {{ site_url | rust_string }};
+
+#[derive(Deserialize, Default)]
+struct {{ page.response_type }} {
+    #[serde(default, rename = {{ page.chapter_field.serialized_name | rust_string }})]
+    {{ page.chapter_field.name }}: {{ page.chapter_type }},
+}
+
+#[derive(Deserialize, Default)]
+struct {{ page.chapter_type }} {
+    #[serde(default, rename = {{ page.contents_field.serialized_name | rust_string }})]
+    {{ page.contents_field.name }}: Vec<{{ page.content_item_type }}>,
+    #[serde(default, rename = {{ page.words_field.serialized_name | rust_string }})]
+    {{ page.words_field.name }}: {% if page.words_nullable %}Option<{% endif %}Vec<i32>{% if page.words_nullable %}>{% endif %},
+}
+
+#[derive(Deserialize, Default)]
+struct {{ page.content_item_type }} {
+    #[serde(default, rename = {{ page.url_field.serialized_name | rust_string }})]
+    {{ page.url_field.name }}: String,
+}
+
+#[derive(Deserialize)]
+struct PageEnvelope {
+    #[serde(rename = {{ page.envelope_path | rust_string }})]
+    value: {{ page.response_type }},
+}
+
+fn normalized_chapter_key(chapter_key: &str) -> String {
+    let key = chapter_key.strip_prefix(PAGE_SITE_URL).unwrap_or(chapter_key);
+    match crate::c2a_listing::api_domain().as_str() {
+{% for variant in page.variants if not variant.is_default %}
+        {% for domain in variant.domains %}{{ domain | rust_string }}{% if not loop.last %} | {% endif %}{% endfor %} => {{ variant.expression }},
+{% endfor %}
+{% for variant in page.variants if variant.is_default %}
+        _ => {{ variant.expression }},
+{% endfor %}
+    }
+}
+
+fn selected_resolution() -> &'static str {
+    match defaults_get::<String>({{ page.resolution_setting_key | rust_string }}).as_deref() {
+{% for stored, pixels in page.resolution_values %}
+        Some({{ stored | rust_string }}) => {{ pixels | rust_string }},
+{% endfor %}
+        _ => {{ page.resolution_default_pixels | rust_string }},
+    }
+}
+
+fn translate_resolution(url: String) -> String {
+    let suffix_start = if url.ends_with(".jpg") {
+        Some(url.len() - 4)
+    } else if url.ends_with(".webp") {
+        Some(url.len() - 5)
+    } else {
+        None
+    };
+    if let Some(suffix_start) = suffix_start {
+        let before_suffix = &url[..suffix_start];
+        if let Some(x_pos) = before_suffix.rfind('x') {
+            let before_x = &before_suffix[..x_pos];
+            let digits_start = before_x
+                .rfind(|character: char| !character.is_ascii_digit())
+                .map_or(0, |position| position + 1);
+            if digits_start < x_pos {
+                return format!(
+                    "{}{}{}",
+                    &url[..digits_start],
+                    selected_resolution(),
+                    &url[x_pos..],
+                );
+            }
+        }
+    }
+    url
+}
+
+pub(crate) fn get_page_list(chapter: Chapter) -> Result<Vec<Page>> {
+    let normalized_key = normalized_chapter_key(&chapter.key);
+    let endpoint = crate::c2a_listing::api_url(&format!(
+        {{ page.endpoint_format | rust_string }},
+        normalized_key,
+    ));
+    let response: PageEnvelope = crate::c2a_listing::get_json(endpoint)?;
+    let detail = response.value.{{ page.chapter_field.name }};
+    if detail
+        .{{ page.contents_field.name }}
+        .first()
+        .map_or(true, |content| content.{{ page.url_field.name }}.is_empty())
+    {
+        return Ok(Vec::new());
+    }
+    let contents = detail.{{ page.contents_field.name }};
+    let words = detail.{{ page.words_field.name }};
+{% if page.words_nullable %}
+    let contents = match words {
+        Some(words) if !words.is_empty() => {
+{% else %}
+    let contents = if words.is_empty() {
+        contents
+    } else {
+{% endif %}
+            let mut ordered: Vec<({{ page.content_item_type }}, i32)> =
+                contents.into_iter().zip(words).collect();
+            ordered.sort_by_key(|entry| entry.1);
+            ordered.into_iter().map(|entry| entry.0).collect()
+{% if page.words_nullable %}
+        }
+        _ => contents,
+    };
+{% else %}
+    };
+{% endif %}
+    Ok(contents
+        .into_iter()
+        .map(|content| Page {
+            content: PageContent::url(translate_resolution(content.{{ page.url_field.name }})),
+            ..Default::default()
+        })
+        .collect())
+}
