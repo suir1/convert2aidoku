@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterable
+from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import PurePosixPath
 from typing import Literal
@@ -123,6 +124,9 @@ class ListingContainerIR(BaseModel):
     total_path: str | None = None
 
 
+MangaProjectionField = Literal["key", "title", "cover", "authors", "tags", "description"]
+
+
 class MangaMappingIR(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -135,9 +139,36 @@ class MangaMappingIR(BaseModel):
     authors_item_projection: Literal["kotlin_data_to_string"] | None = None
     tags_item_projection: Literal["kotlin_data_to_string"] | None = None
     description_path: str | None = None
-    unresolved_fields: list[Literal["key", "title", "cover", "authors", "tags", "description"]] = (
-        Field(default_factory=list)
-    )
+    unresolved_fields: list[MangaProjectionField] = Field(default_factory=list)
+    policy_fallback_fields: list[MangaProjectionField] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def projection_fidelity_is_unambiguous(self) -> MangaMappingIR:
+        if len(self.unresolved_fields) != len(set(self.unresolved_fields)):
+            raise ValueError("unresolved manga mapping fields must be unique")
+        if len(self.policy_fallback_fields) != len(set(self.policy_fallback_fields)):
+            raise ValueError("policy fallback manga mapping fields must be unique")
+        overlap = set(self.unresolved_fields) & set(self.policy_fallback_fields)
+        if overlap:
+            raise ValueError(
+                "manga mapping fields cannot be unresolved and policy fallbacks: "
+                + ", ".join(sorted(overlap))
+            )
+        projections = {
+            "key": self.key_template,
+            "title": self.title_path,
+            "cover": self.cover_path,
+            "authors": self.authors_path,
+            "tags": self.tags_path,
+            "description": self.description_path,
+        }
+        missing = [field for field in self.policy_fallback_fields if projections[field] is None]
+        if missing:
+            raise ValueError(
+                "policy fallback manga mapping fields require a recovered projection: "
+                + ", ".join(missing)
+            )
+        return self
 
 
 class ListingSelectionIR(BaseModel):
@@ -253,6 +284,7 @@ class ImplementationIR(BaseModel):
     source_id: str
     listing: ListingImplementationIR | None = None
     unresolved_facts: list[str] = Field(default_factory=list)
+    policy_fallback_facts: list[str] = Field(default_factory=list)
 
 
 def _decode_java_string(value: str) -> str:
@@ -1380,28 +1412,51 @@ def _setter_field(block: str, setter: str) -> str | None:
     return found.group(1) if found else None
 
 
+@dataclass(frozen=True)
+class _FieldProjection:
+    java_name: str | None
+    policy_fallback: bool = False
+
+
+def _script_conversion_fallback_field(
+    argument: str,
+    allowed_wrapper_variables: frozenset[str],
+) -> str | None:
+    """Recover raw text only when an explicitly excluded script converter wraps it."""
+    if not allowed_wrapper_variables:
+        return None
+    found = re.fullmatch(
+        r"\s*(?:(?:[A-Za-z_][A-Za-z0-9_$]*)\.)*(?:translate|convert)\s*\("
+        r"\s*this\.([A-Za-z_][A-Za-z0-9_]*)\s*,\s*"
+        r"([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*",
+        argument,
+        re.IGNORECASE,
+    )
+    if found is None or found.group(2) not in allowed_wrapper_variables:
+        return None
+    return found.group(1)
+
+
 def _setter_projection_field(
     block: str,
     setter: str,
     *,
     allowed_wrapper_variables: frozenset[str] = frozenset(),
     allow_wrapper: bool = False,
-) -> str | None:
+) -> _FieldProjection:
     direct = _setter_field(block, setter)
     if direct is not None:
-        return direct
+        return _FieldProjection(direct)
     argument = _setter_argument(block, setter)
     if argument is None or len(_split_java_concatenation(argument)) != 1:
-        return None
+        return _FieldProjection(None)
+    script_field = _script_conversion_fallback_field(argument, allowed_wrapper_variables)
+    if script_field is not None:
+        return _FieldProjection(script_field, policy_fallback=True)
     fields = set(re.findall(r"\bthis\.([A-Za-z_][A-Za-z0-9_]*)", argument))
-    has_evidence_variable = any(
-        re.search(rf"\b{re.escape(variable)}\b", argument) for variable in allowed_wrapper_variables
-    )
-    return (
-        next(iter(fields))
-        if len(fields) == 1 and (allow_wrapper or has_evidence_variable)
-        else None
-    )
+    if allow_wrapper and len(fields) == 1:
+        return _FieldProjection(next(iter(fields)), policy_fallback=True)
+    return _FieldProjection(None)
 
 
 def _setter_path(
@@ -1411,16 +1466,18 @@ def _setter_path(
     *,
     allowed_wrapper_variables: frozenset[str] = frozenset(),
     allow_wrapper: bool = False,
-) -> str | None:
-    field = _setter_projection_field(
+) -> _FieldProjection:
+    projection = _setter_projection_field(
         block,
         setter,
         allowed_wrapper_variables=allowed_wrapper_variables,
         allow_wrapper=allow_wrapper,
     )
-    if field is None or not any(item.name == field for item in shape.fields):
-        return None
-    return field
+    if projection.java_name is None or not any(
+        item.name == projection.java_name for item in shape.fields
+    ):
+        return _FieldProjection(None)
+    return projection
 
 
 def _string_template(argument: str, shape: DecompiledDtoShape) -> str | None:
@@ -1454,42 +1511,42 @@ def _setter_collection_projection(
     shapes: dict[str, DecompiledDtoShape],
     kotlin_data_classes: frozenset[str],
     allowed_wrapper_variables: frozenset[str] = frozenset(),
-) -> tuple[str | None, Literal["kotlin_data_to_string"] | None]:
+) -> tuple[str | None, Literal["kotlin_data_to_string"] | None, bool]:
     argument = _setter_argument(block, setter)
     if argument is None:
-        return None, None
+        return None, None, False
     fields = set(re.findall(r"\bthis\.([A-Za-z_][A-Za-z0-9_]*)", argument))
     if len(fields) != 1:
-        return None, None
+        return None, None, False
     java_name = next(iter(fields))
     field = next((item for item in shape.fields if item.name == java_name), None)
     if field is None:
-        return None, None
+        return None, None, False
     item_type = _list_item_type(field.java_type) if field is not None else None
     if item_type is None:
+        projection = _setter_projection_field(
+            block,
+            setter,
+            allowed_wrapper_variables=allowed_wrapper_variables,
+        )
         path = (
             java_name
             if field.java_type in {"String", "java.lang.String"}
-            and _setter_projection_field(
-                block,
-                setter,
-                allowed_wrapper_variables=allowed_wrapper_variables,
-            )
-            == java_name
+            and projection.java_name == java_name
             else None
         )
-        return path, None
+        return path, None, projection.policy_fallback if path is not None else False
     if not re.match(
         r"\s*(?:(?:[A-Za-z_][A-Za-z0-9_$]*)\.)*"
         r"(?:join|joinToString(?:\$default)?)\s*\(",
         argument,
     ):
-        return None, None
+        return None, None, False
     if item_type in {"String", "java.lang.String"}:
-        return f"{java_name}[]", None
+        return f"{java_name}[]", None, False
     item_shape = shapes.get(item_type)
     if item_shape is None:
-        return None, None
+        return None, None, False
     getter_fields = set()
     for _variable, getter in re.findall(
         r"\b([A-Za-z_][A-Za-z0-9_]*)\s*->\s*\1\.get"
@@ -1504,28 +1561,25 @@ def _setter_collection_projection(
     ):
         if re.search(rf"\b{re.escape(item_type)}\s+{re.escape(variable)}\b", argument):
             getter_fields.add(getter[:1].lower() + getter[1:])
-    if allowed_wrapper_variables:
-        has_evidence_variable = any(
-            re.search(rf"\b{re.escape(variable)}\b", argument)
-            for variable in allowed_wrapper_variables
-        )
-        if has_evidence_variable:
-            for _variable, getter in re.findall(
-                r"\b([A-Za-z_][A-Za-z0-9_]*)\s*->[^;{}]*?"
-                r"\b\1\.get([A-Z][A-Za-z0-9_]*)\s*\(\s*\)",
-                argument,
-            ):
-                getter_fields.add(getter[:1].lower() + getter[1:])
-            for variable, getter in re.findall(
-                r"\b([A-Za-z_][A-Za-z0-9_]*)\.get"
-                r"([A-Z][A-Za-z0-9_]*)\s*\(\s*\)",
-                argument,
-            ):
-                if re.search(rf"\b{re.escape(item_type)}\s+{re.escape(variable)}\b", argument):
-                    getter_fields.add(getter[:1].lower() + getter[1:])
     children = [field for field in item_shape.fields if field.name in getter_fields]
     if len(children) == 1:
-        return f"{java_name}[].{children[0].name}", None
+        return f"{java_name}[].{children[0].name}", None, False
+    fallback_getter_fields: set[str] = set()
+    if allowed_wrapper_variables:
+        variables = "|".join(re.escape(variable) for variable in allowed_wrapper_variables)
+        for getter, _wrapper_variable in re.findall(
+            r"(?:(?:[A-Za-z_][A-Za-z0-9_$]*)\.)*(?:translate|convert)\s*\("
+            r"\s*[A-Za-z_][A-Za-z0-9_]*\.get([A-Z][A-Za-z0-9_]*)\s*\(\s*\)"
+            rf"\s*,\s*({variables})\s*\)",
+            argument,
+            re.IGNORECASE,
+        ):
+            fallback_getter_fields.add(getter[:1].lower() + getter[1:])
+    fallback_children = [
+        field for field in item_shape.fields if field.name in fallback_getter_fields
+    ]
+    if not getter_fields and len(fallback_children) == 1:
+        return f"{java_name}[].{fallback_children[0].name}", None, True
     implicit_data_to_string = (
         not getter_fields
         and item_type in kotlin_data_classes
@@ -1538,8 +1592,8 @@ def _setter_collection_projection(
         is not None
     )
     if implicit_data_to_string:
-        return f"{java_name}[]", "kotlin_data_to_string"
-    return None, None
+        return f"{java_name}[]", "kotlin_data_to_string", False
+    return None, None, False
 
 
 def _manga_mappings(
@@ -1585,7 +1639,7 @@ def _manga_mappings(
         )
         url_argument = _setter_argument(block, "setUrl")
         key_template = _string_template(url_argument, shape) if url_argument else None
-        authors_path, authors_item_projection = _setter_collection_projection(
+        authors_path, authors_item_projection, authors_fallback = _setter_collection_projection(
             block,
             shape,
             "setAuthor",
@@ -1593,7 +1647,7 @@ def _manga_mappings(
             kotlin_data_classes,
             wrapper_variables,
         )
-        tags_path, tags_item_projection = _setter_collection_projection(
+        tags_path, tags_item_projection, tags_fallback = _setter_collection_projection(
             block,
             shape,
             "setGenre",
@@ -1601,7 +1655,7 @@ def _manga_mappings(
             kotlin_data_classes,
             wrapper_variables,
         )
-        projections = {
+        scalar_projections = {
             "title": _setter_path(
                 block,
                 shape,
@@ -1614,8 +1668,6 @@ def _manga_mappings(
                 "setThumbnail_url",
                 allow_wrapper=preserve_cover_urls,
             ),
-            "authors": authors_path,
-            "tags": tags_path,
             "description": _setter_path(
                 block,
                 shape,
@@ -1623,6 +1675,17 @@ def _manga_mappings(
                 allowed_wrapper_variables=wrapper_variables,
             ),
         }
+        projections = {
+            field: projection.java_name for field, projection in scalar_projections.items()
+        }
+        projections.update({"authors": authors_path, "tags": tags_path})
+        policy_fallbacks = {
+            field for field, projection in scalar_projections.items() if projection.policy_fallback
+        }
+        if authors_fallback:
+            policy_fallbacks.add("authors")
+        if tags_fallback:
+            policy_fallbacks.add("tags")
         setters = {
             "key": "setUrl",
             "title": "setTitle",
@@ -1652,6 +1715,11 @@ def _manga_mappings(
                 tags_item_projection=tags_item_projection,
                 description_path=projections["description"],
                 unresolved_fields=unresolved_fields,
+                policy_fallback_fields=[
+                    field
+                    for field in ("title", "cover", "authors", "tags", "description")
+                    if field in policy_fallbacks
+                ],
             )
         )
     return mappings
@@ -1723,6 +1791,7 @@ def project_implementation_ir(ir: SourceIR) -> ImplementationIR:
         ),
     )
     unresolved: list[str] = []
+    policy_fallbacks: list[str] = []
     filter_ids = {spec.id for spec in ir.filter_specs}
     if not endpoints:
         unresolved.append("no deterministic listing endpoint template was recovered")
@@ -1764,6 +1833,11 @@ def project_implementation_ir(ir: SourceIR) -> ImplementationIR:
             unresolved.append(
                 f"listing manga {field} mapping is unresolved for {mapping.item_type}"
             )
+        for field in mapping.policy_fallback_fields:
+            policy_fallbacks.append(
+                f"listing manga {field} uses the raw API field for {mapping.item_type} "
+                "because its presentation transform is excluded by SourceIR policy"
+            )
     return ImplementationIR(
         source_id=ir.metadata.source_id,
         listing=ListingImplementationIR(
@@ -1776,4 +1850,5 @@ def project_implementation_ir(ir: SourceIR) -> ImplementationIR:
             provider=_listing_provider(java, endpoints),
         ),
         unresolved_facts=unresolved,
+        policy_fallback_facts=policy_fallbacks,
     )

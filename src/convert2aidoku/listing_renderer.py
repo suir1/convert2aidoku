@@ -982,10 +982,19 @@ def with_deterministic_search_listing(
             else generated
             for generated in files
         ]
+    warnings = list(manifest.warnings)
+    if implementation.policy_fallback_facts:
+        warning = (
+            "Deterministic listing intentionally uses raw API fields for SourceIR-excluded "
+            "presentation transforms: " + "; ".join(implementation.policy_fallback_facts)
+        )
+        if warning not in warnings:
+            warnings.append(warning)
     return manifest.model_copy(
         update={
             "files": files,
             "dependencies": _with_serde_derive(manifest.dependencies),
             "implemented_traits": implemented_traits,
+            "warnings": warnings,
         }
     )

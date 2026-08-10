@@ -13,6 +13,7 @@ from convert2aidoku.implementation_ir import (
     ListingImplementationIR,
     ListingRole,
     ListingSelectionIR,
+    MangaMappingIR,
     project_implementation_ir,
 )
 from convert2aidoku.listing_renderer import (
@@ -1019,9 +1020,81 @@ def test_public_scope_can_project_explicitly_excluded_presentation_wrappers() ->
         item for item in implementation.listing.manga_mappings if item.item_type == "ComicSummary"
     )
     assert mapping.unresolved_fields == []
+    assert mapping.policy_fallback_fields == ["title", "cover", "authors"]
     assert mapping.title_path == "name"
     assert mapping.cover_path == "cover"
     assert mapping.authors_path == "author[].name"
+    assert implementation.policy_fallback_facts == [
+        "listing manga title uses the raw API field for ComicSummary because its presentation "
+        "transform is excluded by SourceIR policy",
+        "listing manga cover uses the raw API field for ComicSummary because its presentation "
+        "transform is excluded by SourceIR policy",
+        "listing manga authors uses the raw API field for ComicSummary because its presentation "
+        "transform is excluded by SourceIR policy",
+    ]
+    effective = with_deterministic_search_listing(
+        ir,
+        GenerationManifest(
+            source_struct="CopyManga",
+            files=[
+                GeneratedFile(path="src/lib.rs", content="mod source;"),
+                GeneratedFile(
+                    path="src/source.rs",
+                    content="""
+                    pub struct CopyManga;
+                    impl Source for CopyManga {
+                        fn get_search_manga_list(
+                            &self,
+                            query: Option<String>,
+                            page: i32,
+                            filters: Vec<FilterValue>,
+                        ) -> Result<MangaPageResult> {
+                            panic!("AI listing")
+                        }
+                    }
+                    """,
+                ),
+            ],
+        ),
+    )
+    assert any(
+        warning.startswith("Deterministic listing intentionally uses raw API fields")
+        for warning in effective.warnings
+    )
+
+
+def test_excluded_script_policy_does_not_hide_unrelated_transform() -> None:
+    files = _copymanga_listing_files()
+    summary = next(file for file in files if file.path.endswith("ComicSummary.java"))
+    summary.content = summary.content.replace(
+        "toSManga()",
+        "toSManga(CCOption language)",
+    ).replace(
+        "setTitle(this.name)",
+        "setTitle(decrypt(this.name, language))",
+    )
+    summary.sha256 = hashlib.sha256(summary.content.encode()).hexdigest()
+    ir = minimal_source_ir(
+        source_id="zh.example",
+        source_format="decompiled_apk",
+        feature_scope="public_only",
+        main_class="CopyManga",
+        files=files,
+        filter_specs=_copymanga_filter_specs(),
+        unsupported_features=[
+            "Android ChineseUtils script conversion setting (excluded by public-only APK scope)"
+        ],
+    )
+
+    implementation = project_implementation_ir(ir)
+
+    assert "listing manga title mapping is unresolved for ComicSummary" in (
+        implementation.unresolved_facts
+    )
+    mapping = next(
+        item for item in implementation.listing.manga_mappings if item.item_type == "ComicSummary"
+    )
+    assert mapping.policy_fallback_fields == []
 
 
 def test_object_collection_child_comes_from_setter_getter() -> None:
@@ -1353,6 +1426,21 @@ def test_implementation_ir_rejects_duplicate_endpoint_ids() -> None:
                 api_base=ApiBaseIR(),
                 endpoints=[endpoint, endpoint.model_copy()],
             ),
+        )
+
+
+def test_manga_mapping_rejects_ambiguous_or_missing_policy_fallbacks() -> None:
+    with pytest.raises(ValidationError, match="cannot be unresolved and policy fallbacks"):
+        MangaMappingIR(
+            item_type="Comic",
+            title_path="name",
+            unresolved_fields=["title"],
+            policy_fallback_fields=["title"],
+        )
+    with pytest.raises(ValidationError, match="require a recovered projection"):
+        MangaMappingIR(
+            item_type="Comic",
+            policy_fallback_fields=["cover"],
         )
 
 
