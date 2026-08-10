@@ -161,9 +161,7 @@ def build_generation_context(
     )
     update_dto_types = update_ownership.dto_types if update_ownership is not None else frozenset()
     page_dto_types = page_ownership.dto_types if page_ownership is not None else frozenset()
-    page_source_stems = (
-        page_ownership.source_stems if page_ownership is not None else frozenset()
-    )
+    page_source_stems = page_ownership.source_stems if page_ownership is not None else frozenset()
     owned_dto_types = listing_dto_types | update_dto_types | page_dto_types
     excluded_methods = frozenset(
         {
