@@ -398,6 +398,12 @@ def _normalize_pinned_model_shapes(content: str) -> str:
         "Err(_) => Request::get(url)?.send(),",
         "Err(_) => Ok(Request::get(url)?.send()?),",
     )
+    content = re.sub(
+        r"Err\(_\)\s*=>\s*(?P<call>(?:self\.)?[A-Za-z_]\w*\([^;\n]*\)\?"
+        r"\.send\(\))\s*,",
+        r"Err(_) => Ok(\g<call>?),",
+        content,
+    )
     content = content.replace(
         "if total <= offset + chapters.len() {",
         "if total <= (offset + chapters.len()) as i32 {",
@@ -1735,6 +1741,30 @@ def _normalize_select_filter_constructors(content: str) -> str:
         replacements.append((original, f"Filter::from({argument})"))
     for original, replacement in replacements:
         content = content.replace(original, replacement, 1)
+    edits: list[tuple[int, int, bytes]] = []
+    for node in RustInspection.from_content(content).nodes("struct_expression"):
+        name = node.child_by_field_name("name")
+        body = node.child_by_field_name("body")
+        if (
+            name is None
+            or body is None
+            or name.text.decode("utf-8", errors="replace").rsplit("::", 1)[-1] != "SelectSetting"
+        ):
+            continue
+        for child in body.named_children:
+            field = child.child_by_field_name("field")
+            value = child.child_by_field_name("value")
+            if field is None or field.text != b"titles" or value is None:
+                continue
+            value_text = value.text.decode("utf-8", errors="replace")
+            if value_text.startswith(("Some(", "None")):
+                continue
+            edits.append((value.start_byte, value.end_byte, f"Some({value_text})".encode()))
+    if edits:
+        encoded = content.encode("utf-8")
+        for begin, end, replacement in sorted(edits, reverse=True):
+            encoded = encoded[:begin] + replacement + encoded[end:]
+        content = encoded.decode("utf-8")
     return content
 
 
@@ -5194,6 +5224,11 @@ def _normalize_generated_module_topology(files: list[GeneratedFile]) -> list[Gen
         if not path.endswith(".rs") or path == "src/lib.rs":
             continue
         content = contents[path]
+        content = re.sub(
+            r"(?m)^(?P<indent>[ \t]*)pub\s+fn\s+",
+            r"\g<indent>fn ",
+            content,
+        )
         inspection = RustInspection.from_content(content)
         register_edits = []
         for node in inspection.nodes("macro_invocation"):
@@ -5499,8 +5534,21 @@ def _project_shared_request_headers(
                     continue
                 argument_node = arguments.named_children[0]
                 argument = argument_node.text.decode("utf-8", errors="replace")
-                if "Request::get" not in argument and not re.fullmatch(r"[A-Za-z_]\w*", argument):
-                    continue
+                if "Request::get" not in argument:
+                    if not re.fullmatch(r"[A-Za-z_]\w*", argument):
+                        continue
+                    request_binding = re.search(
+                        rf"\blet\s+(?:mut\s+)?{re.escape(argument)}(?:\s*:[^=;]+)?\s*=\s*"
+                        r"(?:aidoku::imports::net::)?Request::get\b",
+                        function.text,
+                    )
+                    request_name = re.search(
+                        r"(?:^|_)(?:request|req|retry)(?:_|$)",
+                        argument,
+                        re.IGNORECASE,
+                    )
+                    if request_binding is None and request_name is None:
+                        continue
                 projected = argument + "".join(
                     f".header({json.dumps(name)}, {json.dumps(value)})" for name, value in missing
                 )

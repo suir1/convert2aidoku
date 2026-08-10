@@ -2687,6 +2687,83 @@ def test_manifest_projects_shared_headers_into_existing_request_builder() -> Non
     assert normalize_generation_manifest(ir, normalized) == normalized
 
 
+def test_manifest_does_not_project_request_headers_onto_response_values() -> None:
+    ir = minimal_source_ir(shared_request_headers={"sec-fetch-mode": "navigate"})
+    manifest = GenerationManifest(
+        source_struct="Simple",
+        files=[
+            GeneratedFile(path="src/lib.rs", content="#![no_std]\n"),
+            GeneratedFile(
+                path="src/source.rs",
+                content="""
+fn api_get(url: String) -> Result<Response> {
+    let build_request = || -> Result<Request> {
+        let request = Request::get(url.clone())?;
+        Ok(apply_headers(request))
+    };
+    let request = build_request()?;
+    match request.send() {
+        Ok(response) => Ok(response),
+        Err(_) => build_request()?.send(),
+    }
+}
+""",
+            ),
+        ],
+    )
+
+    normalized = normalize_generation_manifest(ir, manifest)
+    source = next(item.content for item in normalized.files if item.path == "src/source.rs")
+
+    assert 'response.header("sec-fetch-mode"' not in source
+    assert "Ok(response)" in source
+    assert "Err(_) => Ok(build_request()?.send()?)" in source
+    assert normalize_generation_manifest(ir, normalized) == normalized
+
+
+def test_normalizer_wraps_dynamic_select_setting_titles() -> None:
+    content = """
+fn setting(values: Vec<Cow<'static, str>>) -> aidoku::SelectSetting {
+    aidoku::SelectSetting {
+        key: "domain".into(),
+        title: "Domain".into(),
+        titles: values.iter().cloned().collect(),
+        values,
+        ..Default::default()
+    }
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "titles: Some(values.iter().cloned().collect())" in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
+def test_manifest_downgrades_unused_public_helper_with_private_return_type() -> None:
+    ir = minimal_source_ir()
+    manifest = GenerationManifest(
+        source_struct="Simple",
+        files=[
+            GeneratedFile(path="src/lib.rs", content="#![no_std]\n"),
+            GeneratedFile(
+                path="src/source.rs",
+                content="""
+struct PrivateDetail;
+pub fn get_details() -> PrivateDetail { PrivateDetail }
+""",
+            ),
+        ],
+    )
+
+    normalized = normalize_generation_manifest(ir, manifest)
+    source = next(item.content for item in normalized.files if item.path == "src/source.rs")
+
+    assert "pub fn get_details" not in source
+    assert "fn get_details" in source
+    assert normalize_generation_manifest(ir, normalized) == normalized
+
+
 def test_scaffold_applies_declared_setting_default_to_rust_fallback(tmp_path: Path) -> None:
     manifest = _manifest()
     manifest.files[0].content += """

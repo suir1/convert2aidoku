@@ -6,6 +6,7 @@ from convert2aidoku.checkpoint_store import CheckpointStore
 from convert2aidoku.errors import AIProviderError
 from convert2aidoku.manifest_contract import ContractDiagnostic, ContractEvaluation
 from convert2aidoku.models import (
+    AIRound,
     ConversionCheckpoint,
     DependencyRequest,
     RepairPatch,
@@ -317,6 +318,50 @@ def test_targeted_repair_applies_compiler_patch_without_loading_history(tmp_path
     assert result.repair_mode == "compiler_patch"
     assert calls.repair_patch == 1
     assert calls.repair == 0
+
+
+def test_compiler_failure_after_patch_escalates_to_full_repair(tmp_path: Path) -> None:
+    store = CheckpointStore(tmp_path / "workspace")
+    source = store.project / "src"
+    source.mkdir(parents=True)
+    (source / "lib.rs").write_text("fn broken() { old(); }\n", encoding="utf-8")
+    repair = TargetedRepair(
+        ir=minimal_source_ir(),
+        store=store,
+        checkpoint=ConversionCheckpoint(
+            input_ref="fixture",
+            output="generated/en.example",
+            provider_base_url="http://local/v1",
+            model="test",
+            ai_rounds=[
+                AIRound(
+                    round=1,
+                    purpose="generate",
+                    structured_output=False,
+                ),
+                AIRound(
+                    round=2,
+                    purpose="repair",
+                    repair_mode="compiler_patch",
+                    structured_output=False,
+                ),
+            ],
+        ),
+        manifest=generation_manifest("fn broken() { old(); }\n"),
+        validation=ValidationResult(
+            stages=[
+                ValidationStage(
+                    name="cargo-check",
+                    kind=StageKind.CHECK,
+                    ok=False,
+                    output="error[E0001]: still broken\n  --> src/lib.rs:1:15",
+                )
+            ]
+        ),
+        contract=ContractEvaluation(()),
+    )
+
+    assert repair._patch_request(repair.validation.diagnostics) is None
 
 
 def test_large_compiler_failure_routes_directly_to_full_repair_before_contract_patch(

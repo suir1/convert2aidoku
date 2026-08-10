@@ -293,11 +293,20 @@ class TargetedRepair:
         excerpts = diagnostic_file_excerpts(self.store.project, diagnostics)
         failed_kinds = {stage.kind for stage in self.validation.stages if not stage.ok}
         compiler_errors = len(_COMPILER_ERROR.findall(diagnostics))
+        last_repair_mode = next(
+            (
+                round_.repair_mode
+                for round_ in reversed(self.checkpoint.ai_rounds)
+                if round_.purpose == "repair"
+            ),
+            None,
+        )
         if failed_kinds & _COMPILER_REPAIR_KINDS:
             if (
                 excerpts
                 and failed_kinds <= _COMPILER_REPAIR_KINDS
                 and compiler_errors <= MAX_REPAIR_PATCH_EDITS
+                and last_repair_mode != "compiler_patch"
             ):
                 return _PatchRequest("compiler", excerpts, diagnostics)
             return None
