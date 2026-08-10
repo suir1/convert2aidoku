@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Architecture
+
+- Centralize Generation Manifest Projection ordering, applicability, tracing, and rule identity in
+  one deterministic registry while preserving the existing normalization interface.
+- Move generated return ownership, module topology, and recovered Kotlin chapter projection out of
+  the scaffold implementation so their behavior and tests have one local Module owner.
+
+### Verified regressions
+
+- Komiic remains live `verified` when replayed from its saved 43,714-token manifest without a new
+  provider call; Copymanga remains live `verified` from a clean APK conversion with zero AI calls
+  and zero tokens.
+
 ## 0.1.0b3 — 2026-08-11
 
 This beta turns a difficult Kotlin conversion into a reproducible generated-source compatibility

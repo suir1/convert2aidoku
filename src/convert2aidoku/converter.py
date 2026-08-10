@@ -12,6 +12,7 @@ from .conversion_completion import ConversionOutcome, complete_conversion
 from .conversion_intake import ConversionIntake
 from .errors import AIProviderError, InputError
 from .generated_source_metadata import GeneratedSourceMetadata
+from .generation_projection import normalize_generation_manifest
 from .kotlin_settings import with_kotlin_settings
 from .listing_renderer import with_deterministic_search_listing
 from .manga_detail_renderer import with_deterministic_manga_detail
@@ -35,7 +36,7 @@ from .models import (
 from .normalization_trace import NormalizationTrace
 from .page_renderer import with_deterministic_page_list
 from .reports import classify_status, write_report
-from .scaffold import apply_generation_manifest, normalize_generation_manifest
+from .scaffold import apply_generation_manifest
 from .source_trait_renderer import (
     with_deterministic_source_shell,
     with_deterministic_source_traits,

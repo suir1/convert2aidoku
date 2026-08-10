@@ -2,9 +2,12 @@ import ast
 import re
 from pathlib import Path
 
+from convert2aidoku.generation_projection import (
+    MANIFEST_PROJECTION_RULE_IDS,
+    MANIFEST_PROJECTION_RULE_ORDER,
+)
 from convert2aidoku.manifest_contract import CONTRACT_RULE_IDS
 from convert2aidoku.models import Capability, ValidationBlocker
-from convert2aidoku.scaffold import MANIFEST_PROJECTION_RULE_IDS
 from convert2aidoku.source_rules import (
     CAPABILITY_RULE_IDS,
     PREFLIGHT_RULE_IDS,
@@ -79,10 +82,37 @@ def test_manifest_rule_catalogs_match_every_call_site() -> None:
     package = Path(__file__).parents[1] / "src" / "convert2aidoku"
 
     contract_ids = _literal_rule_ids(package / "manifest_contract.py", "add")
-    projection_ids = _literal_rule_ids(package / "scaffold.py", "projected", prefix="project_")
+    projection_ids = _literal_rule_ids(
+        package / "generation_projection.py",
+        "_ProjectionPass",
+    )
 
     assert contract_ids == CONTRACT_RULE_IDS
     assert projection_ids == MANIFEST_PROJECTION_RULE_IDS
+
+
+def test_manifest_projection_registry_preserves_deterministic_order() -> None:
+    assert MANIFEST_PROJECTION_RULE_ORDER == (
+        "project_synthesize_recovered_dynamic_filters",
+        "project_prune_redundant_dynamic_settings",
+        "project_prune_public_only_dynamic_filters",
+        "project_recovered_rank_item_wrapper",
+        "project_skip_unused_decompiled_dto_fields",
+        "project_recovered_nested_dto_aliases",
+        "project_recovered_nullable_dto_defaults",
+        "project_recovered_kotlin_chapters",
+        "project_recovered_request_headers",
+        "project_user_agent_setting",
+        "project_recovered_detail_api_envelope",
+        "project_recovered_chapter_page_variants",
+        "project_recovered_chapter_image_resolution",
+        "project_recovered_dynamic_filters",
+        "project_recovered_dynamic_filter_queries",
+        "project_recovered_check_filter_mappings",
+        "project_generated_return_ownership",
+        "project_generated_module_topology",
+    )
+    assert len(MANIFEST_PROJECTION_RULE_ORDER) == len(MANIFEST_PROJECTION_RULE_IDS)
 
 
 def test_source_rule_catalogs_match_capabilities_and_preflight_call_sites() -> None:
