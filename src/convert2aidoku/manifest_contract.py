@@ -524,18 +524,26 @@ def evaluate_manifest_contract(
     return ContractEvaluation(tuple(diagnostics))
 
 
+def _decode_string_literal(value: str) -> str | None:
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    return decoded if isinstance(decoded, str) else None
+
+
 def _settings_not_read(resources: GeneratedResources, rust_content: str) -> list[str]:
     keys = resources.setting_keys()
     if not keys:
         return []
-    constants = {
-        match.group("name"): json.loads(match.group("value"))
-        for match in re.finditer(
-            r"\b(?:const|static)\s+(?P<name>[A-Za-z_]\w*)\s*"
-            r"(?::\s*[^=;]+)?=\s*(?P<value>\"(?:\\.|[^\"\\])*\")\s*;",
-            rust_content,
-        )
-    }
+    constants: dict[str, str] = {}
+    for match in re.finditer(
+        r"\b(?:const|static)\s+(?P<name>[A-Za-z_]\w*)\s*"
+        r"(?::\s*[^=;]+)?=\s*(?P<value>\"(?:\\.|[^\"\\])*\")\s*;",
+        rust_content,
+    ):
+        if (value := _decode_string_literal(match.group("value"))) is not None:
+            constants[match.group("name")] = value
     arguments = re.findall(
         r"(?:aidoku::imports::defaults::)?defaults_get\s*"
         r"(?:::\s*<[^;{}()]+>)?\s*\(\s*"
@@ -545,7 +553,8 @@ def _settings_not_read(resources: GeneratedResources, rust_content: str) -> list
     consumed: set[str] = set()
     for argument in arguments:
         if argument.startswith('"'):
-            consumed.add(json.loads(argument))
+            if (value := _decode_string_literal(argument)) is not None:
+                consumed.add(value)
         elif argument in constants:
             consumed.add(constants[argument])
     inspection = RustInspection.from_content(rust_content)
@@ -580,7 +589,8 @@ def _settings_not_read(resources: GeneratedResources, rust_content: str) -> list
                 continue
             argument = call_arguments.named_children[index].text.decode("utf-8", errors="replace")
             if argument.startswith('"'):
-                consumed.add(json.loads(argument))
+                if (value := _decode_string_literal(argument)) is not None:
+                    consumed.add(value)
             elif argument in constants:
                 consumed.add(constants[argument])
     return [key for key in keys if key not in consumed]

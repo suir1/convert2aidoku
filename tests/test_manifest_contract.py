@@ -410,6 +410,34 @@ def test_settings_contract_tracks_constant_through_defaults_wrapper() -> None:
     assert "unread_settings" not in evaluation.rule_ids
 
 
+def test_settings_contract_ignores_non_json_rust_string_constants() -> None:
+    ir = minimal_source_ir(capabilities=[Capability.SETTINGS])
+    manifest = _manifest(
+        """
+        const COMIC_BODY: &str = "
+        {
+          id
+          title
+        }
+        ";
+        const CHAPTER_FILTER_PREF: &str = "CHAPTER_FILTER";
+        fn chapter_filter() -> String {
+            defaults_get::<String>(CHAPTER_FILTER_PREF).unwrap_or_default()
+        }
+        """
+    )
+    manifest.files.append(
+        GeneratedFile(
+            path="res/settings.json",
+            content='[{"type":"text","key":"CHAPTER_FILTER","title":"Chapters"}]',
+        )
+    )
+
+    evaluation = evaluate_manifest_contract(ir, manifest)
+
+    assert "unread_settings" not in evaluation.rule_ids
+
+
 def test_settings_contract_does_not_conflate_same_named_functions() -> None:
     ir = minimal_source_ir(capabilities=[Capability.SETTINGS])
     manifest = _manifest(

@@ -4,6 +4,9 @@
 
 - Preserve valid `if let` fallback chains when folding identical Rust branches, and project legacy
   grouped Aidoku imports to the pinned crate's root re-exports without leaving shadowed imports.
+- Ignore unrelated Rust constants whose string syntax is not JSON-compatible while checking
+  generated settings usage, so invalid generated Rust reaches normal validation instead of a
+  Python traceback.
 
 ## 0.1.0b2 — 2026-08-10
 
