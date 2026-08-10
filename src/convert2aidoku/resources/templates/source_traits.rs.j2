@@ -1,0 +1,54 @@
+{% if base_url %}impl aidoku::BaseUrlProvider for crate::source::{{ source_struct }} {
+    fn get_base_url(&self) -> aidoku::Result<aidoku::alloc::String> {
+        Ok(aidoku::alloc::String::from({{ public_base_url | tojson }}))
+    }
+}
+{% endif %}{% if image_request %}
+impl aidoku::ImageRequestProvider for crate::source::{{ source_struct }} {
+    fn get_image_request(
+        &self,
+        url: aidoku::alloc::String,
+        _context: Option<aidoku::PageContext>,
+    ) -> aidoku::Result<aidoku::imports::net::Request> {
+        Ok(aidoku::imports::net::Request::get(url)?)
+    }
+}
+{% endif %}{% if deep_links %}
+fn c2a_deep_link_path(url: &str) -> &str {
+    let path = if let Some(scheme) = url.find("://") {
+        let after_origin = &url[scheme + 3..];
+        after_origin
+            .find('/')
+            .map_or("", |index| &after_origin[index..])
+    } else {
+        url
+    };
+    let end = path.find(['?', '#']).unwrap_or(path.len());
+    &path[..end]
+}
+
+impl aidoku::DeepLinkHandler for crate::source::{{ source_struct }} {
+    fn handle_deep_link(
+        &self,
+        url: aidoku::alloc::String,
+    ) -> aidoku::Result<Option<aidoku::DeepLinkResult>> {
+        let path = c2a_deep_link_path(&url).trim_end_matches('/');
+        let segments = path
+            .trim_start_matches('/')
+            .split('/')
+            .collect::<aidoku::alloc::Vec<_>>();
+        if {{ chapter_condition }} {
+            return Ok(Some(aidoku::DeepLinkResult::Chapter {
+                manga_key: aidoku::alloc::format!({{ manga_key_format | tojson }}{{ manga_key_arguments }}),
+                key: aidoku::alloc::String::from(path),
+            }));
+        }
+        if {{ manga_condition }} {
+            return Ok(Some(aidoku::DeepLinkResult::Manga {
+                key: aidoku::alloc::String::from(path),
+            }));
+        }
+        Ok(None)
+    }
+}
+{% endif %}

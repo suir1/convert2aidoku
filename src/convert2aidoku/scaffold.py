@@ -1109,7 +1109,7 @@ def _inject_required_aidoku_imports(content: str) -> str:
     missing_root = sorted(
         name
         for name in identifiers & _AIDOKU_ROOT_NAMES - declared
-        if re.search(rf"(?<!aidoku::)\b{re.escape(name)}\b", content)
+        if re.search(rf"(?<![:\w]){re.escape(name)}\b", content)
         if not _aidoku_root_imported(content, name)
         and not (
             "register_source!" in content
@@ -1790,7 +1790,7 @@ def _normalize_legacy_filter_fields(content: str) -> str:
         if name is None or body is None:
             continue
         full_type_name = name.text.decode("utf-8", errors="replace")
-        if full_type_name.startswith("DeepLinkResult::"):
+        if re.search(r"(?:^|::)DeepLinkResult::", full_type_name):
             continue
         type_name = full_type_name.rsplit("::", 1)[-1]
         if type_name not in {"CheckFilter", "SortFilter", "SelectFilter"}:
@@ -2297,8 +2297,13 @@ def _normalize_deep_link_defaults(content: str) -> str:
     replacements: list[tuple[str, str]] = []
     for node in RustInspection.from_content(content).nodes("struct_expression"):
         name = node.child_by_field_name("name")
-        if name is None or not name.text.decode("utf-8", errors="replace").startswith(
-            "DeepLinkResult::"
+        if (
+            name is None
+            or re.search(
+                r"(?:^|::)DeepLinkResult::",
+                name.text.decode("utf-8", errors="replace"),
+            )
+            is None
         ):
             continue
         original = node.text.decode("utf-8", errors="replace")
@@ -3119,7 +3124,7 @@ def _normalize_struct_expression_defaults(content: str) -> str:
         if name is None or body is None:
             continue
         full_type_name = name.text.decode("utf-8", errors="replace")
-        if full_type_name.startswith("DeepLinkResult::"):
+        if re.search(r"(?:^|::)DeepLinkResult::", full_type_name):
             continue
         type_name = full_type_name.rsplit("::", 1)[-1]
         text = node.text.decode("utf-8", errors="replace")
@@ -5476,7 +5481,7 @@ def _project_shared_request_headers(
     updated: list[GeneratedFile] = []
     for generated in files:
         content = generated.content
-        if not generated.path.endswith(".rs"):
+        if not generated.path.endswith(".rs") or generated.path == "src/c2a_source_traits.rs":
             updated.append(generated)
             continue
         replacements: list[tuple[str, str]] = []

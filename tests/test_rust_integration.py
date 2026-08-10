@@ -14,7 +14,12 @@ from convert2aidoku.models import (
     RequestHeaderProfile,
 )
 from convert2aidoku.page_renderer import with_deterministic_page_list
-from convert2aidoku.scaffold import apply_generation_manifest
+from convert2aidoku.scaffold import apply_generation_manifest, render_generated_lib_rs
+from convert2aidoku.source_trait_renderer import (
+    SourceTraitOwnership,
+    render_source_traits,
+    source_trait_ownership,
+)
 from convert2aidoku.toolchain import find_tool
 from convert2aidoku.validator import validate_project
 from tests.scenarios import minimal_source_ir, scaffold_project
@@ -27,6 +32,7 @@ from tests.test_implementation_ir import (
     _copymanga_page_routes,
     _serializable_listing_files,
 )
+from tests.test_source_trait_renderer import _copymanga_ir
 
 from .test_converter import RUST_SOURCE
 
@@ -168,6 +174,39 @@ impl Source for Example {
         filters: Vec<FilterValue>,
     ) -> Result<MangaPageResult> {
         crate::c2a_listing::get_search_manga_list(query, page, filters)
+    }
+
+    fn get_manga_update(
+        &self,
+        manga: Manga,
+        _needs_details: bool,
+        _needs_chapters: bool,
+    ) -> Result<Manga> {
+        Ok(manga)
+    }
+
+    fn get_page_list(&self, _manga: Manga, _chapter: Chapter) -> Result<Vec<Page>> {
+        Ok(Vec::new())
+    }
+}
+"""
+
+SOURCE_TRAIT_RUST_SOURCE = """
+use aidoku::alloc::{String, Vec};
+use aidoku::{Chapter, FilterValue, Manga, MangaPageResult, Page, Result, Source};
+
+pub struct Example;
+
+impl Source for Example {
+    fn new() -> Self { Self }
+
+    fn get_search_manga_list(
+        &self,
+        _query: Option<String>,
+        _page: i32,
+        _filters: Vec<FilterValue>,
+    ) -> Result<MangaPageResult> {
+        Ok(MangaPageResult::default())
     }
 
     fn get_manga_update(
@@ -411,6 +450,43 @@ def test_deterministic_page_list_helper_compiles_for_wasm(tmp_path: Path) -> Non
         project,
         scaffold_ir,
         manifest,
+        query=None,
+    )
+
+    validation = validate_project(project, live=False)
+    assert validation.build_ok, validation.diagnostics
+    assert validation.package_ok, validation.diagnostics
+
+
+def test_deterministic_source_traits_compile_for_wasm(tmp_path: Path) -> None:
+    assert find_tool("cargo")
+    ir = _copymanga_ir()
+    deep_links = source_trait_ownership(ir).deep_links
+    assert deep_links is not None
+    ownership = SourceTraitOwnership(
+        base_url=True,
+        image_request=True,
+        deep_links=deep_links,
+    )
+    traits = list(ownership.traits)
+    rendered = render_source_traits(ir, "Example", ownership)
+    paths = {"src/lib.rs", "src/source.rs", rendered.path}
+    project, scaffold_ir = scaffold_project(tmp_path, name="source-traits-project")
+    apply_generation_manifest(
+        project,
+        scaffold_ir,
+        GenerationManifest(
+            source_struct="Example",
+            implemented_traits=traits,
+            files=[
+                GeneratedFile(
+                    path="src/lib.rs",
+                    content=render_generated_lib_rs("Example", traits, paths),
+                ),
+                GeneratedFile(path="src/source.rs", content=SOURCE_TRAIT_RUST_SOURCE),
+                rendered,
+            ],
+        ),
         query=None,
     )
 

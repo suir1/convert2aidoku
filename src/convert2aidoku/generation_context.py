@@ -12,6 +12,7 @@ from .listing_renderer import search_listing_ownership
 from .manga_detail_renderer import manga_update_ownership
 from .models import Capability, SourceFile, SourceIR
 from .page_renderer import page_list_ownership
+from .source_trait_renderer import source_trait_ownership
 
 DEFAULT_GENERATION_EVIDENCE_CHARS = 110_000
 DEFAULT_SETTINGS_EVIDENCE_CHARS = 50_000
@@ -156,6 +157,7 @@ def build_generation_context(
     listing_ownership = search_listing_ownership(ir)
     update_ownership = manga_update_ownership(ir)
     page_ownership = page_list_ownership(ir)
+    trait_ownership = source_trait_ownership(ir)
     listing_dto_types = (
         listing_ownership.dto_types if listing_ownership is not None else frozenset()
     )
@@ -168,6 +170,7 @@ def build_generation_context(
             *(listing_ownership.java_methods if listing_ownership is not None else ()),
             *(update_ownership.java_methods if update_ownership is not None else ()),
             *(page_ownership.java_methods if page_ownership is not None else ()),
+            *trait_ownership.java_methods,
         }
     )
     excluded_method_prefixes = tuple(
@@ -296,6 +299,7 @@ def build_generation_context(
             "deterministic_search_listing_dto_shapes": len(listing_dto_types),
             "deterministic_manga_update_dto_shapes": len(update_dto_types),
             "deterministic_page_list_dto_shapes": len(page_dto_types),
+            "deterministic_source_traits": list(trait_ownership.traits),
         },
     )
 

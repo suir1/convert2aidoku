@@ -23,6 +23,7 @@ TOOL_OWNED_RUST_PATHS = frozenset(
         "src/c2a_listing.rs",
         "src/c2a_manga_detail.rs",
         "src/c2a_pages.rs",
+        "src/c2a_source_traits.rs",
         "src/generated_smoke.rs",
     }
 )

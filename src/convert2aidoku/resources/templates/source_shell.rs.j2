@@ -1,0 +1,43 @@
+use aidoku::alloc::{String, Vec};
+use aidoku::{Chapter, FilterValue, Manga, MangaPageResult, Page, Result, Source};
+
+pub struct {{ source_struct }};
+
+impl Source for {{ source_struct }} {
+    fn new() -> Self {
+        Self
+    }
+
+    fn get_search_manga_list(
+        &self,
+        query: Option<String>,
+        page: i32,
+        filters: Vec<FilterValue>,
+    ) -> Result<MangaPageResult> {
+        crate::c2a_listing::get_search_manga_list(query, page, filters)
+    }
+
+    fn get_manga_update(
+        &self,
+        manga: Manga,
+        needs_details: bool,
+        needs_chapters: bool,
+    ) -> Result<Manga> {
+        crate::c2a_manga_detail::get_manga_update(manga, needs_details, needs_chapters)
+    }
+
+    fn get_page_list(&self, _manga: Manga, chapter: Chapter) -> Result<Vec<Page>> {
+        crate::c2a_pages::get_page_list(chapter)
+    }
+}
+{% if listing_provider %}
+impl aidoku::ListingProvider for {{ source_struct }} {
+    fn get_manga_list(
+        &self,
+        listing: aidoku::Listing,
+        page: i32,
+    ) -> Result<MangaPageResult> {
+        crate::c2a_listing::get_manga_list(listing, page)
+    }
+}
+{% endif %}

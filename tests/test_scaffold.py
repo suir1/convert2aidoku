@@ -1363,6 +1363,13 @@ fn deep_link() -> DeepLinkResult {
         ..Default::default()
     }
 }
+fn qualified_deep_link() -> aidoku::DeepLinkResult {
+    aidoku::DeepLinkResult::Chapter {
+        manga_key: "manga".into(),
+        key: "chapter".into(),
+        ..Default::default()
+    }
+}
 """
 
     normalized = normalize_pinned_aidoku_rust(content)
@@ -1381,6 +1388,7 @@ fn deep_link() -> DeepLinkResult {
     assert "RequestError" not in normalized
     assert "use aidoku::imports::net::;" not in normalized
     assert "..Default::default()" not in normalized.split("DeepLinkResult::Manga", 1)[1]
+    assert "..Default::default()" not in normalized.split("aidoku::DeepLinkResult::Chapter", 1)[1]
     assert normalize_pinned_aidoku_rust(normalized) == normalized
 
 

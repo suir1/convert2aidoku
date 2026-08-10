@@ -69,6 +69,10 @@ from .scaffold import (
     render_generated_lib_rs,
     validate_generated_content,
 )
+from .source_trait_renderer import (
+    deterministic_source_shell_available,
+    source_trait_ownership,
+)
 
 _ResponseMode = Literal["json_schema", "json_object", "plain"]
 _TokenLimitParameter = Literal["max_completion_tokens", "max_tokens"]
@@ -315,6 +319,8 @@ def _generation_messages(
     deterministic_update = deterministic_listing and deterministic_manga_update_available(ir)
     deterministic_pages = deterministic_listing and deterministic_page_list_available(ir)
     deterministic_filters = deterministic_listing and deterministic_dynamic_filters_available(ir)
+    deterministic_traits = source_trait_ownership(ir)
+    deterministic_shell = deterministic_source_shell_available(ir)
     listing_instruction = (
         "The tool deterministically owns src/c2a_listing.rs for search, rank, and browse. "
         "Do not return that file or reimplement its exclusive endpoints and DTOs. Implement "
@@ -359,6 +365,27 @@ def _generation_messages(
         if deterministic_filters
         else ""
     )
+    trait_instruction = (
+        "The tool owns src/c2a_source_traits.rs and the following optional traits: "
+        + ", ".join(deterministic_traits.traits)
+        + ". Do not return that file, implement those traits elsewhere, or include them in "
+        "implemented_traits. The tool uses the public source URL for BaseUrlProvider, direct "
+        "image requests only when no image headers were recovered, and exact recovered manga/"
+        "chapter key routes for DeepLinkHandler. "
+        if deterministic_traits.traits
+        else ""
+    )
+    source_instruction = (
+        "The tool owns src/source.rs and all required Source method delegations. Do not return "
+        "src/source.rs or implement Source. Return a minimal src/lib.rs as the required manifest "
+        "file; the tool will reconstruct it and the source shell. "
+        if deterministic_shell
+        else (
+            "Define the public source_struct and Source implementation in src/source.rs; the tool "
+            "reconstructs src/lib.rs deterministically from source_struct, implemented_traits, "
+            "and the returned module paths. "
+        )
+    )
     return [
         {
             "role": "system",
@@ -379,13 +406,12 @@ def _generation_messages(
                 "settings.json: the tool owns those resources and generates them separately. "
                 "Do not implement DynamicSettings or Rust setting item types; res/settings.json "
                 "is the sole settings implementation. "
-                "Define the public source_struct and Source implementation in src/source.rs; "
-                "the tool reconstructs src/lib.rs deterministically from source_struct, "
-                "implemented_traits, and the returned module paths. "
+                + source_instruction
                 + listing_instruction
                 + detail_instruction
                 + page_instruction
                 + filter_instruction
+                + trait_instruction
                 + "Cargo.toml is forbidden because the tool owns all Cargo metadata. Use only "
                 "allowed dependencies and do not omit required core behavior.\n\n"
                 + json.dumps(source_payload, ensure_ascii=False)
@@ -1012,10 +1038,24 @@ class OpenAICompatibleClient:
         manifest_history: list[dict[str, Any]] | None = None,
     ) -> AIResult[GenerationManifest]:
         deterministic_filters = deterministic_dynamic_filters_available(ir)
+        deterministic_traits = source_trait_ownership(ir)
+        deterministic_shell = deterministic_source_shell_available(ir)
         filter_instruction = (
             "DynamicFilters is tool-owned for this source; omit its implementation, trait, "
             "endpoint, and DTOs. "
             if deterministic_filters
+            else ""
+        )
+        trait_instruction = (
+            "src/c2a_source_traits.rs and "
+            + ", ".join(deterministic_traits.traits)
+            + " are tool-owned; omit their file, implementations, and trait entries. "
+            if deterministic_traits.traits
+            else ""
+        )
+        source_instruction = (
+            "src/source.rs and its Source implementation are tool-owned; omit them. "
+            if deterministic_shell
             else ""
         )
         messages = [
@@ -1027,6 +1067,8 @@ class OpenAICompatibleClient:
                     "Return only src/**/*.rs; filters/settings are tool-owned and preserved. "
                     "Do not implement DynamicSettings or Rust setting item types. "
                     + filter_instruction
+                    + trait_instruction
+                    + source_instruction
                     + "src/c2a_listing.rs, src/c2a_manga_detail.rs, and src/c2a_pages.rs are also "
                     "tool-owned, omitted from this request, and must not be returned or "
                     "reimplemented. "
@@ -1058,6 +1100,7 @@ class OpenAICompatibleClient:
                             for item in current_files
                             if item["path"].endswith(".rs")
                             and item["path"] not in TOOL_OWNED_RUST_PATHS
+                            and not (deterministic_shell and item["path"] == "src/source.rs")
                         ],
                         "prior_generation_manifests": _compact_manifest_history(manifest_history),
                         "validation_diagnostics": diagnostics,

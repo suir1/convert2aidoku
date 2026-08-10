@@ -36,6 +36,10 @@ from .normalization_trace import NormalizationTrace
 from .page_renderer import with_deterministic_page_list
 from .reports import classify_status, write_report
 from .scaffold import apply_generation_manifest, normalize_generation_manifest
+from .source_trait_renderer import (
+    with_deterministic_source_shell,
+    with_deterministic_source_traits,
+)
 from .targeted_repair import (
     MAX_REPEATED_REPAIR_STATES,
     TargetedRepair,
@@ -109,9 +113,11 @@ class _ConversionRoundRunner:
         effective = GeneratedResources(effective).with_defaults(
             filter_specs=self.ir.filter_specs,
         )
+        effective = with_deterministic_source_shell(self.ir, effective)
         effective = with_deterministic_search_listing(self.ir, effective)
         effective = with_deterministic_manga_detail(self.ir, effective)
         effective = with_deterministic_page_list(self.ir, effective)
+        effective = with_deterministic_source_traits(self.ir, effective)
         return normalize_generation_manifest(self.ir, effective, trace=trace)
 
     def evaluate(self, manifest: GenerationManifest) -> None:
