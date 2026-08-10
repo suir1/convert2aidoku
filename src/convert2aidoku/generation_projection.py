@@ -31,9 +31,9 @@ from .generation_response_projection import (
 )
 from .models import Capability, GeneratedFile, GeneratedResources, GenerationManifest, SourceIR
 from .normalization_trace import NormalizationTrace
+from .rust_compatibility import normalize_pinned_aidoku_rust as _normalize_pinned_aidoku_rust
 from .rust_inspection import RustInspection
 from .rust_inspection import last_rust_identifier as _last_rust_identifier
-from .scaffold import normalize_pinned_aidoku_rust as _normalize_pinned_aidoku_rust
 
 
 @dataclass(frozen=True)

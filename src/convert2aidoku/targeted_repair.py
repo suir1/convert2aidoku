@@ -24,12 +24,9 @@ from .models import (
     ValidationResult,
 )
 from .normalization_trace import NormalizationTrace
+from .rust_compatibility import normalize_pinned_aidoku_rust, validate_generated_content
 from .rust_inspection import RustInspection
-from .scaffold import (
-    normalize_pinned_aidoku_rust,
-    read_generated_files,
-    validate_generated_content,
-)
+from .scaffold import read_generated_files
 
 _RUST_DIAGNOSTIC_LOCATION = re.compile(
     r"-->\s+(?:[^\r\n]*/)?(?P<path>src/[A-Za-z0-9_./-]+\.rs):"

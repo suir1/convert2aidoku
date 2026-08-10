@@ -15,7 +15,8 @@ from .command_execution import command_environment, execute_command
 from .errors import InputError, SecurityError
 from .generated_source_metadata import GeneratedSourceMetadata
 from .models import StageKind, ValidationBlocker, ValidationResult, ValidationStage
-from .scaffold import read_generated_files, validate_generated_content
+from .rust_compatibility import validate_generated_content
+from .scaffold import read_generated_files
 from .toolchain import find_tool
 from .validation_policy import (
     BlockerEvidence,

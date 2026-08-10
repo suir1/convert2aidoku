@@ -65,11 +65,11 @@ from .models import (
 )
 from .normalization_trace import NormalizationTrace
 from .page_renderer import deterministic_page_list_available
-from .scaffold import (
+from .rust_compatibility import (
     normalize_pinned_aidoku_rust,
-    render_generated_lib_rs,
     validate_generated_content,
 )
+from .scaffold import render_generated_lib_rs
 from .source_trait_renderer import (
     deterministic_source_seed,
     deterministic_source_shell_available,

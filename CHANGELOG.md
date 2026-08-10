@@ -14,13 +14,15 @@
   variants, and image-resolution rewrites in one Generation Request Projection Module.
 - Move recovered rank envelopes, unused DTO fields, nested aliases, and nullable defaults into one
   Generation Response Projection Module; only pinned Rust compatibility remains in Scaffold.
+- Extract pinned Aidoku Rust rewrites and generated-content safety into a Rust Compatibility Module,
+  leaving Scaffold responsible only for project layout and materialization.
 
 ### Regression results
 
 - Copymanga remains live `verified` from a clean APK conversion with zero AI calls and zero tokens.
-- Komiic request projection is byte-identical to the pre-refactor output and passes WASM, Clippy,
-  packaging, and verification. Its latest live smoke is `failed`, not verified, while the local
-  network also reports `SSL_ERROR_SYSCALL` when connecting to the site.
+- Copymanga and Komiic effective projection outputs remain byte-identical to their pre-refactor
+  results. Komiic passes WASM, Clippy, packaging, and verification; its latest live smoke is
+  `failed`, not verified, while the local network also reports `SSL_ERROR_SYSCALL` for the site.
 
 ## 0.1.0b3 — 2026-08-11
 
