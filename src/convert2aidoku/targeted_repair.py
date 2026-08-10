@@ -9,7 +9,7 @@ from typing import Literal
 
 from .ai import AIResult, OpenAICompatibleClient, combine_ai_usage
 from .checkpoint_store import CheckpointStore
-from .constants import MAX_AI_DIAGNOSTIC_CHARS
+from .constants import MAX_AI_DIAGNOSTIC_CHARS, MAX_REPAIR_PATCH_EDITS
 from .errors import AIProviderError, SecurityError
 from .manifest_contract import ContractEvaluation
 from .models import (
@@ -40,6 +40,10 @@ _RUST_DIAGNOSTIC_NAMED_TYPE = re.compile(
     r"(?:struct|enum|union)\s+([A-Za-z_][A-Za-z0-9_]*)\b",
     re.MULTILINE,
 )
+_COMPILER_ERROR = re.compile(
+    r"^error(?:\[[A-Z][0-9]+\])?: (?!could not compile\b)",
+    re.MULTILINE,
+)
 _COMPILER_REPAIR_KINDS = frozenset(
     {
         StageKind.FORMAT,
@@ -47,7 +51,7 @@ _COMPILER_REPAIR_KINDS = frozenset(
         StageKind.CLIPPY,
     }
 )
-MAX_BUILD_REPAIR_ROUNDS = 2
+MAX_BUILD_REPAIR_ROUNDS = 3
 MAX_REPEATED_REPAIR_STATES = 2
 
 
@@ -288,8 +292,15 @@ class TargetedRepair:
     def _patch_request(self, diagnostics: str) -> _PatchRequest | None:
         excerpts = diagnostic_file_excerpts(self.store.project, diagnostics)
         failed_kinds = {stage.kind for stage in self.validation.stages if not stage.ok}
-        if excerpts and failed_kinds and failed_kinds <= _COMPILER_REPAIR_KINDS:
-            return _PatchRequest("compiler", excerpts, diagnostics)
+        compiler_errors = len(_COMPILER_ERROR.findall(diagnostics))
+        if failed_kinds & _COMPILER_REPAIR_KINDS:
+            if (
+                excerpts
+                and failed_kinds <= _COMPILER_REPAIR_KINDS
+                and compiler_errors <= MAX_REPAIR_PATCH_EDITS
+            ):
+                return _PatchRequest("compiler", excerpts, diagnostics)
+            return None
         contract_repair = self.contract.repair(self.store.project)
         if contract_repair is not None:
             return _PatchRequest(

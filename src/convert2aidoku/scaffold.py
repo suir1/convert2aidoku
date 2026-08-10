@@ -819,10 +819,25 @@ def _normalize_comic_path_helper(content: str) -> str:
         replacements.append((function.text, replacement))
     for original, replacement in replacements:
         content = content.replace(original, replacement, 1)
-    return content
+    return re.sub(
+        r"(?P<root>\b[A-Za-z_]\w*)\s*\.\s*(?P<field>[A-Za-z_]\w*)"
+        r"\s*\.strip_prefix\(\s*(?P<first>\"(?:\\.|[^\"\\])*\")\s*\)"
+        r"\s*\.unwrap_or\(\s*&(?P=root)\s*\.\s*(?P=field)\s*\)"
+        r"\s*\.strip_prefix\(\s*(?P<second>\"(?:\\.|[^\"\\])*\")\s*\)"
+        r"\s*\.unwrap_or\(\s*&(?P=root)\s*\.\s*(?P=field)\s*\)",
+        lambda match: (
+            f"{match.group('root')}.{match.group('field')}"
+            f".strip_prefix({match.group('first')})"
+            f".or_else(|| {match.group('root')}.{match.group('field')}"
+            f".strip_prefix({match.group('second')}))"
+            f".unwrap_or(&{match.group('root')}.{match.group('field')})"
+        ),
+        content,
+    )
 
 
 def _normalize_aidoku_api_paths(content: str) -> str:
+    content = content.replace("aidoku::net::", "aidoku::imports::net::")
     replacements: list[tuple[str, str]] = []
     for node in RustInspection.from_content(content).nodes("use_declaration"):
         original = node.text.decode("utf-8", errors="replace")
@@ -832,6 +847,11 @@ def _normalize_aidoku_api_paths(content: str) -> str:
         normalized = re.sub(
             r"(?<![:\w])defaults\s*::\s*defaults_get\b",
             "imports::defaults::defaults_get",
+            normalized,
+        )
+        normalized = re.sub(
+            r"\bimports\s*::\s*\{\s*imports\s*::",
+            "imports::{",
             normalized,
         )
         normalized = re.sub(
@@ -1215,6 +1235,12 @@ def _normalize_legacy_request_errors(content: str) -> str:
                 updated.append((original, normalized))
         for original, normalized in updated:
             content = content.replace(original, normalized, 1)
+    content = re.sub(
+        r"\b(?P<request>(?:request|req|retry|[A-Za-z_]\w*_(?:request|req|retry)))"
+        r"\.call\(\)",
+        r"\g<request>.send()",
+        content,
+    )
     return content
 
 
@@ -2156,6 +2182,33 @@ def _normalize_detail_partial_move(content: str) -> str:
         replacements.append((function.text, normalized))
     for original, normalized in replacements:
         content = content.replace(original, normalized, 1)
+    borrowed_map_replacements: list[tuple[str, str]] = []
+    for function in RustInspection.from_content(content).named("get_manga_update"):
+        borrowed = set(
+            re.findall(
+                r"\blet\s+Some\(\s*([A-Za-z_]\w*)\s*\)\s*=\s*&",
+                function.text,
+            )
+        )
+        borrowed.update(
+            re.findall(
+                r"\blet\s+([A-Za-z_]\w*)(?:\s*:\s*[^=;]+)?\s*=\s*&",
+                function.text,
+            )
+        )
+        normalized = function.text
+        for owner in borrowed:
+            normalized = re.sub(
+                rf"\b{re.escape(owner)}\.(?P<field>[A-Za-z_]\w*)"
+                rf"\.map\(\|(?P<item>[A-Za-z_]\w*)\|\s*"
+                rf"(?P=item)\.(?P<member>[A-Za-z_]\w*)",
+                rf"{owner}.\g<field>.as_ref().map(|\g<item>| \g<item>.\g<member>",
+                normalized,
+            )
+        if normalized != function.text:
+            borrowed_map_replacements.append((function.text, normalized))
+    for original, normalized in borrowed_map_replacements:
+        content = content.replace(original, normalized, 1)
     return content
 
 
@@ -2263,7 +2316,7 @@ def _normalize_request_builder_helpers(
         result_header = re.search(r"->\s*(?:aidoku::)?Result\s*<\s*Request\s*>\s*\{", text)
         binding = re.search(
             r"let\s+mut\s+(?P<name>[A-Za-z_]\w*)\s*=\s*"
-            r"(?:aidoku::imports::net::)?Request::get\((?P<url>[^;]+)\);",
+            r"(?P<expression>(?:aidoku::imports::net::)?Request::get\([^;]+\));",
             text,
         )
         if (plain_header is None and result_header is None) or binding is None:
@@ -2273,11 +2326,27 @@ def _normalize_request_builder_helpers(
             normalized = (
                 text[: plain_header.start()] + "-> Result<Request> {" + text[plain_header.end() :]
             )
-        normalized = normalized.replace(binding.group(0), binding.group(0)[:-1] + "?;", 1)
+        expression = binding.group("expression")
+        if ".header(" in expression:
+            expression = re.sub(r"\?\s*$", "", expression)
+        expression = re.sub(
+            r"(?P<call>(?:aidoku::imports::net::)?Request::get\([^\r\n)]*\))(?!\?)",
+            r"\g<call>?",
+            expression,
+            count=1,
+        )
+        replacement = re.sub(
+            r"(?P<prefix>let\s+mut\s+[A-Za-z_]\w*\s*=\s*)[\s\S]*;",
+            rf"\g<prefix>{expression};",
+            binding.group(0),
+            count=1,
+        )
+        normalized = normalized.replace(binding.group(0), replacement, 1)
         variable = binding.group("name")
         normalized = re.sub(
-            rf"(?m)^(?P<indent>[ \t]*){re.escape(variable)}\s*\n\}}$",
-            rf"\g<indent>Ok({variable})\n}}",
+            rf"(?m)^(?P<indent>[ \t]*){re.escape(variable)}\s*\n"
+            rf"(?P<closing>[ \t]*)\}}$",
+            rf"\g<indent>Ok({variable})\n\g<closing>}}",
             normalized,
         )
         if normalized != text:
@@ -2287,15 +2356,61 @@ def _normalize_request_builder_helpers(
         content = content.replace(original, replacement, 1)
     for name in helper_names:
         content = re.sub(
-            rf"(?P<call>\b{re.escape(name)}\([^;\n]+\))(?=\.send\()",
+            rf"(?P<call>\b(?:self\.)?{re.escape(name)}\([^;\n]+\))(?=\.send\()",
             r"\g<call>?",
             content,
         )
         content = re.sub(
-            rf"(?P<prefix>=\s*)(?P<call>\b{re.escape(name)}\([^;\n]+\))(?P<suffix>\s*;)",
+            rf"(?P<prefix>=\s*)(?P<call>\b(?:self\.)?{re.escape(name)}\([^;\n]+\))"
+            rf"(?P<suffix>\s*;)",
             r"\g<prefix>\g<call>?\g<suffix>",
             content,
         )
+    return content
+
+
+def _normalize_json_envelope_helper(content: str) -> str:
+    """Keep a generic JSON envelope intact when every caller expects that envelope."""
+    replacements: list[tuple[str, str]] = []
+    for function in RustInspection.from_content(content).functions:
+        signature = function.text.split("{", 1)[0]
+        result = re.search(r"->\s*(?:aidoku::)?Result\s*<\s*T\s*>", signature)
+        envelope = re.search(
+            r"\blet\s+(?P<variable>[A-Za-z_]\w*)\s*:\s*"
+            r"(?P<envelope>(?:[A-Za-z_]\w*::)*[A-Za-z_]\w*)\s*<\s*T\s*>\s*=",
+            function.text,
+        )
+        if result is None or envelope is None:
+            continue
+        variable = envelope.group("variable")
+        returned = re.search(
+            rf"\bOk\(\s*{re.escape(variable)}\.results\s*\)",
+            function.text,
+        )
+        if returned is None:
+            continue
+        caller = re.search(
+            rf":\s*{re.escape(envelope.group('envelope'))}\s*<[^;\n>]+>\s*=\s*"
+            rf"(?:self\.)?{re.escape(function.name)}\s*\(",
+            content,
+        )
+        if caller is None:
+            continue
+        normalized = re.sub(
+            r"(->\s*(?:aidoku::)?Result\s*<\s*)T(\s*>)",
+            rf"\g<1>{envelope.group('envelope')}<T>\g<2>",
+            function.text,
+            count=1,
+        )
+        normalized = re.sub(
+            rf"\bOk\(\s*{re.escape(variable)}\.results\s*\)",
+            f"Ok({variable})",
+            normalized,
+            count=1,
+        )
+        replacements.append((function.text, normalized))
+    for original, replacement in replacements:
+        content = content.replace(original, replacement, 1)
     return content
 
 
@@ -2336,6 +2451,18 @@ def _normalize_shadowed_known_imports(content: str) -> str:
         content = re.sub(r",\s*imports::defaults::defaults_get\b", "", content)
         content = re.sub(r"\{\s*imports::defaults::defaults_get\s*\}", "{}", content)
         content = content.replace("defaults::{},", "")
+        replacements: list[tuple[str, str]] = []
+        for node in RustInspection.from_content(content).nodes("use_declaration"):
+            original = node.text.decode("utf-8", errors="replace")
+            if original.strip() == "use aidoku::imports::defaults::defaults_get;":
+                continue
+            normalized = re.sub(r"\bdefaults::defaults_get\s*,\s*", "", original)
+            normalized = re.sub(r",\s*defaults::defaults_get\b", "", normalized)
+            normalized = re.sub(r"\{\s*defaults::defaults_get\s*\}", "{}", normalized)
+            if normalized != original:
+                replacements.append((original, normalized))
+        for original, normalized in replacements:
+            content = content.replace(original, normalized, 1)
     return content
 
 
@@ -2642,6 +2769,11 @@ def _normalize_safe_std_paths(content: str, *, remove_extern_std: bool) -> str:
         if marker in content:
             content = content.replace(marker, f"aidoku::alloc::collections::{target}")
             content = re.sub(rf"\b{source}\b", target, content)
+    content = content.replace("aidoku::alloc::collections::HashMap", "aidoku::HashMap")
+    invalid_hash_set = "aidoku::alloc::collections::HashSet"
+    if invalid_hash_set in content:
+        content = content.replace(invalid_hash_set, "aidoku::alloc::collections::BTreeSet")
+        content = re.sub(r"\bHashSet\b", "BTreeSet", content)
     replacements = {
         "std::collections::BTreeMap": "aidoku::alloc::collections::BTreeMap",
         "std::collections::BTreeSet": "aidoku::alloc::collections::BTreeSet",
@@ -3189,6 +3321,76 @@ def _normalize_resolution_regex(content: str) -> str:
 
 
 def _normalize_discarded_enumerate_index(content: str) -> str:
+    counter_replacements: list[tuple[str, str]] = []
+    for function in RustInspection.from_content(content).functions:
+        edits: list[tuple[int, int, str]] = []
+        for node in RustInspection.from_content(function.text).nodes("for_expression"):
+            statement = node.parent
+            if statement is None or statement.type != "expression_statement":
+                continue
+            block = statement.parent
+            if block is None or block.type != "block":
+                continue
+            siblings = list(block.named_children)
+            position = next(
+                (
+                    index
+                    for index, sibling in enumerate(siblings)
+                    if sibling.start_byte == statement.start_byte
+                    and sibling.end_byte == statement.end_byte
+                ),
+                None,
+            )
+            if position is None or position == 0:
+                continue
+            declaration = siblings[position - 1]
+            counter = re.fullmatch(
+                r"let\s+mut\s+(?P<name>[A-Za-z_]\w*)\s*=\s*0\s*;",
+                declaration.text.decode("utf-8", errors="replace").strip(),
+            )
+            pattern = node.child_by_field_name("pattern")
+            value = node.child_by_field_name("value")
+            body = node.child_by_field_name("body")
+            if (
+                counter is None
+                or pattern is None
+                or pattern.type != "identifier"
+                or value is None
+                or value.type != "identifier"
+                or body is None
+                or body.type != "block"
+                or not body.named_children
+            ):
+                continue
+            increment = body.named_children[-1]
+            name = counter.group("name")
+            if (
+                re.fullmatch(
+                    rf"{re.escape(name)}\s*\+=\s*1\s*;",
+                    increment.text.decode("utf-8", errors="replace").strip(),
+                )
+                is None
+            ):
+                continue
+            body_bytes = body.text
+            begin = increment.start_byte - body.start_byte
+            end = increment.end_byte - body.start_byte
+            normalized_body = (body_bytes[:begin] + body_bytes[end:]).decode("utf-8")
+            item = pattern.text.decode("utf-8", errors="replace")
+            items = value.text.decode("utf-8", errors="replace")
+            replacement = (
+                f"for ({name}, {item}) in {items}.into_iter().enumerate() {normalized_body}"
+            )
+            edits.append((declaration.start_byte, node.end_byte, replacement))
+        if not edits:
+            continue
+        encoded = function.text.encode("utf-8")
+        for begin, end, replacement in sorted(edits, reverse=True):
+            encoded = encoded[:begin] + replacement.encode("utf-8") + encoded[end:]
+        counter_replacements.append((function.text, encoded.decode("utf-8")))
+    for original, normalized in counter_replacements:
+        content = content.replace(original, normalized, 1)
+
     replacements: list[tuple[str, str]] = []
     for node in RustInspection.from_content(content).nodes("for_expression"):
         pattern = node.child_by_field_name("pattern")
@@ -3288,7 +3490,7 @@ def _normalize_identical_if_branches(content: str) -> str:
 
 
 def _normalize_filter_match_predicate(content: str) -> str:
-    return re.sub(
+    content = re.sub(
         r"find\(\|(?P<item>[A-Za-z_][A-Za-z0-9_]*)\|\s*match\s+(?P=item)\s*\{\s*"
         r"FilterValue::Select\s*\{\s*id:\s*(?P<found>[A-Za-z_][A-Za-z0-9_]*),\s*"
         r"value\s*\}\s*if\s*(?P=found)\s*==\s*(?P<wanted>[A-Za-z_][A-Za-z0-9_]*)"
@@ -3297,6 +3499,51 @@ def _normalize_filter_match_predicate(content: str) -> str:
         r"if \g<found> == \g<wanted>))",
         content,
     )
+    replacements: list[tuple[str, str]] = []
+    for function in RustInspection.from_content(content).named("selected_value"):
+        return_type = function.node.child_by_field_name("return_type")
+        if return_type is None or "Option<" not in return_type.text.decode(
+            "utf-8", errors="replace"
+        ):
+            continue
+        edits: list[tuple[int, int, str]] = []
+        for arm in RustInspection.from_content(function.text).nodes("match_arm"):
+            ancestor = arm.parent
+            inside_loop = False
+            while ancestor is not None:
+                if ancestor.type == "for_expression":
+                    inside_loop = True
+                    break
+                ancestor = ancestor.parent
+            value = arm.child_by_field_name("value")
+            if not inside_loop or value is None:
+                continue
+            if value.type == "call_expression":
+                value_text = value.text.decode("utf-8", errors="replace")
+                if value_text.startswith("Some("):
+                    edits.append((value.start_byte, value.end_byte, f"return {value_text}"))
+                continue
+            if value.type == "block" and value.named_children:
+                tail = value.named_children[-1]
+                if tail.type == "expression_statement" and tail.named_child_count == 1:
+                    tail = tail.named_child(0)
+                tail_text = tail.text.decode("utf-8", errors="replace")
+                if (
+                    tail.type == "call_expression"
+                    and tail_text.startswith("Some(")
+                    or tail.type == "if_expression"
+                    and "Some(" in tail_text
+                ):
+                    edits.append((tail.start_byte, tail.end_byte, f"return {tail_text};"))
+        if not edits:
+            continue
+        encoded = function.text.encode("utf-8")
+        for begin, end, replacement in sorted(edits, reverse=True):
+            encoded = encoded[:begin] + replacement.encode("utf-8") + encoded[end:]
+        replacements.append((function.text, encoded.decode("utf-8")))
+    for original, normalized in replacements:
+        content = content.replace(original, normalized, 1)
+    return content
 
 
 def _normalize_prequeried_url_helpers(content: str, helpers: set[str] | None) -> str:
@@ -3316,8 +3563,6 @@ def _normalize_public_absolute_url(content: str, public_base_url: str | None) ->
         return content
     replacements: list[tuple[str, str]] = []
     for function in RustInspection.from_content(content).named("absolute_url"):
-        if "get_api_base" not in function.text:
-            continue
         opening = function.text.find("{")
         if opening < 0:
             continue
@@ -3331,8 +3576,13 @@ def _normalize_public_absolute_url(content: str, public_base_url: str | None) ->
         replacement = (
             function.text[:opening].rstrip()
             + " {\n"
-            + f'    format!("{{}}/{{}}", {json.dumps(base)}, '
+            + f'    if {argument.group("name")}.starts_with("http://") '
+            + f'|| {argument.group("name")}.starts_with("https://") {{\n'
+            + f"        aidoku::alloc::String::from({argument.group('name')})\n"
+            + "    } else {\n"
+            + f'        format!("{{}}/{{}}", {json.dumps(base)}, '
             + f"{argument.group('name')}.trim_start_matches('/'))\n"
+            + "    }\n"
             + "}"
         )
         replacements.append((function.text, replacement))
@@ -3363,8 +3613,12 @@ def _normalize_public_absolute_url(content: str, public_base_url: str | None) ->
         content = (
             content.rstrip()
             + "\n\nfn absolute_url(relative: &str) -> String {\n"
-            + f'    format!("{{}}/{{}}", {json.dumps(base)}, '
-            + "relative.trim_start_matches('/'))\n}\n"
+            + '    if relative.starts_with("http://") || relative.starts_with("https://") {\n'
+            + "        aidoku::alloc::String::from(relative)\n"
+            + "    } else {\n"
+            + f'        format!("{{}}/{{}}", {json.dumps(base)}, '
+            + "relative.trim_start_matches('/'))\n"
+            + "    }\n}\n"
         )
         has_absolute_helper = True
     if has_absolute_helper:
@@ -3513,11 +3767,19 @@ def _normalize_preserved_cover_urls(content: str, preserve_cover_urls: bool) -> 
         r"\g<receiver>.cover.clone().unwrap_or_default()",
         content,
     )
-    return re.sub(
+    content = re.sub(
         r"(?:[A-Za-z_][A-Za-z0-9_]*::)*[A-Za-z_][A-Za-z0-9_]*resolution"
         r"[A-Za-z0-9_]*\(\s*&(?P<receiver>[A-Za-z_][A-Za-z0-9_]*(?:\."
         r"[A-Za-z_][A-Za-z0-9_]*)*)\.cover\s*,[^)]*\)",
         r"\g<receiver>.cover.clone()",
+        content,
+    )
+    return re.sub(
+        r"(?:[A-Za-z_][A-Za-z0-9_]*::)*[A-Za-z_][A-Za-z0-9_]*"
+        r"(?:resolution|image_url)[A-Za-z0-9_]*\(\s*&(?P<receiver>"
+        r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\.cover)"
+        r"\s*(?:,[^()]*)?\)",
+        r"\g<receiver>.clone()",
         content,
     )
 
@@ -3760,13 +4022,39 @@ def _normalize_generated_setting_defaults(
                 is None
             ):
                 continue
-            normalized = re.sub(
-                rf"(?P<prefix>\b_\s*=>\s*)"
-                rf"(?:String::from\(\s*{rust_string}\s*\)|"
-                rf"{rust_string}\.to_string\(\)|{rust_string}\.into\(\))",
-                rf"\g<prefix>String::from({default_literal})",
-                function.text,
+            setting_variables = set(
+                re.findall(
+                    rf"\blet\s+(?:mut\s+)?([A-Za-z_]\w*)\s*=\s*"
+                    rf"defaults_get(?:::<String>)?\(\s*{key_reference}\s*\)"
+                    r"[^;{}]{0,500};",
+                    function.text,
+                )
             )
+            normalized = function.text
+            match_replacements: list[tuple[str, str]] = []
+            for match_node in RustInspection.from_content(function.text).nodes("match_expression"):
+                match_text = match_node.text.decode("utf-8", errors="replace")
+                scrutinee = match_text.split("{", 1)[0]
+                uses_setting = re.search(
+                    rf"defaults_get(?:::<String>)?\(\s*{key_reference}\s*\)",
+                    scrutinee,
+                ) is not None or any(
+                    re.search(rf"\bmatch\s+{re.escape(variable)}\b", scrutinee)
+                    for variable in setting_variables
+                )
+                if not uses_setting:
+                    continue
+                normalized_match = re.sub(
+                    rf"(?P<prefix>\b_\s*=>\s*)"
+                    rf"(?:String::from\(\s*{rust_string}\s*\)|"
+                    rf"{rust_string}\.to_string\(\)|{rust_string}\.into\(\))",
+                    rf"\g<prefix>String::from({default_literal})",
+                    match_text,
+                )
+                if normalized_match != match_text:
+                    match_replacements.append((match_text, normalized_match))
+            for original, replacement in match_replacements:
+                normalized = normalized.replace(original, replacement, 1)
             if normalized != function.text:
                 function_replacements.append((function.text, normalized))
         for original, normalized in function_replacements:
@@ -3865,6 +4153,82 @@ _PLATFORM_PROTOCOL_VALUES: Mapping[str, str | None] = {
 }
 
 
+def _platform_protocol_map(values: tuple[str, ...]) -> Mapping[str, str | None] | None:
+    """Return storage-to-header mappings for enum-key or direct-value settings."""
+    stored_values = set(values)
+    if stored_values and stored_values.issubset(_PLATFORM_PROTOCOL_VALUES):
+        if "platform.one" in stored_values:
+            return {value: _PLATFORM_PROTOCOL_VALUES[value] for value in values}
+        return None
+    protocol_values = {value for value in _PLATFORM_PROTOCOL_VALUES.values() if value is not None}
+    protocol_values.add("")
+    if stored_values and stored_values.issubset(protocol_values) and "1" in stored_values:
+        return {value: value or None for value in values}
+    return None
+
+
+_REQUEST_BINDING = re.compile(
+    r"\blet\s+(?:mut\s+)?(?P<variable>[A-Za-z_]\w*)[^=;]*=\s*"
+    r"(?:aidoku::imports::net::)?Request::(?:get|post|put|patch|delete)\s*\("
+)
+
+
+def _wrap_request_builder_results(
+    content: str,
+    *,
+    helper_name: str,
+    header_name: str,
+) -> str:
+    """Route a header through every function that returns a constructed Request."""
+    replacements: list[tuple[str, str]] = []
+    header_pattern = re.compile(rf'"{re.escape(header_name)}"', re.IGNORECASE)
+    for function in RustInspection.from_content(content).functions:
+        if (
+            function.name == helper_name
+            or helper_name in function.text
+            or header_pattern.search(function.text) is not None
+        ):
+            continue
+        function_text = function.text
+        for binding in _REQUEST_BINDING.finditer(function_text):
+            variable = binding.group("variable")
+            for returned in re.finditer(r"\bOk\(\s*", function_text):
+                start = returned.end()
+                cursor = start
+                wrappers = 0
+                while helper := re.match(r"c2a_apply_[A-Za-z_]\w*\s*\(\s*", function_text[cursor:]):
+                    wrappers += 1
+                    cursor += helper.end()
+                if not function_text.startswith(variable, cursor):
+                    continue
+                cursor += len(variable)
+                if cursor < len(function_text) and (
+                    function_text[cursor].isalnum() or function_text[cursor] == "_"
+                ):
+                    continue
+                end = cursor
+                for _ in range(wrappers):
+                    whitespace = re.match(r"\s*", function_text[end:])
+                    assert whitespace is not None
+                    end += whitespace.end()
+                    if end >= len(function_text) or function_text[end] != ")":
+                        break
+                    end += 1
+                else:
+                    receiver = function_text[start:end]
+                    wrapped = (
+                        function_text[:start] + f"{helper_name}({receiver})" + function_text[end:]
+                    )
+                    replacements.append((function_text, wrapped))
+                    break
+            else:
+                continue
+            break
+    for original, replacement in replacements:
+        content = content.replace(original, replacement, 1)
+    return content
+
+
 def _normalize_resolution_setting(
     content: str,
     setting_defaults: Mapping[str, str] | None,
@@ -3907,12 +4271,10 @@ def _normalize_platform_header_setting(
     """Translate recovered enum storage keys before sending the platform header."""
     defaults = setting_defaults or {}
     candidates = {
-        key: values
+        key: (values, protocol_map)
         for key, values in (setting_values or {}).items()
         if key.rsplit(".", 1)[-1] == "platform"
-        and values
-        and set(values).issubset(_PLATFORM_PROTOCOL_VALUES)
-        and "platform.one" in values
+        and (protocol_map := _platform_protocol_map(values)) is not None
     }
     if not candidates:
         return content
@@ -3924,6 +4286,62 @@ def _normalize_platform_header_setting(
             (candidate for candidate in candidates if json.dumps(candidate) in function_text),
             None,
         )
+        vector_push = None
+        if key is not None:
+            binding = (
+                rf"(?P<indent>^[ \t]*)if\s+let\s+Some\((?P<variable>[A-Za-z_]\w*)\)"
+                rf"\s*=\s*(?:aidoku::imports::defaults::)?defaults_get(?:::<String>)?\(\s*"
+                rf"{re.escape(json.dumps(key))}\s*\)\s*"
+            )
+            vector_push = re.search(
+                binding + r"(?:&&\s*!\s*(?P=variable)\.is_empty\(\)\s*)?"
+                r"\{(?P<body>[^{}]*\"platform\"[^{}]*\b(?P=variable)\b[^{}]*)\}",
+                function_text,
+                re.MULTILINE,
+            ) or re.search(
+                binding + r"\{\s*if\s+!\s*(?P=variable)\.is_empty\(\)\s*"
+                r"\{(?P<body>[^{}]*\"platform\"[^{}]*\b(?P=variable)\b[^{}]*)\}\s*\}",
+                function_text,
+                re.MULTILINE,
+            )
+        if vector_push is not None:
+            indent = vector_push.group("indent")
+            variable = vector_push.group("variable")
+            arms = []
+            values, protocol_map = candidates[key]
+            for stored in values:
+                protocol_value = protocol_map[stored]
+                expression = (
+                    "None"
+                    if protocol_value is None
+                    else f"Some(String::from({json.dumps(protocol_value)}))"
+                )
+                arms.append(f"{indent}    Some({json.dumps(stored)}) => {expression},")
+            default = defaults.get(key, "platform.one")
+            protocol_default = protocol_map.get(default, "1")
+            default_expression = (
+                "None"
+                if protocol_default is None
+                else f"Some(String::from({json.dumps(protocol_default)}))"
+            )
+            arms.append(f"{indent}    _ => {default_expression},")
+            replacement = (
+                f"{indent}let {variable} = match "
+                "aidoku::imports::defaults::defaults_get::<String>"
+                f"({json.dumps(key)}).as_deref() {{\n"
+                + "\n".join(arms)
+                + f"\n{indent}}};\n"
+                + f"{indent}if let Some({variable}) = {variable} {{"
+                + vector_push.group("body")
+                + "}"
+            )
+            normalized = (
+                function_text[: vector_push.start()]
+                + replacement
+                + function_text[vector_push.end() :]
+            )
+            replacements.append((function_text, normalized))
+            continue
         if (
             key is not None
             and '"platform"' in function_text
@@ -3949,8 +4367,9 @@ def _normalize_platform_header_setting(
             ):
                 indent = binding.group("indent")
                 arms = []
-                for stored in candidates[key]:
-                    protocol_value = _PLATFORM_PROTOCOL_VALUES[stored]
+                values, protocol_map = candidates[key]
+                for stored in values:
+                    protocol_value = protocol_map[stored]
                     expression = (
                         "String::new()"
                         if protocol_value is None
@@ -3958,7 +4377,7 @@ def _normalize_platform_header_setting(
                     )
                     arms.append(f"{indent}    Some({json.dumps(stored)}) => {expression},")
                 default = defaults.get(key, "platform.one")
-                protocol_default = _PLATFORM_PROTOCOL_VALUES.get(default, "1")
+                protocol_default = protocol_map.get(default, "1")
                 default_expression = (
                     "String::new()"
                     if protocol_default is None
@@ -3987,8 +4406,9 @@ def _normalize_platform_header_setting(
             continue
         default = defaults.get(key, "platform.one")
         arms = []
-        for stored in candidates[key]:
-            protocol_value = _PLATFORM_PROTOCOL_VALUES[stored]
+        values, protocol_map = candidates[key]
+        for stored in values:
+            protocol_value = protocol_map[stored]
             if protocol_value is None:
                 arms.append(f"        {json.dumps(stored)} => None,")
             else:
@@ -4010,7 +4430,43 @@ def _normalize_platform_header_setting(
         replacements.append((function_text, replacement))
     for original, replacement in replacements:
         content = content.replace(original, replacement, 1)
-    return content
+    helper_name = "c2a_apply_platform"
+    helper_exists = re.search(rf"\bfn\s+{helper_name}\s*\(", content) is not None
+    wrapped = _wrap_request_builder_results(
+        content,
+        helper_name=helper_name,
+        header_name="platform",
+    )
+    if wrapped == content or helper_exists:
+        return wrapped
+    key = next(iter(candidates))
+    values, protocol_map = candidates[key]
+    arms = []
+    for stored in values:
+        protocol = protocol_map[stored]
+        rendered = "None" if protocol is None else f"Some({json.dumps(protocol)})"
+        arms.append(f"        Some({json.dumps(stored)}) => {rendered},")
+    default = defaults.get(key, "platform.one")
+    default_protocol = protocol_map.get(default, "1")
+    rendered_default = (
+        "None" if default_protocol is None else f"Some({json.dumps(default_protocol)})"
+    )
+    arms.append(f"        _ => {rendered_default},")
+    helper = (
+        f"fn {helper_name}(request: aidoku::imports::net::Request) "
+        "-> aidoku::imports::net::Request {\n"
+        "    let platform = match "
+        "aidoku::imports::defaults::defaults_get::<aidoku::alloc::String>"
+        f"({json.dumps(key)}).as_deref() {{\n"
+        + "\n".join(arms)
+        + "\n    };\n"
+        + "    match platform {\n"
+        + '        Some(platform) => request.header("platform", &platform),\n'
+        + "        None => request,\n"
+        + "    }\n"
+        + "}"
+    )
+    return wrapped.rstrip() + "\n\n" + helper + "\n"
 
 
 def _normalize_user_agent_setting(
@@ -4027,48 +4483,56 @@ def _normalize_user_agent_setting(
         None,
     )
     helper_name = "c2a_apply_user_agent"
-    if key is None or re.search(rf"\bfn\s+{helper_name}\s*\(", content):
+    if key is None:
         return content
+    helper_exists = re.search(rf"\bfn\s+{helper_name}\s*\(", content) is not None
 
     edits: list[tuple[int, int, bytes]] = []
-    for call in RustInspection.from_content(content).nodes("call_expression"):
-        function = call.child_by_field_name("function")
-        arguments = call.child_by_field_name("arguments")
-        if function is None or function.type != "field_expression" or arguments is None:
-            continue
-        method = function.child_by_field_name("field")
-        receiver = function.child_by_field_name("value")
-        values = arguments.named_children
-        if (
-            method is None
-            or method.text.decode("utf-8", errors="replace") != "header"
-            or receiver is None
-            or len(values) < 2
-        ):
-            continue
-        header = values[0].text.decode("utf-8", errors="replace")
-        try:
-            header_name = json.loads(header)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(header_name, str) or header_name.casefold() != "user-agent":
-            continue
-        receiver_text = receiver.text.decode("utf-8", errors="replace")
-        target = (
-            call.parent
-            if call.parent is not None and call.parent.type == "try_expression"
-            else call
-        )
-        edits.append(
-            (target.start_byte, target.end_byte, f"{helper_name}({receiver_text})".encode())
-        )
-    if not edits:
-        return content
-
+    if not helper_exists:
+        for call in RustInspection.from_content(content).nodes("call_expression"):
+            function = call.child_by_field_name("function")
+            arguments = call.child_by_field_name("arguments")
+            if function is None or function.type != "field_expression" or arguments is None:
+                continue
+            method = function.child_by_field_name("field")
+            receiver = function.child_by_field_name("value")
+            values = arguments.named_children
+            if (
+                method is None
+                or method.text.decode("utf-8", errors="replace") != "header"
+                or receiver is None
+                or len(values) < 2
+            ):
+                continue
+            header = values[0].text.decode("utf-8", errors="replace")
+            try:
+                header_name = json.loads(header)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(header_name, str) or header_name.casefold() != "user-agent":
+                continue
+            receiver_text = receiver.text.decode("utf-8", errors="replace")
+            target = (
+                call.parent
+                if call.parent is not None and call.parent.type == "try_expression"
+                else call
+            )
+            edits.append(
+                (target.start_byte, target.end_byte, f"{helper_name}({receiver_text})".encode())
+            )
     encoded = content.encode("utf-8")
     for start, end, replacement in sorted(edits, reverse=True):
         encoded = encoded[:start] + replacement + encoded[end:]
     normalized = encoded.decode("utf-8")
+    implicitly_normalized = _wrap_request_builder_results(
+        normalized,
+        helper_name=helper_name,
+        header_name="User-Agent",
+    )
+    if helper_exists:
+        return implicitly_normalized
+    if not edits and implicitly_normalized == normalized:
+        return content
     helper = (
         f"fn {helper_name}(request: aidoku::imports::net::Request) "
         "-> aidoku::imports::net::Request {\n"
@@ -4083,7 +4547,7 @@ def _normalize_user_agent_setting(
         "    }\n"
         "}"
     )
-    return normalized.rstrip() + "\n\n" + helper + "\n"
+    return implicitly_normalized.rstrip() + "\n\n" + helper + "\n"
 
 
 def _project_user_agent_setting(
@@ -4217,6 +4681,7 @@ def normalize_pinned_aidoku_rust(
     apply(_normalize_aidoku_result_errors)
     apply(_normalize_raw_json_response_bindings)
     apply(_normalize_request_builder_helpers, request_builder_helpers)
+    apply(_normalize_json_envelope_helper)
     apply(_inject_source_new)
     apply(_normalize_source_new_delegation)
     apply(_normalize_rate_limit_integer_types)
@@ -4251,7 +4716,7 @@ def normalize_pinned_aidoku_rust(
     before = content
     content = re.sub(
         r'"(?:\\.|[^"\\])*"',
-        lambda match: match.group(0).replace("}//chapters", "}/chapters"),
+        lambda match: match.group(0).replace("}//", "}/"),
         content,
     )
     record("chapter_route_double_slash", before)
@@ -4504,18 +4969,21 @@ def _skip_unused_decompiled_dto_fields(
             if not any("Deserialize" in attribute for attribute in attributes):
                 continue
             for field in struct.fields:
+                skip_attributes = [
+                    attribute
+                    for attribute in field.attributes
+                    if "skip_deserializing" in attribute.text.decode("utf-8", errors="replace")
+                ]
                 if re.search(
                     rf"\.\s*{re.escape(field.name)}\b(?!\s*\()",
                     rust_content,
                 ):
+                    edits.extend(
+                        (attribute.start_byte, attribute.end_byte, b"")
+                        for attribute in skip_attributes
+                    )
                     continue
-                sibling = field.node.prev_named_sibling
-                has_skip = False
-                while sibling is not None and sibling.type == "attribute_item":
-                    if "skip_deserializing" in sibling.text.decode("utf-8", errors="replace"):
-                        has_skip = True
-                        break
-                    sibling = sibling.prev_named_sibling
+                has_skip = bool(skip_attributes)
                 type_node = field.node.child_by_field_name("type")
                 type_names = {
                     name for name in re.findall(r"\b[A-Z][A-Za-z0-9_]*\b", field.type_text)
@@ -4860,13 +5328,13 @@ def _recovered_request_builder(
         (
             key
             for key, values in setting_values.items()
-            if key.rsplit(".", 1)[-1] == "platform"
-            and values
-            and set(values).issubset(_PLATFORM_PROTOCOL_VALUES)
+            if key.rsplit(".", 1)[-1] == "platform" and _platform_protocol_map(values) is not None
         ),
         None,
     )
     if platform_key is not None:
+        protocol_map = _platform_protocol_map(setting_values[platform_key])
+        assert protocol_map is not None
         default = setting_defaults.get(platform_key, "platform.one")
         lines.extend(
             [
@@ -4876,10 +5344,10 @@ def _recovered_request_builder(
             ]
         )
         for stored in setting_values[platform_key]:
-            protocol = _PLATFORM_PROTOCOL_VALUES[stored]
+            protocol = protocol_map[stored]
             rendered = "None" if protocol is None else f"Some({json.dumps(protocol)})"
             lines.append(f"        Some({json.dumps(stored)}) => {rendered},")
-        default_protocol = _PLATFORM_PROTOCOL_VALUES.get(default, "1")
+        default_protocol = protocol_map.get(default, "1")
         rendered_default = (
             "None" if default_protocol is None else f"Some({json.dumps(default_protocol)})"
         )
@@ -5262,6 +5730,9 @@ def _project_recovered_chapter_page_variants(
     files: list[GeneratedFile],
 ) -> list[GeneratedFile]:
     rules: list[tuple[str, str, str, tuple[str, ...]]] = []
+    requires_api_v3 = any(
+        route.endpoint_template.startswith("/api/v3/") for route in ir.chapter_page_routes
+    )
     for route in ir.chapter_page_routes:
         default = next((variant for variant in route.variants if variant.is_default), None)
         if default is None or len(default.replacements) != 1:
@@ -5325,6 +5796,16 @@ def _project_recovered_chapter_page_variants(
                 + helper_content
                 + "\n"
             )
+        if requires_api_v3 and re.search(r"\bfn\s+api_url\s*\(", content):
+            base_replacements = [
+                (function.text, function.text.replace("self.api_base()", "self.api_url()"))
+                for function in RustInspection.from_content(content).functions
+                if "chapter" in function.name.lower()
+                and "url" in function.name.lower()
+                and "self.api_base()" in function.text
+            ]
+            for original, replacement in base_replacements:
+                content = content.replace(original, replacement, 1)
         updated.append(
             generated.model_copy(update={"content": content})
             if content != generated.content

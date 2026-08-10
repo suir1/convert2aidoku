@@ -726,7 +726,7 @@ def test_initial_generation_normalizes_safe_std_allocations_without_retry() -> N
     assert ai_round(1, "generate", result).normalization_rewrites == (result.normalization_rewrites)
 
 
-def test_initial_generation_stops_after_two_unsafe_full_outputs() -> None:
+def test_initial_generation_stops_after_three_unsafe_full_outputs() -> None:
     calls = 0
     request_sizes: list[int] = []
 
@@ -735,7 +735,7 @@ def test_initial_generation_stops_after_two_unsafe_full_outputs() -> None:
         calls += 1
         request_sizes.append(len(request.content))
         payload = json.loads(request.content)
-        if calls == 2:
+        if calls >= 2:
             assert "Repair an invalid rust generation manifest" in payload["messages"][0]["content"]
             retry = json.loads(payload["messages"][1]["content"])
             assert "use std::fs;" in retry["invalid_response"]
@@ -762,12 +762,12 @@ def test_initial_generation_stops_after_two_unsafe_full_outputs() -> None:
     ):
         client.generate(ir)
 
-    assert calls == 2
-    assert request_sizes[1] < request_sizes[0] / 2
+    assert calls == 3
+    assert all(size < request_sizes[0] / 2 for size in request_sizes[1:])
     assert raised.value.usage == AIUsage(
-        prompt_tokens=20,
-        completion_tokens=10,
-        total_tokens=30,
+        prompt_tokens=30,
+        completion_tokens=15,
+        total_tokens=45,
     )
 
 
@@ -1252,6 +1252,43 @@ def test_repair_uses_compact_context_without_original_source_bodies() -> None:
                 }
             ],
         )
+    assert result.value.source_struct == "Example"
+
+
+def test_full_repair_uses_compact_validation_retry() -> None:
+    calls = 0
+    current_marker = "large-current-rust-marker" * 1_000
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        payload = json.loads(request.content)
+        if calls == 1:
+            manifest = _manifest()
+            manifest["files"][0]["content"] = "use std::fs;"
+        else:
+            retry = json.loads(payload["messages"][1]["content"])
+            assert "Repair an invalid rust generation manifest" in payload["messages"][0]["content"]
+            assert "use std::fs;" in retry["invalid_response"]
+            assert "generated Rust uses std" in retry["validation_errors"][0]
+            assert current_marker not in request.content.decode()
+            manifest = _manifest()
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(manifest)}}]},
+        )
+
+    with OpenAICompatibleClient(
+        provider_settings(), transport=httpx.MockTransport(handler)
+    ) as client:
+        result = client.repair(
+            minimal_source_ir(),
+            current_files=[{"path": "src/lib.rs", "content": current_marker}],
+            diagnostics="compile error",
+            manifest_history=[],
+        )
+
+    assert calls == 2
     assert result.value.source_struct == "Example"
 
 

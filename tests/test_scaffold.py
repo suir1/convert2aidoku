@@ -343,6 +343,7 @@ def test_scaffold_normalizes_pinned_no_std_compatibility(tmp_path: Path) -> None
         'let _ = format!("{}", vec![1].len());\n'
         "let _: Option<aidoku::std::filters::SelectFilter> = None;\n"
         'let _ = format!("/comic/{comic}/group/{}//chapters", "default");\n'
+        'let _ = format!("{}//comic/{}/group/{}/chapters", "api", "comic", "group");\n'
         "chapters.sort_by(|left, right| right.index.cmp(&left.index));\n"
         'parse_date("2025-01-01", "yyyy-MM-dd").ok()\n'
         "}\n"
@@ -359,6 +360,7 @@ def test_scaffold_normalizes_pinned_no_std_compatibility(tmp_path: Path) -> None
     assert "aidoku::SelectFilter" in lib
     assert '}//chapters"' not in lib
     assert '}/chapters"' in lib
+    assert 'format!("{}/comic/{}/group/{}/chapters"' in lib
     assert "chapters.sort_by_key(|item| core::cmp::Reverse(item.index));" in lib
 
 
@@ -479,6 +481,80 @@ use std::process::Command;
     assert "use std::fs;" in normalized
     assert "use std::net::TcpStream;" in normalized
     assert "use std::process::Command;" in normalized
+
+
+def test_normalizer_maps_unavailable_aidoku_hash_collections() -> None:
+    content = """
+use aidoku::alloc::collections::HashMap;
+fn values() {
+    let _: HashMap<String, String> = HashMap::new();
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "aidoku::alloc::collections::HashMap" not in normalized
+    assert "use aidoku::HashMap;" in normalized
+    assert "HashMap<String, String> = HashMap::new()" in normalized
+
+
+def test_normalizes_result_request_builder_header_chain_and_callers() -> None:
+    content = """
+struct Client;
+impl Client {
+    fn request_with_headers(&self, url: &str) -> Result<Request> {
+        let mut req = Request::get(url)
+            .header("sec-fetch-dest", "document")
+            .header("sec-fetch-mode", "navigate")?;
+        req
+    }
+    fn request_with_retry(&self, url: &str) -> Result<Response> {
+        let req = self.request_with_headers(url);
+        match req.send() {
+            Ok(response) => Ok(response),
+            Err(_) => {
+                let req2 = self.request_with_headers(url);
+                Ok(req2.send()?)
+            }
+        }
+    }
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "Request::get(url)?\n            .header" in normalized
+    assert '.header("sec-fetch-mode", "navigate")?;' not in normalized
+    assert "Ok(req)" in normalized
+    assert "let req = self.request_with_headers(url)?;" in normalized
+    assert "let req2 = self.request_with_headers(url)?;" in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
+def test_normalizes_json_helper_to_match_envelope_typed_callers() -> None:
+    content = """
+struct ApiResponse<T> { results: T }
+struct ChapterListResult;
+struct Client;
+impl Client {
+    fn get_json<T: for<'de> Deserialize<'de>>(&self, url: &str) -> Result<T> {
+        let response = self.request(url)?;
+        let json: ApiResponse<T> = response.get_json_owned()?;
+        Ok(json.results)
+    }
+    fn chapters(&self, url: &str) -> Result<ChapterListResult> {
+        let wrapper: ApiResponse<ChapterListResult> = self.get_json(url)?;
+        Ok(wrapper.results)
+    }
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "-> Result<ApiResponse<T>>" in normalized
+    assert "Ok(json)" in normalized
+    assert "Ok(json.results)" not in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
 
 
 def test_generated_lib_is_derived_from_modules_source_struct_and_traits() -> None:
@@ -988,6 +1064,116 @@ fn parse() -> Result<MangaPageResult, RequestError> {
     assert "Result<MangaPageResult>" in normalized
     assert "AidokuError::message" in normalized
     assert "use aidoku::alloc::string::String;" in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
+def test_normalizer_repairs_nested_imports_and_legacy_request_calls() -> None:
+    content = """
+use aidoku::net::{Request, Response};
+use aidoku::imports::defaults::defaults_get;
+use aidoku::{imports::{imports::defaults::defaults_get, std::parse_date}};
+
+fn request_with_retry(request: Request, retry: Request) -> Result<Response> {
+    let _ = parse_date("2026-01-01", "yyyy-MM-dd");
+    match request.call() {
+        Ok(response) => Ok(response),
+        Err(_) => retry.call(),
+    }
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "aidoku::net" not in normalized
+    assert "imports::imports" not in normalized
+    assert normalized.count("defaults_get") == 1
+    assert "imports::{std::parse_date}" in normalized
+    assert "request.send()" in normalized
+    assert "retry.send()" in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
+def test_normalizer_repairs_filter_loop_returns_and_borrowed_optional_maps() -> None:
+    content = """
+fn selected_value<'a>(filters: &'a [FilterValue], id: &str) -> Option<&'a str> {
+    for filter in filters {
+        match filter {
+            FilterValue::Select { id: filter_id, value } if filter_id == id => {
+                Some(value.as_str())
+            }
+            FilterValue::Sort { id: filter_id, index, ascending } if filter_id == id => {
+                let i = *index;
+                let ascending = *ascending;
+                if i == 0 {
+                    Some(if ascending { "popular_asc" } else { "popular" })
+                } else {
+                    Some(if ascending { "updated_asc" } else { "updated" })
+                }
+            }
+            _ => continue,
+        }
+    }
+    None
+}
+
+fn get_manga_update(details: &Details) -> Manga {
+    let mut manga = Manga::default();
+    if let Some(detail) = &details.detail {
+        let comic = &detail.comic;
+        manga.status = match comic.status.map(|status| status.value) {
+            Some(0) => MangaStatus::Ongoing,
+            _ => MangaStatus::Unknown,
+        };
+    }
+    manga
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "return if i == 0" in normalized
+    assert "return Some(value.as_str())" in normalized
+    assert "comic.status.as_ref().map(|status| status.value)" in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
+def test_normalizer_replaces_explicit_loop_counter_with_enumerate() -> None:
+    content = """
+fn chapters(list: Vec<Chapter>) {
+    let mut index = 0;
+    for chapter in list {
+        push_chapter(chapter, index as i64);
+        index += 1;
+    }
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "let mut index = 0" not in normalized
+    assert "for (index, chapter) in list.into_iter().enumerate()" in normalized
+    assert "index += 1" not in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
+def test_normalizer_preserves_success_across_alternative_strip_prefixes() -> None:
+    content = """
+fn comic_path(manga: &Manga) -> String {
+    manga
+        .key
+        .strip_prefix("/comic/")
+        .unwrap_or(&manga.key)
+        .strip_prefix("/comic2/")
+        .unwrap_or(&manga.key)
+        .to_string()
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert '.strip_prefix("/comic/")' in normalized
+    assert '.or_else(|| manga.key.strip_prefix("/comic2/"))' in normalized
+    assert normalized.count("unwrap_or(&manga.key)") == 1
     assert normalize_pinned_aidoku_rust(normalized) == normalized
 
 
@@ -1860,6 +2046,11 @@ fn page_url(&self, key: &str) -> String {
     let normalized = chapter_key.replace("/chapter/", "/chapter2/");
     format!("/api/v3/comic/{normalized}")
 }
+fn api_url(&self) -> String { String::from("https://api.example/api/v3") }
+fn api_base(&self) -> String { String::from("https://api.example") }
+fn chapter_detail_url(&self, key: &str) -> String {
+    ApiRepo::chapter_detail_url(&self.api_base(), key, &api_domain())
+}
 """,
             )
         ],
@@ -1874,6 +2065,8 @@ fn page_url(&self, key: &str) -> String {
     assert 'c2a_chapter_key.replace("/chapter/", "/chapter2/")' in source
     assert source.index("let chapter_key") < source.index("let c2a_chapter_key")
     assert source.index("let c2a_chapter_key") < source.index("let normalized")
+    assert "ApiRepo::chapter_detail_url(&self.api_url(), key" in source
+    assert "ApiRepo::chapter_detail_url(&self.api_base(), key" not in source
     assert normalize_generation_manifest(ir, normalized) == normalized
 
 
@@ -2541,6 +2734,10 @@ fn constant_api_domain() -> String {
 fn validated_api_domain() -> String {
     let selected = defaults_get::<String>(API_DOMAIN_KEY)
         .unwrap_or_else(|| "stale-selected.example".to_string());
+    let _resolution = match "invalid" {
+        "800" => String::from("800"),
+        _ => String::from("1500"),
+    };
     match selected.as_str() {
         "mapi.copy20.com" => selected,
         _ => "stale-match.example".to_string(),
@@ -2586,6 +2783,9 @@ fn resolution_already_mapped() -> String {
     assert "stale-default.example" not in lib
     assert "stale-selected.example" not in lib
     assert "stale-match.example" not in lib
+    validated = lib.split("fn validated_api_domain", 1)[1].split("fn resolution()", 1)[0]
+    assert 'let _resolution = match "invalid"' in validated
+    assert '_ => String::from("1500"),' in validated
     assert 'Some("resolution.r800") => String::from("800")' in lib
     assert 'Some("resolution.r1500") => String::from("1500")' in lib
     assert '_ => String::from("1500")' in lib
@@ -2633,8 +2833,99 @@ fn get_platform_header() -> Option<(&'static str, String)> {
         ("five", "5"),
     ):
         assert f'"platform.{word}" => Some(("platform", String::from("{number}")))' in lib
-    assert 'String::from("platform.one")' in lib
+
+
+def test_scaffold_maps_platform_setting_pushed_into_header_vector(tmp_path: Path) -> None:
+    manifest = _manifest()
+    manifest.files[0].content += """
+use aidoku::imports::defaults::defaults_get;
+fn api_headers() -> Vec<(String, String)> {
+    let mut headers = Vec::new();
+    if let Some(platform) = defaults_get::<String>("v2.pref.platform") {
+        if !platform.is_empty() {
+            headers.push(("platform".to_string(), platform));
+        }
+    }
+    headers
+}
+fn listing_request(url: &str) -> aidoku::Result<aidoku::imports::net::Request> {
+    let mut request = aidoku::imports::net::Request::get(url)?;
+    request = request.header("Accept", "application/json");
+    Ok(request)
+}
+"""
+    manifest.files.append(
+        GeneratedFile(
+            path="res/settings.json",
+            content="""[
+                {"type":"group","title":"Request","items":[
+                    {"type":"select","key":"v2.pref.platform","title":"Platform",
+                     "values":["platform.none","platform.blank","platform.one",
+                               "platform.two","platform.three","platform.four",
+                               "platform.five"],
+                     "titles":["None","Blank","1","2","3","4","5"],
+                     "default":"platform.one"}
+                ]}
+            ]""",
+        )
+    )
+    project, ir = scaffold_project(tmp_path)
+
+    apply_generation_manifest(project, ir, manifest, query=None)
+
+    lib = (project / "src" / "lib.rs").read_text(encoding="utf-8")
+    assert 'Some("platform.none") => None' in lib
+    assert 'Some("platform.blank") => Some(String::from(" "))' in lib
+    assert 'Some("platform.one") => Some(String::from("1"))' in lib
+    assert "if let Some(platform) = platform" in lib
+    assert 'headers.push(("platform".to_string(), platform));' in lib
+    assert "Ok(c2a_apply_platform(request))" in lib
+    assert "fn c2a_apply_platform(" in lib
+    assert 'headers.push(("platform".to_string(), "platform.one"' not in lib
+    assert '_ => Some(String::from("1"))' in lib
     assert "platform.map(" not in lib
+
+
+def test_scaffold_defaults_direct_platform_value_pushed_into_header_vector(
+    tmp_path: Path,
+) -> None:
+    manifest = _manifest()
+    manifest.files[0].content += """
+use aidoku::imports::defaults::defaults_get;
+fn api_headers() -> Vec<(String, String)> {
+    let mut headers = Vec::new();
+    if let Some(platform) = defaults_get::<String>("v2.pref.platform")
+        && !platform.is_empty()
+    {
+        headers.push(("platform".to_string(), platform));
+    }
+    headers
+}
+"""
+    manifest.files.append(
+        GeneratedFile(
+            path="res/settings.json",
+            content="""[
+                {"type":"group","title":"Request","items":[
+                    {"type":"select","key":"v2.pref.platform","title":"Platform",
+                     "values":[""," ","1","2","3","4","5"],
+                     "titles":["None","Blank","1","2","3","4","5"],
+                     "default":"1"}
+                ]}
+            ]""",
+        )
+    )
+    project, ir = scaffold_project(tmp_path)
+
+    apply_generation_manifest(project, ir, manifest, query=None)
+
+    lib = (project / "src" / "lib.rs").read_text(encoding="utf-8")
+    assert 'Some("") => None' in lib
+    assert 'Some(" ") => Some(String::from(" "))' in lib
+    assert 'Some("1") => Some(String::from("1"))' in lib
+    assert '_ => Some(String::from("1"))' in lib
+    assert "if let Some(platform) = platform" in lib
+    assert 'headers.push(("platform".to_string(), platform));' in lib
 
 
 def test_scaffold_maps_prefixed_platform_binding_before_header_push(tmp_path: Path) -> None:
@@ -2727,6 +3018,14 @@ fn to_manga_direct(&self, resolution: &str) -> Manga {
     let cover = translate_resolution(&self.cover, resolution);
     Manga { cover: Some(cover), ..Default::default() }
 }
+fn to_manga_image_helper(&self) -> Manga {
+    let cover = resolve_image_url(&self.cover);
+    Manga { cover: Some(cover), ..Default::default() }
+}
+fn update_cover(mut manga: Manga, detail: Detail) -> Manga {
+    manga.cover = Some(resolve_image_url(&detail.cover));
+    manga
+}
 """
     manifest.files.append(
         GeneratedFile(
@@ -2750,7 +3049,10 @@ fn to_manga_direct(&self, resolution: &str) -> Manga {
     assert 'format!("{}&date_type=day", urls::rank_url(page))' in lib
     assert ".map(|value| translate_resolution(value, resolution))" not in lib
     assert "let cover = self.cover.clone().unwrap_or_default();" in lib
-    assert "let cover = self.cover.clone();" in lib
+    assert lib.count("let cover = self.cover.clone();") == 2
+    assert "manga.cover = Some(detail.cover.clone());" in lib
+    assert "resolve_image_url(&self.cover)" not in lib
+    assert "resolve_image_url(&detail.cover)" not in lib
 
 
 def test_scaffold_uses_public_source_base_for_generated_absolute_urls(tmp_path: Path) -> None:
@@ -2768,6 +3070,30 @@ fn absolute_url(relative: &str) -> String {
 
     lib = (project / "src" / "lib.rs").read_text(encoding="utf-8")
     assert 'String::from("https://api.example/api/v3")' in lib
+    assert 'format!("{}/{}", "https://example.com", relative.trim_start_matches(\'/\'))' in lib
+    assert 'relative.starts_with("http://") || relative.starts_with("https://")' in lib
+    assert "aidoku::alloc::String::from(relative)" in lib
+
+
+def test_public_absolute_url_helper_preserves_generated_absolute_cover(tmp_path: Path) -> None:
+    manifest = _manifest()
+    manifest.files[0].content += """
+fn absolute_url(relative: &str) -> String {
+    format!("{}/{}", "https://example.com", relative.trim_start_matches('/'))
+}
+fn update_cover(mut manga: Manga, cover: String) -> Manga {
+    manga.cover = Some(absolute_url(&cover));
+    manga
+}
+"""
+    project, ir = scaffold_project(tmp_path)
+    ir = ir.model_copy(update={"relative_url_keys": True})
+
+    apply_generation_manifest(project, ir, manifest, query=None)
+
+    lib = (project / "src" / "lib.rs").read_text(encoding="utf-8")
+    assert 'relative.starts_with("http://") || relative.starts_with("https://")' in lib
+    assert "aidoku::alloc::String::from(relative)" in lib
     assert 'format!("{}/{}", "https://example.com", relative.trim_start_matches(\'/\'))' in lib
 
 
@@ -2865,6 +3191,7 @@ use aidoku::{alloc::string::String, serde::Deserialize};
 #[derive(Deserialize)]
 struct ChapterDetail {
     group_id: String,
+    #[serde(skip_deserializing)]
     name: String,
     region: Region,
     next: String,
@@ -2889,6 +3216,7 @@ fn iterator_next(values: &mut impl Iterator<Item = String>) { let _ = values.nex
     assert "next: Option<String>" in dto
     assert "missing: Option<serde_json::Value>" in dto
     assert "name: String" in dto
+    assert "#[serde(skip_deserializing)]\n    name: String" not in dto
 
 
 @pytest.mark.parametrize(
@@ -2939,8 +3267,10 @@ def test_smoke_exercises_declared_dynamic_filters_and_deep_links(tmp_path: Path)
     smoke = (project / "src" / "generated_smoke.rs").read_text(encoding="utf-8")
     assert "get_dynamic_filters" in smoke
     assert "dynamic filters returned no filters" in smoke
-    assert "dynamic filter returned no manga" in smoke
-    assert "dynamic filter did not change manga results" in smoke
+    assert ".take(12)" in smoke
+    assert "for filter in dynamic_cases" in smoke
+    assert "no sampled dynamic filter produced distinct non-empty manga" in smoke
+    assert "dynamic filter returned no manga" not in smoke
     assert "handle_deep_link" in smoke
     assert "chapter deep link returned no result" in smoke
 
@@ -3171,12 +3501,30 @@ fn api_request(url: &str) -> aidoku::Result<Request> {
 fn image_request(url: &str) -> aidoku::Result<Request> {
     Ok(Request::get(url)?.header("User-Agent", &IMAGE_UA).header("Accept", "image/*"))
 }
+fn detail_request(url: &str) -> aidoku::Result<Request> {
+    let mut request = Request::get(url)?;
+    request = request.header("Accept", "application/json");
+    Ok(request.header("sec-fetch-mode", "navigate"))
+}
+""",
+            ),
+            GeneratedFile(
+                path="src/api.rs",
+                content="""
+use aidoku::imports::net::Request;
+fn detail_request(url: &str) -> aidoku::Result<Request> {
+    let mut request = Request::get(url)?;
+    request = request.header("Accept", "application/json");
+    Ok(request.header("sec-fetch-mode", "navigate"))
+}
 """,
             ),
             GeneratedFile(
                 path="res/settings.json",
                 content="""[{"type":"group","title":"Request","items":[
-                    {"type":"text","key":"v2.key.user_agent","title":"UA","default":"okhttp/4.12.0"}
+                    {"type":"text","key":"v2.key.user_agent","title":"UA","default":"okhttp/4.12.0"},
+                    {"type":"select","key":"v2.pref.platform","title":"Platform",
+                     "values":[""," ","1","2"],"default":"1"}
                 ]}]""",
             ),
         ],
@@ -3184,14 +3532,25 @@ fn image_request(url: &str) -> aidoku::Result<Request> {
 
     normalized = normalize_generation_manifest(ir, manifest)
     source = next(item.content for item in normalized.files if item.path == "src/source.rs")
+    api = next(item.content for item in normalized.files if item.path == "src/api.rs")
 
     assert "stale api ua" not in source
     assert "IMAGE_UA" not in source
-    assert source.count("c2a_apply_user_agent(") == 3
+    assert source.count("c2a_apply_user_agent(") == 4
+    assert (
+        "Ok(c2a_apply_user_agent(c2a_apply_platform(request))"
+        '.header("sec-fetch-mode", "navigate"))' in source
+    )
     assert "c2a_apply_user_agent(Request::get(url)?)?" not in source
     assert 'defaults_get::<aidoku::alloc::String>("v2.key.user_agent")' in source
     assert '"none" => request' in source
     assert '"" | "reset" | "desktop" | "mobile" | "app"' in source
+    assert (
+        "Ok(c2a_apply_user_agent(c2a_apply_platform(request))"
+        '.header("sec-fetch-mode", "navigate"))' in api
+    )
+    assert "fn c2a_apply_platform(" in api
+    assert "fn c2a_apply_user_agent(" in api
     assert normalize_generation_manifest(ir, normalized) == normalized
 
 

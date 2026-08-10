@@ -888,7 +888,7 @@ class OpenAICompatibleClient:
                 validate=_validate_rust_manifest,
                 reasoning_effort=self.settings.generation_reasoning_effort,
                 max_output_tokens=self.settings.generation_max_tokens,
-                max_validation_attempts=2,
+                max_validation_attempts=3,
                 compact_validation_retries=True,
             )
         except AIProviderError as exc:
@@ -1014,6 +1014,7 @@ class OpenAICompatibleClient:
             validate=_validate_rust_manifest,
             reasoning_effort=self.settings.repair_reasoning_effort,
             max_output_tokens=self.settings.repair_max_tokens,
+            compact_validation_retries=True,
         )
         return result.with_value(result.value.to_manifest())
 

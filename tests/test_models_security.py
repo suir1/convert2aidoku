@@ -217,6 +217,27 @@ def test_grouped_setting_options_are_normalized_recursively() -> None:
     assert parsed[0]["items"][0]["values"] == [""]
 
 
+def test_nested_setting_groups_are_promoted_to_schema_valid_top_level_groups() -> None:
+    content = """[
+        {"type":"group","key":"main","title":"Main","items":[
+            {"type":"group","key":"api","title":"API","items":[
+                {"type":"select","key":"domain","title":"Domain",
+                 "values":["api.example"],"default":"api.example"}
+            ]},
+            {"type":"text","key":"user_agent","title":"User-Agent","default":""}
+        ]}
+    ]"""
+
+    normalized = normalize_generated_json_resource("res/settings.json", content)
+    parsed = json.loads(normalized)
+
+    assert [group["title"] for group in parsed] == ["API", "Main"]
+    assert all(item["type"] != "group" for group in parsed for item in group["items"])
+    assert parsed[0]["items"][0]["key"] == "domain"
+    assert parsed[1]["items"][0]["key"] == "user_agent"
+    assert normalize_generated_json_resource("res/settings.json", normalized) == normalized
+
+
 def test_settings_fill_required_titles_text_defaults_and_protocol_resolution_values() -> None:
     generated = GeneratedFile(
         path="res/settings.json",

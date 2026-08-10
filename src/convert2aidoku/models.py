@@ -9,7 +9,12 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from .constants import MAX_GENERATED_FILE_CHARS, MAX_GENERATED_FILES, MAX_GENERATED_TOTAL_CHARS
+from .constants import (
+    MAX_GENERATED_FILE_CHARS,
+    MAX_GENERATED_FILES,
+    MAX_GENERATED_TOTAL_CHARS,
+    MAX_REPAIR_PATCH_EDITS,
+)
 from .errors import SecurityError
 
 
@@ -318,6 +323,27 @@ def _normalize_setting_item(raw_item: Any, *, location: str) -> dict[str, Any]:
     return item
 
 
+def _promote_nested_setting_groups(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    promoted: list[dict[str, Any]] = []
+    for group in groups:
+        items = group.get("items")
+        if not isinstance(items, list):
+            promoted.append(group)
+            continue
+        own_items: list[dict[str, Any]] = []
+        had_nested_group = False
+        for item in items:
+            if item.get("type") == "group":
+                had_nested_group = True
+                promoted.extend(_promote_nested_setting_groups([item]))
+            else:
+                own_items.append(item)
+        if own_items or not had_nested_group:
+            group["items"] = own_items
+            promoted.append(group)
+    return promoted
+
+
 def normalize_generated_json_resource(path: str, content: str) -> str:
     if path not in {"res/filters.json", "res/settings.json"}:
         return content
@@ -333,10 +359,12 @@ def normalize_generated_json_resource(path: str, content: str) -> str:
             data = [{"type": "group", "items": data}]
         elif any(setting_type != "group" for setting_type in top_level_types):
             raise ValueError("res/settings.json top-level items must all be groups")
-        data = [
-            _normalize_setting_item(item, location=f"res/settings.json[{index}]")
-            for index, item in enumerate(data)
-        ]
+        data = _promote_nested_setting_groups(
+            [
+                _normalize_setting_item(item, location=f"res/settings.json[{index}]")
+                for index, item in enumerate(data)
+            ]
+        )
         return json.dumps(data, ensure_ascii=False, indent="\t") + "\n"
 
     allowed_types = {"text", "sort", "check", "select", "multi-select", "note", "range"}
@@ -805,7 +833,7 @@ class RepairEdit(BaseModel):
 class RepairPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    edits: list[RepairEdit] = Field(min_length=1, max_length=12)
+    edits: list[RepairEdit] = Field(min_length=1, max_length=MAX_REPAIR_PATCH_EDITS)
 
     @field_validator("edits")
     @classmethod

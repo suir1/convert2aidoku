@@ -48,7 +48,7 @@ def test_successful_toolchain_fact_does_not_hide_compiler_repair() -> None:
     assert repair_required(validation, [], live=True)
 
 
-def test_compile_and_contract_repairs_are_capped_at_two_rounds() -> None:
+def test_compile_and_contract_repairs_are_capped_at_three_rounds() -> None:
     compiler_failure = ValidationResult(
         stages=[ValidationStage(name="cargo-check", kind="check", ok=False, output="error")]
     )
@@ -60,7 +60,7 @@ def test_compile_and_contract_repairs_are_capped_at_two_rounds() -> None:
         package_ok=True,
     )
 
-    assert repair_round_limit(compiler_failure, [], live=True, configured_limit=8) == 2
+    assert repair_round_limit(compiler_failure, [], live=True, configured_limit=8) == 3
     assert (
         repair_round_limit(
             ValidationResult(build_ok=True, package_ok=True),
@@ -68,7 +68,7 @@ def test_compile_and_contract_repairs_are_capped_at_two_rounds() -> None:
             live=True,
             configured_limit=8,
         )
-        == 2
+        == 3
     )
     assert repair_round_limit(live_failure, [], live=True, configured_limit=8) == 8
     assert (
@@ -317,6 +317,68 @@ def test_targeted_repair_applies_compiler_patch_without_loading_history(tmp_path
     assert result.repair_mode == "compiler_patch"
     assert calls.repair_patch == 1
     assert calls.repair == 0
+
+
+def test_large_compiler_failure_routes_directly_to_full_repair_before_contract_patch(
+    tmp_path: Path,
+) -> None:
+    store = CheckpointStore(tmp_path / "workspace")
+    source = store.project / "src"
+    source.mkdir(parents=True)
+    rust = "fn apply_resolution() { old(); }\n"
+    (source / "lib.rs").write_text(rust, encoding="utf-8")
+    manifest = generation_manifest(rust)
+    replacement = generation_manifest("fn fixed() {}\n")
+    patch = RepairPatch.model_validate(
+        {"edits": [{"path": "src/lib.rs", "old_text": "old();", "new_text": "patched();"}]}
+    )
+    adapter, calls = scripted_ai_client(
+        generation=manifest,
+        repair=replacement,
+        repair_patch=patch,
+        patch_scope="contract",
+    )
+    diagnostics = "\n".join(
+        f"error[E{index:04d}]: failure {index}\n  --> src/lib.rs:1:15" for index in range(13)
+    )
+    repair = TargetedRepair(
+        ir=minimal_source_ir(),
+        store=store,
+        checkpoint=ConversionCheckpoint(
+            input_ref="fixture",
+            output="generated/en.example",
+            provider_base_url="http://local/v1",
+            model="test",
+        ),
+        manifest=manifest,
+        validation=ValidationResult(
+            stages=[
+                ValidationStage(
+                    name="cargo-check",
+                    kind=StageKind.CHECK,
+                    ok=False,
+                    output=diagnostics,
+                )
+            ]
+        ),
+        contract=ContractEvaluation(
+            (
+                ContractDiagnostic(
+                    "chapter image resolution scope is incomplete",
+                    repair_kind="image_resolution",
+                    rule_id="image_resolution_scope",
+                ),
+            )
+        ),
+    )
+
+    with adapter(provider_settings()) as client:
+        result = repair.request(client)
+
+    assert result.value.files[0].content == "fn fixed() {}\n"
+    assert result.repair_mode == "full"
+    assert calls.repair_patch == 0
+    assert calls.repair == 1
 
 
 def test_rejected_local_patch_falls_back_to_full_controlled_manifest(tmp_path: Path) -> None:

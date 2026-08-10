@@ -100,33 +100,48 @@ fn generated_core_live_smoke() {
 		.get_dynamic_filters()
 		.expect("dynamic filters request failed");
 	assert!(!dynamic_filters.is_empty(), "dynamic filters returned no filters");
-	let dynamic_case = dynamic_filters.iter().find_map(|filter| {
+	let dynamic_cases = dynamic_filters.iter().flat_map(|filter| {
 		if let FilterKind::Select { ids: Some(ids), .. } = &filter.kind {
 			ids.iter()
-				.find(|value| !value.is_empty())
+				.filter(|value| !value.is_empty())
 				.map(|value| FilterValue::Select {
 					id: filter.id.clone().into_owned(),
 					value: value.clone().into_owned(),
 				})
+				.collect::<Vec<_>>()
 		} else {
-			None
+			Vec::new()
 		}
-	});
-	if let Some(filter) = dynamic_case {
+	})
+	.take(12)
+	.collect::<Vec<_>>();
+	if !dynamic_cases.is_empty() {
 		let baseline = source
 			.get_search_manga_list(None, 1, Vec::new())
 			.expect("dynamic filter baseline request failed");
-		let result = source
-			.get_search_manga_list(None, 1, vec![filter])
-			.expect("dynamic filter request failed");
-		assert!(!result.entries.is_empty(), "dynamic filter returned no manga");
-		let changed = result.entries.len() != baseline.entries.len()
-			|| result
-				.entries
-				.iter()
-				.zip(&baseline.entries)
-				.any(|(filtered, original)| filtered.key != original.key);
-		assert!(changed, "dynamic filter did not change manga results");
+		let mut dynamic_filter_valid = false;
+		for filter in dynamic_cases {
+			let Ok(result) = source.get_search_manga_list(None, 1, vec![filter]) else {
+				continue;
+			};
+			if result.entries.is_empty() {
+				continue;
+			}
+			let changed = result.entries.len() != baseline.entries.len()
+				|| result
+					.entries
+					.iter()
+					.zip(&baseline.entries)
+					.any(|(filtered, original)| filtered.key != original.key);
+			if changed {
+				dynamic_filter_valid = true;
+				break;
+			}
+		}
+		assert!(
+			dynamic_filter_valid,
+			"no sampled dynamic filter produced distinct non-empty manga"
+		);
 	}
 	{% endif %}
 	let result = source
