@@ -757,6 +757,26 @@ fn user_agent(value: String) -> String {
     assert normalize_pinned_aidoku_rust(normalized) == normalized
 
 
+def test_normalizer_preserves_adjacent_if_let_fallbacks() -> None:
+    content = """
+fn parse_date(value: &str) -> Result<i64> {
+    if let Some(timestamp) = parse_date(value, "primary") {
+        Ok(timestamp)
+    } else if let Some(timestamp) = parse_date(value, "fallback") {
+        Ok(timestamp)
+    } else {
+        Err(AidokuError::message("invalid date"))
+    }
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert normalized.count("if let Some(timestamp)") == 2
+    assert "(let Some(timestamp)" not in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
 def test_normalizer_repairs_dynamic_header_and_option_date_fallback() -> None:
     content = """
 fn request(request: Request, cookie: String) -> Request {
@@ -1389,6 +1409,47 @@ fn qualified_deep_link() -> aidoku::DeepLinkResult {
     assert "use aidoku::imports::net::;" not in normalized
     assert "..Default::default()" not in normalized.split("DeepLinkResult::Manga", 1)[1]
     assert "..Default::default()" not in normalized.split("aidoku::DeepLinkResult::Chapter", 1)[1]
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
+def test_normalizer_projects_grouped_aidoku_imports_and_local_parse_date() -> None:
+    content = """
+use aidoku::{
+    error::Result,
+    filters::{Filter, FilterValue, SelectFilter},
+    imports::{defaults::defaults_get, std::parse_date},
+    model::{Manga, MangaPageResult},
+    traits::{ListingProvider, Source},
+    AidokuError,
+};
+
+fn parse_date(value: &str) -> Result<i64> {
+    Err(AidokuError::message(value))
+}
+
+fn preserve_types(
+    filter: Filter,
+    value: FilterValue,
+    select: SelectFilter,
+    manga: Manga,
+    page: MangaPageResult,
+    listing: &dyn ListingProvider,
+    source: &dyn Source,
+) {
+    let _ = (filter, value, select, manga, page, listing, source, defaults_get::<bool>("key"));
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "error::Result" not in normalized
+    assert "filters::{" not in normalized
+    assert "model::{" not in normalized
+    assert "traits::{" not in normalized
+    assert "std::parse_date" not in normalized
+    assert "imports::{," not in normalized
+    assert "FilterValue" in normalized
+    assert "ListingProvider" in normalized
     assert normalize_pinned_aidoku_rust(normalized) == normalized
 
 

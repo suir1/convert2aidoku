@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Preserve valid `if let` fallback chains when folding identical Rust branches, and project legacy
+  grouped Aidoku imports to the pinned crate's root re-exports without leaving shadowed imports.
+
 ## 0.1.0b2 — 2026-08-10
 
 This beta turns the first verified APK conversion into a repeatable, provider-optional pipeline.

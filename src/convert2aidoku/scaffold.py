@@ -842,6 +842,43 @@ def _normalize_comic_path_helper(content: str) -> str:
     )
 
 
+_AIDOKU_ROOT_REEXPORT_MODULES = ("error", "filters", "model", "source", "traits")
+
+
+def _flatten_grouped_use_namespace(content: str, namespace: str) -> str:
+    marker = re.compile(rf"\b{re.escape(namespace)}\s*::\s*\{{")
+    while match := marker.search(content):
+        opening = match.end() - 1
+        depth = 0
+        closing = None
+        for index in range(opening, len(content)):
+            if content[index] == "{":
+                depth += 1
+            elif content[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    closing = index
+                    break
+        if closing is None:
+            break
+        content = content[: match.start()] + content[opening + 1 : closing] + content[closing + 1 :]
+    return re.sub(rf"\b{re.escape(namespace)}\s*::\s*(?=[A-Z])", "", content)
+
+
+def _remove_grouped_use_item(content: str, item: str) -> str:
+    pattern = re.compile(
+        rf"(?P<prefix>\{{|,)\s*{item}\s*(?P<comma>,)?",
+        re.MULTILINE,
+    )
+
+    def remove(match: re.Match[str]) -> str:
+        if match.group("prefix") == "{":
+            return "{"
+        return "," if match.group("comma") else ""
+
+    return pattern.sub(remove, content)
+
+
 def _normalize_aidoku_api_paths(content: str) -> str:
     content = content.replace("aidoku::net::", "aidoku::imports::net::")
     replacements: list[tuple[str, str]] = []
@@ -849,7 +886,9 @@ def _normalize_aidoku_api_paths(content: str) -> str:
         original = node.text.decode("utf-8", errors="replace")
         if not re.match(r"use\s+aidoku::", original):
             continue
-        normalized = original.replace("aidoku::source::", "aidoku::")
+        normalized = original
+        for namespace in _AIDOKU_ROOT_REEXPORT_MODULES:
+            normalized = _flatten_grouped_use_namespace(normalized, namespace)
         normalized = re.sub(
             r"(?<![:\w])defaults\s*::\s*defaults_get\b",
             "imports::defaults::defaults_get",
@@ -860,11 +899,6 @@ def _normalize_aidoku_api_paths(content: str) -> str:
             "imports::{",
             normalized,
         )
-        normalized = re.sub(
-            r"(?<![:\w])error\s*::\s*\{\s*AidokuError\s*,\s*Result\s*\}",
-            "AidokuError, Result",
-            normalized,
-        )
         compact = RustInspection.compact_node(node)
         if compact.startswith("useaidoku::{"):
             for name in ("Request", "Response"):
@@ -873,23 +907,6 @@ def _normalize_aidoku_api_paths(content: str) -> str:
                 normalized = re.sub(rf"\{{\s*{name}\s*\}}", "{}", normalized)
         normalized = re.sub(r"\bMangasPage\s*,\s*", "", normalized)
         normalized = re.sub(r",\s*MangasPage\b", "", normalized)
-        marker = "source::{"
-        while (start := normalized.find(marker)) >= 0:
-            opening = start + len(marker) - 1
-            depth = 0
-            closing = None
-            for index in range(opening, len(normalized)):
-                if normalized[index] == "{":
-                    depth += 1
-                elif normalized[index] == "}":
-                    depth -= 1
-                    if depth == 0:
-                        closing = index
-                        break
-            if closing is None:
-                break
-            inner = normalized[opening + 1 : closing]
-            normalized = normalized[:start] + inner + normalized[closing + 1 :]
         normalized = re.sub(r",(?P<space>\s*),", r",\g<space>", normalized)
         if re.fullmatch(r"use\s+aidoku::\{\s*\}\s*;", normalized.strip()):
             normalized = ""
@@ -2456,6 +2473,29 @@ def _normalize_shadowed_known_imports(content: str) -> str:
             "",
             content,
         )
+        replacements: list[tuple[str, str]] = []
+        for node in RustInspection.from_content(content).nodes("use_declaration"):
+            original = node.text.decode("utf-8", errors="replace")
+            if "std::parse_date" not in original:
+                continue
+            normalized = _remove_grouped_use_item(
+                original,
+                r"std\s*::\s*parse_date",
+            )
+            normalized = _remove_grouped_use_item(
+                normalized,
+                r"imports\s*::\s*\{\s*\}",
+            )
+            normalized = re.sub(r"\{\s*,", "{", normalized)
+            normalized = re.sub(r",\s*}", "}", normalized)
+            if re.fullmatch(r"use\s+aidoku::\{\s*\}\s*;", normalized.strip()):
+                normalized = ""
+            if re.fullmatch(r"use\s+aidoku::imports::\{\s*\}\s*;", normalized.strip()):
+                normalized = ""
+            if normalized != original:
+                replacements.append((original, normalized))
+        for original, normalized in replacements:
+            content = content.replace(original, normalized, 1)
     if "use aidoku::imports::defaults::defaults_get;" in content:
         usage = re.sub(r"(?m)^\s*use\s+[^;]+;", "", content)
         if re.search(r"\bDefaultValue\b", usage) is None:
@@ -3497,9 +3537,14 @@ def _normalize_identical_if_branches(content: str) -> str:
                     and RustInspection.compact_node(consequence)
                     == RustInspection.compact_node(nested_consequence)
                 ):
+                    nested_condition_text = nested_condition.text.decode("utf-8", errors="replace")
+                    if re.search(r"\blet\b", condition_text) or re.search(
+                        r"\blet\b", nested_condition_text
+                    ):
+                        continue
                     combined = (
                         f"if ({condition_text}) || "
-                        f"({nested_condition.text.decode('utf-8', errors='replace')}) "
+                        f"({nested_condition_text}) "
                         f"{consequence.text.decode('utf-8', errors='replace')}"
                     )
                     if nested_alternative is not None:
