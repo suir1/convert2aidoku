@@ -8,7 +8,7 @@ from typing import Literal
 
 from jinja2 import Environment, StrictUndefined
 
-from .generation_request_projection import _PLATFORM_PROTOCOL_VALUES
+from .generation_setting_compatibility import platform_protocol_map
 from .implementation_ir import (
     DataFieldIR,
     DataShapeIR,
@@ -626,16 +626,15 @@ def _platform_header_view(resources: GeneratedResources | None) -> _PlatformHead
         return None
     defaults = resources.setting_defaults()
     for key, values in resources.setting_values().items():
-        if (
-            key.rsplit(".", 1)[-1] != "platform"
-            or "platform.one" not in values
-            or not set(values).issubset(_PLATFORM_PROTOCOL_VALUES)
-        ):
+        if key.rsplit(".", 1)[-1] != "platform" or "platform.one" not in values:
             continue
-        default = _PLATFORM_PROTOCOL_VALUES.get(defaults.get(key, "platform.one"), "1")
+        protocol_map = platform_protocol_map(values)
+        if protocol_map is None:
+            continue
+        default = protocol_map.get(defaults.get(key, "platform.one"), "1")
         return _PlatformHeaderView(
             key=key,
-            values=tuple((value, _PLATFORM_PROTOCOL_VALUES[value]) for value in values),
+            values=tuple((value, protocol_map[value]) for value in values),
             default=default,
         )
     return None

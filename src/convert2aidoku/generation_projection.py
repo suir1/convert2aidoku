@@ -20,7 +20,6 @@ from .generation_request_projection import (
     _project_recovered_chapter_page_variants,
     _project_recovered_detail_api_envelope,
     _project_recovered_request_headers,
-    _project_user_agent_setting,
     _request_builder_helpers,
 )
 from .generation_response_projection import (
@@ -28,6 +27,9 @@ from .generation_response_projection import (
     _project_recovered_nullable_dto_defaults,
     _project_recovered_rank_item_wrapper,
     _skip_unused_decompiled_dto_fields,
+)
+from .generation_setting_compatibility import (
+    project_user_agent_setting as _project_user_agent_setting,
 )
 from .models import Capability, GeneratedFile, GeneratedResources, GenerationManifest, SourceIR
 from .normalization_trace import NormalizationTrace
