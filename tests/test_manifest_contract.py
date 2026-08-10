@@ -777,6 +777,11 @@ def test_public_only_decompiled_settings_exclude_non_reading_preferences() -> No
                      "values":["default"],"default":"default"},
                     {"type":"text","key":"v2.key.hide_default_continuous_chapter",
                      "title":"Shelf Update Workaround"},
+                    {"type":"select","key":"v2.pref.chapter_comment_api",
+                     "title":"Comment API","values":["api.example"],
+                     "default":"api.example"},
+                    {"type":"text","key":"v2.pref.chapter_comment_api_custom",
+                     "title":"Custom Comment API"},
                     {"type":"select","key":"v2.pref.resolution","title":"Resolution",
                      "values":["1500"],"default":"1500"}
                 ]}

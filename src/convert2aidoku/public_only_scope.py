@@ -22,6 +22,8 @@ _SETTING_EXCLUSIONS = (
             ".chapter_comment_perform",
             ".chapter_comment_perform_mode",
             ".reserve_chapter_comments",
+            ".chapter_comment_api",
+            ".chapter_comment_api_custom",
             ".chapter_comment_api_domain",
             ".chapter_comment_api_domain_custom",
             ".comment_api_domain",

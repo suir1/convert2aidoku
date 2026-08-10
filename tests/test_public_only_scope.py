@@ -8,6 +8,12 @@ def test_public_only_scope_excludes_android_ui_and_comment_preferences() -> None
     assert public_only_setting_exclusion("v2.pref.chapter_comment_api_domain_custom") == (
         "chapter comments (excluded by public-only APK scope)"
     )
+    assert public_only_setting_exclusion("v2.pref.chapter_comment_api") == (
+        "chapter comments (excluded by public-only APK scope)"
+    )
+    assert public_only_setting_exclusion("v2.pref.chapter_comment_api_custom") == (
+        "chapter comments (excluded by public-only APK scope)"
+    )
     assert public_only_setting_exclusion("v2.pref.chapter_comment_perform_mode") == (
         "chapter comments (excluded by public-only APK scope)"
     )

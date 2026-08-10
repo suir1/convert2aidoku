@@ -10,6 +10,7 @@ from convert2aidoku.ai import (
     _contract_text,
     _strict_model_schema,
     ai_round,
+    initial_generation_request_characters,
 )
 from convert2aidoku.config import ReasoningEffort
 from convert2aidoku.errors import AIProviderError
@@ -903,6 +904,10 @@ def test_generate_reserves_tool_owned_search_listing_module(
         "convert2aidoku.ai.deterministic_source_shell_available",
         lambda _ir: True,
     )
+    monkeypatch.setattr(
+        "convert2aidoku.ai.deterministic_source_seed",
+        lambda _ir: None,
+    )
 
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
@@ -931,6 +936,123 @@ def test_generate_reserves_tool_owned_search_listing_module(
         transport=httpx.MockTransport(handler),
     ) as client:
         client.generate(minimal_source_ir())
+
+
+def test_complete_deterministic_source_requests_only_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    seed = GenerationManifest.model_validate(_manifest())
+    monkeypatch.setattr(
+        "convert2aidoku.ai.deterministic_source_seed",
+        lambda _ir: seed,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        payload = json.loads(request.content)
+        assert "Extract public Aidoku source settings" in payload["messages"][0]["content"]
+        assert "Generate a complete Aidoku implementation" not in request.content.decode()
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "groups": [
+                                        {
+                                            "type": "group",
+                                            "title": "Network",
+                                            "items": [
+                                                {
+                                                    "type": "text",
+                                                    "key": "domain",
+                                                    "title": "Domain",
+                                                    "default": "api.example.com",
+                                                }
+                                            ],
+                                        }
+                                    ]
+                                }
+                            )
+                        }
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 40,
+                    "completion_tokens": 10,
+                    "total_tokens": 50,
+                },
+            },
+        )
+
+    ir = minimal_source_ir(
+        source_format="decompiled_apk",
+        capabilities=[Capability.SETTINGS],
+    )
+    with OpenAICompatibleClient(
+        provider_settings(),
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        result = client.generate(ir)
+
+    assert calls == 1
+    assert result.reasoning_effort == ReasoningEffort.OFF
+    assert result.usage and result.usage.total_tokens == 50
+    assert result.normalization_rewrites == {}
+    assert {generated.path for generated in result.value.files} == {
+        "src/lib.rs",
+        "res/settings.json",
+    }
+
+
+def test_complete_deterministic_source_without_settings_makes_no_provider_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed = GenerationManifest.model_validate(_manifest())
+    monkeypatch.setattr(
+        "convert2aidoku.ai.deterministic_source_seed",
+        lambda _ir: seed,
+    )
+
+    def unexpected_request(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("deterministic generation must not contact the provider")
+
+    with OpenAICompatibleClient(
+        provider_settings(),
+        transport=httpx.MockTransport(unexpected_request),
+    ) as client:
+        result = client.generate(minimal_source_ir())
+
+    assert result.value == seed
+    assert result.reasoning_effort == ReasoningEffort.OFF
+    assert result.usage is None
+
+
+def test_initial_request_budget_counts_only_requests_that_will_be_sent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed = GenerationManifest.model_validate(_manifest())
+    monkeypatch.setattr(
+        "convert2aidoku.ai.deterministic_source_seed",
+        lambda _ir: seed,
+    )
+    plain_ir = minimal_source_ir()
+    settings_ir = minimal_source_ir(
+        capabilities=[Capability.SETTINGS],
+    )
+
+    assert initial_generation_request_characters(plain_ir) == 0
+    settings_only = initial_generation_request_characters(settings_ir)
+    monkeypatch.setattr(
+        "convert2aidoku.ai.deterministic_source_seed",
+        lambda _ir: None,
+    )
+
+    assert 0 < settings_only < initial_generation_request_characters(settings_ir)
 
 
 def test_generate_structures_settings_and_owns_static_filters() -> None:

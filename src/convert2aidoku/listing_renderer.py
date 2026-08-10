@@ -29,6 +29,7 @@ from .models import (
     SourceFilterSpec,
     SourceIR,
 )
+from .rust_identifiers import RUST_KEYWORDS
 from .rust_inspection import RustInspection
 from .scaffold import _PLATFORM_PROTOCOL_VALUES, render_generated_lib_rs
 
@@ -176,45 +177,6 @@ def _selected_endpoint_ids(
     )
 
 
-_RUST_KEYWORDS = {
-    "as",
-    "break",
-    "const",
-    "continue",
-    "crate",
-    "else",
-    "enum",
-    "extern",
-    "false",
-    "fn",
-    "for",
-    "if",
-    "impl",
-    "in",
-    "let",
-    "loop",
-    "match",
-    "mod",
-    "move",
-    "mut",
-    "pub",
-    "ref",
-    "return",
-    "self",
-    "Self",
-    "static",
-    "struct",
-    "super",
-    "trait",
-    "true",
-    "type",
-    "unsafe",
-    "use",
-    "where",
-    "while",
-}
-
-
 def _environment() -> Environment:
     template_dir = resource_files("convert2aidoku").joinpath("resources", "templates")
     environment = Environment(
@@ -244,7 +206,7 @@ def _pascal_case(value: str) -> str:
 
 def _rust_identifier(value: str) -> str:
     name = _snake_case(value)
-    return f"r#{name}" if name in _RUST_KEYWORDS else name
+    return f"r#{name}" if name in RUST_KEYWORDS else name
 
 
 def _inner_list_type(source_type: str) -> str | None:

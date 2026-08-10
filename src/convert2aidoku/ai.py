@@ -70,6 +70,7 @@ from .scaffold import (
     validate_generated_content,
 )
 from .source_trait_renderer import (
+    deterministic_source_seed,
     deterministic_source_shell_available,
     source_trait_ownership,
 )
@@ -440,12 +441,39 @@ def _settings_messages(ir: SourceIR) -> list[dict[str, str]]:
     ]
 
 
+def _needs_settings(ir: SourceIR) -> bool:
+    return Capability.SETTINGS in ir.capabilities or Capability.DYNAMIC_BASE_URLS in ir.capabilities
+
+
+def _deterministic_generation_seed(ir: SourceIR) -> GenerationManifest | None:
+    manifest = deterministic_source_seed(ir)
+    if manifest is None:
+        return None
+    manifest = GeneratedResources(manifest).with_source_filters(ir.filter_specs)
+    return with_kotlin_settings(ir, manifest)
+
+
+def _with_settings_document(
+    manifest: GenerationManifest,
+    document: _SettingsDocument,
+) -> GenerationManifest:
+    settings = document.to_file()
+    files = [generated for generated in manifest.files if generated.path != settings.path]
+    return manifest.model_copy(update={"files": [*files, settings]})
+
+
 def initial_generation_request_characters(ir: SourceIR) -> int:
     """Return a provider-independent size proxy for preflight token budgeting."""
+    if (seed := _deterministic_generation_seed(ir)) is not None:
+        if _needs_settings(ir) and not GeneratedResources(seed).has_nonempty_setting_items():
+            return sum(len(message["content"]) for message in _settings_messages(ir)) + len(
+                json.dumps(_SettingsDocument.model_json_schema(), ensure_ascii=False)
+            )
+        return 0
     messages = _generation_messages(ir)
     characters = sum(len(message["content"]) for message in messages)
     characters += len(json.dumps(_RustGenerationManifest.model_json_schema(), ensure_ascii=False))
-    if Capability.SETTINGS in ir.capabilities or Capability.DYNAMIC_BASE_URLS in ir.capabilities:
+    if _needs_settings(ir):
         characters += sum(len(message["content"]) for message in _settings_messages(ir))
         characters += len(json.dumps(_SettingsDocument.model_json_schema(), ensure_ascii=False))
     return characters
@@ -934,10 +962,26 @@ class OpenAICompatibleClient:
         )
 
     def generate(self, ir: SourceIR) -> AIResult[GenerationManifest]:
-        needs_settings = (
-            Capability.SETTINGS in ir.capabilities
-            or Capability.DYNAMIC_BASE_URLS in ir.capabilities
-        )
+        needs_settings = _needs_settings(ir)
+        if (manifest := _deterministic_generation_seed(ir)) is not None:
+            settings_result: AIResult[_SettingsDocument] | None = None
+            if needs_settings and not GeneratedResources(manifest).has_nonempty_setting_items():
+                settings_result = self._generate_settings(ir)
+                manifest = _with_settings_document(manifest, settings_result.value)
+            return AIResult(
+                value=manifest,
+                structured_output=(
+                    settings_result.structured_output if settings_result is not None else True
+                ),
+                reasoning_effort=(
+                    settings_result.reasoning_effort
+                    if settings_result is not None
+                    else ReasoningEffort.OFF
+                ),
+                usage=settings_result.usage if settings_result is not None else None,
+                warnings=list(settings_result.warnings) if settings_result is not None else [],
+                normalization_rewrites={},
+            )
         settings_result: AIResult[_SettingsDocument] | None = None
         usages: list[AIUsage] = []
         warnings: list[str] = []
@@ -980,12 +1024,7 @@ class OpenAICompatibleClient:
         warnings.extend(rust_result.warnings)
         structured_output = structured_output and rust_result.structured_output
         if settings_result is not None:
-            payload = manifest.model_dump(mode="json")
-            payload["files"] = [
-                *payload["files"],
-                settings_result.value.to_file().model_dump(mode="json"),
-            ]
-            manifest = GenerationManifest.model_validate(payload)
+            manifest = _with_settings_document(manifest, settings_result.value)
         elif needs_settings and not GeneratedResources(manifest).has_nonempty_setting_items():
             try:
                 settings_result = self._generate_settings(ir)
@@ -998,12 +1037,7 @@ class OpenAICompatibleClient:
                     usage=self._combined_usage(failed_usages),
                     warnings=list(dict.fromkeys([*warnings, *exc.warnings])),
                 ) from exc
-            payload = manifest.model_dump(mode="json")
-            payload["files"] = [
-                *payload["files"],
-                settings_result.value.to_file().model_dump(mode="json"),
-            ]
-            manifest = GenerationManifest.model_validate(payload)
+            manifest = _with_settings_document(manifest, settings_result.value)
             if settings_result.usage is not None:
                 usages.append(settings_result.usage)
             warnings.extend(settings_result.warnings)

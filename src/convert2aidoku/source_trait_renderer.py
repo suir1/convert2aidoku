@@ -5,12 +5,20 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from .implementation_ir import project_implementation_ir
-from .listing_renderer import deterministic_search_listing_available
+from .listing_renderer import (
+    deterministic_listing_provider_available,
+    deterministic_search_listing_available,
+)
 from .manga_detail_renderer import deterministic_manga_update_available
 from .models import Capability, GeneratedFile, GenerationManifest, SourceIR
 from .page_renderer import deterministic_page_list_available
+from .rust_identifiers import is_plain_rust_identifier
 from .rust_inspection import RustInspection
-from .scaffold import _environment, render_generated_lib_rs
+from .scaffold import (
+    _environment,
+    deterministic_dynamic_filters_available,
+    render_generated_lib_rs,
+)
 
 _PLACEHOLDER = re.compile(r"^\{[A-Za-z_][A-Za-z0-9_]*\}$")
 _LITERAL_SEGMENT = re.compile(r"^[A-Za-z0-9._~-]+$")
@@ -138,6 +146,32 @@ def deterministic_source_shell_available(ir: SourceIR) -> bool:
         deterministic_search_listing_available(ir)
         and deterministic_manga_update_available(ir)
         and deterministic_page_list_available(ir)
+    )
+
+
+def deterministic_source_seed(ir: SourceIR) -> GenerationManifest | None:
+    """Seed generation when every required and capability-implied trait is tool-owned."""
+    if not deterministic_source_shell_available(ir) or not is_plain_rust_identifier(ir.main_class):
+        return None
+    ownership = source_trait_ownership(ir)
+    if any(
+        capability in ir.capabilities for capability in (Capability.POPULAR, Capability.LATEST)
+    ) and not deterministic_listing_provider_available(ir):
+        return None
+    if (
+        Capability.DYNAMIC_FILTERS in ir.capabilities
+        and not deterministic_dynamic_filters_available(ir)
+    ):
+        return None
+    if Capability.IMAGE_HEADERS in ir.capabilities and not ownership.image_request:
+        return None
+    if Capability.DEEP_LINKS in ir.capabilities and ownership.deep_links is None:
+        return None
+    if Capability.DYNAMIC_BASE_URLS in ir.capabilities and not ownership.base_url:
+        return None
+    return GenerationManifest(
+        source_struct=ir.main_class,
+        files=[GeneratedFile(path="src/lib.rs", content="#![no_std]\n")],
     )
 
 

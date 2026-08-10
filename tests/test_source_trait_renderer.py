@@ -9,6 +9,8 @@ from convert2aidoku.models import (
     RequestHeaderProfile,
 )
 from convert2aidoku.source_trait_renderer import (
+    SourceTraitOwnership,
+    deterministic_source_seed,
     deterministic_source_shell_available,
     render_source_shell,
     render_source_traits,
@@ -175,6 +177,90 @@ def test_replaces_ai_source_shell_when_all_required_providers_are_proven(
     assert "crate::c2a_pages::get_page_list" in files["src/source.rs"]
     assert "mod source;" in files["src/lib.rs"]
     assert not effective.dependencies
+
+
+def test_seeds_minimal_manifest_when_all_source_behavior_is_tool_owned(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "convert2aidoku.source_trait_renderer.deterministic_source_shell_available",
+        lambda _ir: True,
+    )
+    monkeypatch.setattr(
+        "convert2aidoku.source_trait_renderer.source_trait_ownership",
+        lambda _ir: SourceTraitOwnership(),
+    )
+    monkeypatch.setattr(
+        "convert2aidoku.source_trait_renderer.deterministic_listing_provider_available",
+        lambda _ir: True,
+    )
+    ir = minimal_source_ir(
+        main_class="CopyManga",
+        capabilities=[Capability.SEARCH, Capability.POPULAR],
+    )
+
+    seed = deterministic_source_seed(ir)
+
+    assert seed is not None
+    assert seed.source_struct == "CopyManga"
+    assert seed.implemented_traits == []
+    assert seed.dependencies == []
+    assert [(generated.path, generated.content) for generated in seed.files] == [
+        ("src/lib.rs", "#![no_std]\n")
+    ]
+
+
+def test_source_seed_rejects_invalid_rust_type_name(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "convert2aidoku.source_trait_renderer.deterministic_source_shell_available",
+        lambda _ir: True,
+    )
+
+    assert deterministic_source_seed(minimal_source_ir(main_class="type")) is None
+    assert deterministic_source_seed(minimal_source_ir(main_class="async")) is None
+    assert deterministic_source_seed(minimal_source_ir(main_class="9Source")) is None
+
+
+def test_source_seed_rejects_unowned_optional_behavior(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "convert2aidoku.source_trait_renderer.deterministic_source_shell_available",
+        lambda _ir: True,
+    )
+    monkeypatch.setattr(
+        "convert2aidoku.source_trait_renderer.source_trait_ownership",
+        lambda _ir: SourceTraitOwnership(),
+    )
+
+    assert (
+        deterministic_source_seed(
+            minimal_source_ir(capabilities=[Capability.SEARCH, Capability.IMAGE_HEADERS])
+        )
+        is None
+    )
+    assert (
+        deterministic_source_seed(
+            minimal_source_ir(capabilities=[Capability.SEARCH, Capability.POPULAR])
+        )
+        is None
+    )
+    assert (
+        deterministic_source_seed(
+            minimal_source_ir(capabilities=[Capability.SEARCH, Capability.DYNAMIC_FILTERS])
+        )
+        is None
+    )
+    assert (
+        deterministic_source_seed(
+            minimal_source_ir(capabilities=[Capability.SEARCH, Capability.DEEP_LINKS])
+        )
+        is None
+    )
+    assert (
+        deterministic_source_seed(
+            minimal_source_ir(capabilities=[Capability.SEARCH, Capability.DYNAMIC_BASE_URLS])
+        )
+        is None
+    )
 
 
 def test_source_shell_preserves_unowned_optional_traits(monkeypatch) -> None:
