@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.1.0b3 — 2026-08-11
+
+This beta turns a difficult Kotlin conversion into a reproducible generated-source compatibility
+pipeline and strengthens behavior shared by every AI provider.
+
+### Generation compatibility
+
 - Preserve valid `if let` fallback chains when folding identical Rust branches, and project legacy
   grouped Aidoku imports to the pinned crate's root re-exports without leaving shadowed imports.
 - Ignore unrelated Rust constants whose string syntax is not JSON-compatible while checking
@@ -14,9 +21,19 @@
   data and support relative manga/chapter deep links.
 - Convert legacy checkbox groups and their `FilterValue` consumers to current multi-select filters,
   and retry reproducible read-only GraphQL POST requests once after a transient request failure.
+
+### Verified regressions
+
 - Komiic now reaches live `verified` from its saved 43,714-token AI manifest without another
   provider call; Copymanga remains `verified` from a clean APK conversion with zero AI calls and
   zero tokens.
+
+### Known limitations
+
+- Deterministic chapter recovery requires complete, unambiguous Kotlin evidence. Otherwise the
+  controlled AI generation and repair path remains responsible for the missing behavior.
+- Live `verified` status still depends on source-site availability and anti-bot behavior at the
+  time of validation.
 
 ## 0.1.0b2 — 2026-08-10
 

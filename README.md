@@ -23,8 +23,8 @@ The current public preview is pinned so the installer and package always come fr
 release:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/suir1/convert2aidoku/v0.1.0-beta.2/install.sh | \
-  C2A_INSTALL_REF=v0.1.0-beta.2 sh
+curl -fsSL https://raw.githubusercontent.com/suir1/convert2aidoku/v0.1.0-beta.3/install.sh | \
+  C2A_INSTALL_REF=v0.1.0-beta.3 sh
 ```
 
 Open a new terminal after installation, then confirm the environment:
