@@ -147,8 +147,20 @@ class RequestHeaderProfile(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
 
 
+class PageRequestBypass(BaseModel):
+    """Typed request rewrite recovered from a decompiled page interceptor."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    marker: str = Field(min_length=1)
+    path_prefix: str = Field(min_length=1)
+    hosts: list[str] = Field(min_length=1)
+    headers: dict[str, str] = Field(min_length=1)
+    excluded_header_names: list[str] = Field(default_factory=list)
+
+
 class SourceIR(BaseModel):
-    schema_version: Literal[1, 2, 3, 4, 5, 6, 7] = 7
+    schema_version: Literal[1, 2, 3, 4, 5, 6, 7, 8] = 8
     input_ref: str
     commit: str | None = None
     source_format: Literal["kotlin_module", "decompiled_apk"] = "kotlin_module"
@@ -161,6 +173,7 @@ class SourceIR(BaseModel):
     header_names: list[str] = Field(default_factory=list)
     request_header_profiles: list[RequestHeaderProfile] = Field(default_factory=list)
     shared_request_headers: dict[str, str] = Field(default_factory=dict)
+    page_bypass: PageRequestBypass | None = None
     relative_url_keys: bool = False
     chapter_page_routes: list[ChapterPageRoute] = Field(default_factory=list)
     image_url_policy: ImageUrlPolicy | None = None
@@ -622,6 +635,34 @@ class GeneratedResources:
             ):
                 values_by_key[key] = tuple(values)
         return values_by_key
+
+    def with_setting_default(self, key: str, default: str) -> GenerationManifest:
+        updated_files: list[GeneratedFile] = []
+        changed = False
+        for generated in self._manifest.files:
+            if generated.path != self.SETTINGS:
+                updated_files.append(generated)
+                continue
+            data = deepcopy(self._data.get(self.SETTINGS))
+            pending = list(data or [])
+            while pending:
+                item = pending.pop()
+                if not isinstance(item, dict):
+                    continue
+                children = item.get("items")
+                if item.get("type") in {"group", "page"} and isinstance(children, list):
+                    pending.extend(children)
+                elif item.get("key") == key and item.get("default") != default:
+                    item["default"] = default
+                    changed = True
+            if changed:
+                content = json.dumps(data, ensure_ascii=False, indent="\t") + "\n"
+                updated_files.append(generated.model_copy(update={"content": content}))
+            else:
+                updated_files.append(generated)
+        if not changed:
+            return self._manifest
+        return self._manifest.model_copy(update={"files": updated_files})
 
     def with_source_filters(self, specs: list[SourceFilterSpec]) -> GenerationManifest:
         if not specs:

@@ -14,8 +14,10 @@ from .models import (
     ChapterPageRouteVariant,
     ContentRating,
     ImageUrlPolicy,
+    PageRequestBypass,
     RequestHeaderProfile,
     RouteReplacement,
+    SourceFile,
     SourceFilterOption,
     SourceFilterSpec,
     SourceIR,
@@ -30,6 +32,35 @@ from .source_rules import (
     SOURCE_BLOCK_RULE_IDS,
     validate_rule_ids,
 )
+
+_SENSITIVE_REQUEST_HEADER_NAMES = frozenset(
+    {
+        "api-key",
+        "auth-token",
+        "authorization",
+        "cookie",
+        "device-code",
+        "device-id",
+        "proxy-authorization",
+        "session-id",
+        "session-token",
+        "set-cookie",
+        "tsid",
+        "x-api-key",
+        "x-auth-token",
+    }
+)
+_JWT_VALUE = re.compile(r"^[A-Za-z0-9_-]{2,}\.[A-Za-z0-9_-]{2,}\.[A-Za-z0-9_-]{2,}$")
+
+
+def _is_sensitive_request_header(name: str, value: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", "-", name.casefold()).strip("-")
+    return (
+        normalized in _SENSITIVE_REQUEST_HEADER_NAMES
+        or normalized.endswith(("-credential", "-secret", "-token"))
+        or re.match(r"^(?:basic|bearer)\s+\S", value, re.I) is not None
+        or _JWT_VALUE.fullmatch(value.strip()) is not None
+    )
 
 
 def _java_string_array(content: str) -> list[str]:
@@ -57,6 +88,7 @@ def _java_request_header_policy(
                 name: value
                 for name, value in zip(values[::2], values[1::2], strict=True)
                 if name.casefold() not in AIDOKU_RUNTIME_MANAGED_REQUEST_HEADERS
+                and not _is_sensitive_request_header(name, value)
             }
 
     domains: dict[str, list[str]] = {name: [] for name in profiles}
@@ -81,6 +113,7 @@ def _java_request_header_policy(
                     name: value
                     for name, value in zip(values[::2], values[1::2], strict=True)
                     if name.casefold() not in AIDOKU_RUNTIME_MANAGED_REQUEST_HEADERS
+                    and not _is_sensitive_request_header(name, value)
                 }
             )
 
@@ -155,6 +188,98 @@ def _decode_java_string(value: str) -> str:
     except json.JSONDecodeError:
         return value.replace(r"\"", '"').replace("\\\\", "\\")
     return decoded if isinstance(decoded, str) else value
+
+
+def _balanced_java_block(content: str, opening: int) -> str | None:
+    depth = 0
+    quote = None
+    escaped = False
+    for index in range(opening, len(content)):
+        character = content[index]
+        if quote:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = None
+        elif character in {'"', "'"}:
+            quote = character
+        elif character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                return content[opening + 1 : index]
+    return None
+
+
+def _java_page_request_bypass(files: list[SourceFile]) -> PageRequestBypass | None:
+    java = "\n".join(source.content for source in files)
+    marker_match = re.search(
+        r'\blast[A-Za-z0-9_]*Mark\s*=\s*"(?P<value>(?:\\.|[^"\\])*)"\s*;',
+        java,
+        re.I,
+    )
+    hosts_match = re.search(
+        r"\b[A-Za-z_]*bypass[A-Za-z_]*hosts?\s*=\s*"
+        r"CollectionsKt\.listOf\(new\s+String\[\]\s*\{(?P<value>[^}]+)\}\)",
+        java,
+        re.I,
+    )
+    if marker_match is None or hosts_match is None:
+        return None
+    marker = _decode_java_string(marker_match.group("value"))
+    hosts = list(dict.fromkeys(_java_string_array(hosts_match.group("value"))))
+    if not marker or not hosts:
+        return None
+    for source in files:
+        content = source.content
+        if not all(
+            token in content
+            for token in ("implements Interceptor", "isPageListLink", "removeSuffix", "encodedPath")
+        ):
+            continue
+        opening = content.find("{", content.find("isPageListLink"))
+        block = _balanced_java_block(content, opening) if opening >= 0 else None
+        if block is None:
+            continue
+        prefix_match = re.search(
+            r'\bString\s+[A-Za-z_]\w*\s*=\s*"(?P<value>(?:\\.|[^"\\])*)"\s*\+\s*'
+            r"StringsKt\.removeSuffix",
+            block,
+        )
+        if prefix_match is None:
+            continue
+        prefix = _decode_java_string(prefix_match.group("value"))
+        literal_headers = [
+            (_decode_java_string(name), _decode_java_string(value))
+            for name, value in re.findall(
+                r'\.header\(\s*"((?:\\.|[^"\\])*)"\s*,\s*'
+                r'"((?:\\.|[^"\\])*)"\s*\)',
+                block,
+            )
+        ]
+        excluded_header_names = list(
+            dict.fromkeys(
+                name
+                for name, value in literal_headers
+                if name.casefold() in AIDOKU_RUNTIME_MANAGED_REQUEST_HEADERS
+                or _is_sensitive_request_header(name, value)
+            )
+        )
+        headers = {
+            name: value for name, value in literal_headers if name not in excluded_header_names
+        }
+        if prefix.startswith("/") and headers:
+            return PageRequestBypass(
+                marker=marker,
+                path_prefix=prefix.rstrip("/") or "/",
+                hosts=hosts,
+                headers=headers,
+                excluded_header_names=excluded_header_names,
+            )
+    return None
 
 
 def _java_image_url_policy(java: str) -> ImageUrlPolicy | None:
@@ -394,6 +519,7 @@ def analyze_decompiled_source(resolved: ResolvedSource) -> SourceIR:
         header_names=list(inspection.header_names),
         request_header_profiles=request_header_profiles,
         shared_request_headers=shared_request_headers,
+        page_bypass=_java_page_request_bypass(files),
         relative_url_keys=relative_url_keys,
         chapter_page_routes=_java_chapter_page_routes(java),
         image_url_policy=_java_image_url_policy(java),

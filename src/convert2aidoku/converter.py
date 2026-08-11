@@ -36,6 +36,7 @@ from .models import (
 from .normalization_trace import NormalizationTrace
 from .page_renderer import with_deterministic_page_list
 from .reports import classify_status, write_report
+from .request_policy import RequestPolicy
 from .scaffold import apply_generation_manifest
 from .source_trait_renderer import (
     with_deterministic_source_shell,
@@ -141,11 +142,13 @@ class _ConversionRoundRunner:
         self.checkpoint.phase = "validated"
         self.store.commit(checkpoint=self.checkpoint)
         round_number = len(self.checkpoint.ai_rounds)
-        round_label = (
-            f"AI round {round_number}"
-            if not self.checkpoint.ai_rounds or self.checkpoint.ai_rounds[-1].provider_called
-            else "Deterministic generation"
-        )
+        last_round = self.checkpoint.ai_rounds[-1] if self.checkpoint.ai_rounds else None
+        if last_round is None or last_round.provider_called:
+            round_label = f"AI round {round_number}"
+        elif last_round.purpose == "repair":
+            round_label = "Deterministic repair"
+        else:
+            round_label = "Deterministic generation"
         if repair_required(self.validation, self.capability_gaps, live=self.live):
             failed = next(
                 (stage.name for stage in self.validation.stages if not stage.ok),
@@ -170,7 +173,13 @@ class _ConversionRoundRunner:
         )
         total_tokens = result.usage.total_tokens if result.usage is not None else None
         usage = f" ({total_tokens:,} tokens)" if total_tokens is not None else ""
-        label = f"AI round {number}" if result.provider_called else "Deterministic generation"
+        label = (
+            f"AI round {number}"
+            if result.provider_called
+            else "Deterministic repair"
+            if purpose == "repair"
+            else "Deterministic generation"
+        )
         self.progress(f"{label} returned{usage}; validating")
         self.evaluate(result.value)
 
@@ -187,8 +196,7 @@ class _ConversionRoundRunner:
         )
         self.store.commit(checkpoint=self.checkpoint)
 
-    def repair(self, settings: AISettings) -> None:
-        repair_number = max(0, len(self.checkpoint.ai_rounds) - 1)
+    def _skip_blocked_repair(self) -> bool:
         if self.validation.blocked:
             warning = (
                 "AI repair skipped because live validation is blocked by an external site or "
@@ -199,8 +207,48 @@ class _ConversionRoundRunner:
                 self.checkpoint.warnings.append(warning)
                 self.store.commit(checkpoint=self.checkpoint)
             self.progress("AI repair skipped: live validation is externally blocked")
+            return True
+        return False
+
+    def repair(self, settings: AISettings) -> None:
+        if not self.validation.blocked and not repair_required(
+            self.validation, self.capability_gaps, live=self.live
+        ):
+            return
+        request_policy = RequestPolicy.from_source_ir(self.ir)
+        while self.validation.blocked or repair_required(
+            self.validation, self.capability_gaps, live=self.live
+        ):
+            remediation = request_policy.remediate(self.manifest, self.validation)
+            if remediation is None:
+                break
+            self.progress(remediation.warning + "; validating without AI")
+            self.accept(
+                AIResult(
+                    value=remediation.manifest,
+                    structured_output=True,
+                    provider_called=False,
+                    warnings=[remediation.warning],
+                ),
+                purpose="repair",
+            )
+        if self.validation.blocked:
+            self._skip_blocked_repair()
             return
         if not repair_required(self.validation, self.capability_gaps, live=self.live):
+            return
+        repair_number = sum(
+            1
+            for item in self.checkpoint.ai_rounds
+            if item.purpose == "repair" and item.provider_called
+        )
+        round_limit = repair_round_limit(
+            self.validation,
+            self.capability_gaps,
+            live=self.live,
+            configured_limit=settings.max_repair_rounds,
+        )
+        if repair_number >= round_limit:
             return
         settings.require_provider()
         with OpenAICompatibleClient(settings) as client:
@@ -287,7 +335,7 @@ def convert_source(
             "model": settings.model or checkpoint.model,
         }
     )
-    if generation_requires_provider(ir):
+    if checkpoint.current_manifest is None and generation_requires_provider(ir):
         settings.require_provider()
 
     rounds = _ConversionRoundRunner(

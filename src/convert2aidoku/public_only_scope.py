@@ -17,8 +17,12 @@ _SETTING_EXCLUSIONS = (
         "WebView login/navigation settings (excluded by public-only APK scope)",
     ),
     (
-        (".lan_option",),
+        (".lan_option", ".cc_option"),
         "Android ChineseUtils script conversion setting (excluded by public-only APK scope)",
+    ),
+    (
+        (".anti_watermark",),
+        "optional image cleanup setting (excluded by public-only APK scope)",
     ),
     (
         (".hide_default_continuous_chapter",),
@@ -41,7 +45,12 @@ _SETTING_EXCLUSIONS = (
         "chapter comments (excluded by public-only APK scope)",
     ),
     (
-        (".extension_update_link", ".only_update_link"),
+        (
+            ".extension_update_link",
+            ".only_update_link",
+            ".plugin_info",
+            ".plguin_info",
+        ),
         "Android extension information preference (excluded by public-only APK scope)",
     ),
 )

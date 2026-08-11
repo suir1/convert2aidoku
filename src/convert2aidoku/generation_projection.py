@@ -33,6 +33,7 @@ from .generation_setting_compatibility import (
 )
 from .models import Capability, GeneratedFile, GeneratedResources, GenerationManifest, SourceIR
 from .normalization_trace import NormalizationTrace
+from .request_policy import RequestPolicy
 from .rust_compatibility import normalize_pinned_aidoku_rust as _normalize_pinned_aidoku_rust
 from .rust_inspection import RustInspection
 from .rust_inspection import last_rust_identifier as _last_rust_identifier
@@ -47,6 +48,7 @@ class _ProjectionContext:
     setting_values: dict[str, tuple[str, ...]]
     prequeried_url_helpers: set[str]
     request_builder_helpers: set[str]
+    request_policy: RequestPolicy
     preserve_cover_urls: bool
     trace: NormalizationTrace | None
 
@@ -66,6 +68,7 @@ class _ProjectionContext:
             setting_values=resources.setting_values(),
             prequeried_url_helpers=_prequeried_url_helpers(manifest),
             request_builder_helpers=_request_builder_helpers(manifest),
+            request_policy=RequestPolicy.from_source_ir(ir),
             preserve_cover_urls=bool(
                 ir.image_url_policy and ir.image_url_policy.preserve_cover_urls
             ),
@@ -694,6 +697,13 @@ def _project_request_headers(
     )
 
 
+def _project_request_policy(
+    context: _ProjectionContext,
+    state: _ProjectionState,
+) -> _ProjectionState:
+    return _with_files(state, context.request_policy.project(state.files))
+
+
 def _project_user_agent(
     context: _ProjectionContext,
     state: _ProjectionState,
@@ -813,6 +823,7 @@ _PROJECTION_PASSES = (
     ),
     _ProjectionPass("project_recovered_kotlin_chapters", _project_kotlin_chapters),
     _ProjectionPass("project_recovered_request_headers", _project_request_headers),
+    _ProjectionPass("project_request_policy", _project_request_policy),
     _ProjectionPass("project_user_agent_setting", _project_user_agent),
     _ProjectionPass("project_recovered_detail_api_envelope", _project_detail_envelope),
     _ProjectionPass(

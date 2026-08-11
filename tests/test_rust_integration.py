@@ -14,7 +14,11 @@ from convert2aidoku.models import (
     RequestHeaderProfile,
 )
 from convert2aidoku.page_renderer import with_deterministic_page_list
-from convert2aidoku.scaffold import apply_generation_manifest, render_generated_lib_rs
+from convert2aidoku.scaffold import (
+    apply_generation_manifest,
+    normalize_generation_manifest,
+    render_generated_lib_rs,
+)
 from convert2aidoku.source_trait_renderer import (
     SourceTraitOwnership,
     render_source_traits,
@@ -504,8 +508,7 @@ def test_serializable_string_mappings_compile_for_wasm(tmp_path: Path) -> None:
     )
     rendered = render_search_listing(listing_ir)
     project, scaffold_ir = scaffold_project(tmp_path, name="serializable-listing-project")
-    apply_generation_manifest(
-        project,
+    manifest = normalize_generation_manifest(
         scaffold_ir,
         GenerationManifest(
             source_struct="Example",
@@ -515,6 +518,11 @@ def test_serializable_string_mappings_compile_for_wasm(tmp_path: Path) -> None:
             ],
             dependencies=[DependencyRequest(name="serde", features=["derive"])],
         ),
+    )
+    apply_generation_manifest(
+        project,
+        scaffold_ir,
+        manifest,
         query=None,
     )
 

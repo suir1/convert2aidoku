@@ -160,6 +160,8 @@ def apply_repair_patch(
                 allow_dead_code=path != "src/lib.rs",
                 trace=trace,
             )
+            if RustInspection.from_content(content).has_syntax_errors:
+                raise AIProviderError(f"repair patch produced invalid Rust syntax: {path}")
         try:
             validate_generated_content(path, content)
         except SecurityError as exc:

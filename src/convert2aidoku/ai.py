@@ -31,7 +31,10 @@ from .constants import (
     MAX_GENERATED_TOTAL_CHARS,
     TOOL_OWNED_RUST_PATHS,
 )
-from .decompiled_settings import with_deterministic_decompiled_settings
+from .decompiled_settings import (
+    deterministic_decompiled_settings,
+    with_deterministic_decompiled_settings,
+)
 from .dependency_policy import evaluate_dependency_policy, render_dependency_policy
 from .errors import AIProviderError, SecurityError
 from .generation_context import (
@@ -69,6 +72,7 @@ from .rust_compatibility import (
     normalize_pinned_aidoku_rust,
     validate_generated_content,
 )
+from .rust_inspection import RustInspection
 from .scaffold import render_generated_lib_rs
 from .source_trait_renderer import (
     deterministic_source_seed,
@@ -448,6 +452,14 @@ def _needs_settings(ir: SourceIR) -> bool:
     return Capability.SETTINGS in ir.capabilities or Capability.DYNAMIC_BASE_URLS in ir.capabilities
 
 
+def _deterministic_settings_document(ir: SourceIR) -> _SettingsDocument | None:
+    generated = deterministic_decompiled_settings(ir)
+    if generated is None:
+        return None
+    groups = json.loads(generated.content)
+    return _SettingsDocument.model_validate({"groups": groups})
+
+
 def _deterministic_generation_seed(ir: SourceIR) -> GenerationManifest | None:
     manifest = deterministic_source_seed(ir)
     if manifest is None:
@@ -477,7 +489,7 @@ def initial_generation_request_characters(ir: SourceIR) -> int:
     messages = _generation_messages(ir)
     characters = sum(len(message["content"]) for message in messages)
     characters += len(json.dumps(_RustGenerationManifest.model_json_schema(), ensure_ascii=False))
-    if _needs_settings(ir):
+    if _needs_settings(ir) and _deterministic_settings_document(ir) is None:
         characters += sum(len(message["content"]) for message in _settings_messages(ir))
         characters += len(json.dumps(_SettingsDocument.model_json_schema(), ensure_ascii=False))
     return characters
@@ -629,6 +641,8 @@ def _validate_rust_manifest(manifest: _RustGenerationManifest) -> None:
             trace=trace,
         )
         validate_generated_content(generated.path, generated.content)
+        if RustInspection.from_content(generated.content).has_syntax_errors:
+            raise ValueError(f"generated file has invalid Rust syntax: {generated.path}")
     manifest._normalization_rewrites = trace.counts
 
 
@@ -997,10 +1011,15 @@ class OpenAICompatibleClient:
                 normalization_rewrites={},
             )
         settings_result: AIResult[_SettingsDocument] | None = None
+        deterministic_settings = _deterministic_settings_document(ir) if needs_settings else None
         usages: list[AIUsage] = []
         warnings: list[str] = []
         structured_output = True
-        if needs_settings and ir.source_format == "decompiled_apk":
+        if (
+            needs_settings
+            and ir.source_format == "decompiled_apk"
+            and deterministic_settings is None
+        ):
             settings_result = self._generate_settings(ir)
             if settings_result.usage is not None:
                 usages.append(settings_result.usage)
@@ -1010,9 +1029,11 @@ class OpenAICompatibleClient:
             rust_result = self._request_model(
                 _generation_messages(
                     ir,
-                    settings_document=settings_result.value
-                    if settings_result is not None
-                    else None,
+                    settings_document=(
+                        settings_result.value
+                        if settings_result is not None
+                        else deterministic_settings
+                    ),
                 ),
                 _RustGenerationManifest,
                 validate=_validate_rust_manifest,
@@ -1037,7 +1058,9 @@ class OpenAICompatibleClient:
             usages.append(rust_result.usage)
         warnings.extend(rust_result.warnings)
         structured_output = structured_output and rust_result.structured_output
-        if settings_result is not None:
+        if deterministic_settings is not None:
+            manifest = _with_settings_document(manifest, deterministic_settings)
+        elif settings_result is not None:
             manifest = _with_settings_document(manifest, settings_result.value)
         elif needs_settings and not GeneratedResources(manifest).has_nonempty_setting_items():
             try:

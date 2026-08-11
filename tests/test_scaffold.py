@@ -20,10 +20,10 @@ from convert2aidoku.models import (
     SourceFilterSpec,
 )
 from convert2aidoku.normalization_trace import NormalizationTrace
+from convert2aidoku.rust_compatibility import normalize_pinned_aidoku_rust
 from convert2aidoku.scaffold import (
     apply_generation_manifest,
     normalize_generation_manifest,
-    normalize_pinned_aidoku_rust,
     render_generated_lib_rs,
     validate_generated_content,
 )
@@ -328,6 +328,7 @@ def test_scaffold_invalidates_lockfile_when_dependencies_change(tmp_path: Path) 
 def test_scaffold_preserves_lockfile_when_dependencies_do_not_change(tmp_path: Path) -> None:
     project, ir = scaffold_project(tmp_path)
     manifest = _manifest("serde")
+    manifest = normalize_generation_manifest(ir, manifest)
     apply_generation_manifest(project, ir, manifest, query=None)
     lock = project / "Cargo.lock"
     lock.write_text("current lock", encoding="utf-8")
@@ -348,7 +349,7 @@ def test_scaffold_injects_no_std_crate_attribute(tmp_path: Path) -> None:
     assert lib.startswith("#![no_std]\n")
 
 
-def test_scaffold_normalizes_pinned_no_std_compatibility(tmp_path: Path) -> None:
+def test_effective_manifest_materializes_pinned_no_std_compatibility(tmp_path: Path) -> None:
     project, ir = scaffold_project(tmp_path)
     manifest = _manifest()
     manifest.files[0].content += (
@@ -362,6 +363,7 @@ def test_scaffold_normalizes_pinned_no_std_compatibility(tmp_path: Path) -> None
         "}\n"
     )
 
+    manifest = normalize_generation_manifest(ir, manifest)
     apply_generation_manifest(project, ir, manifest, query=None)
 
     lib = (project / "src" / "lib.rs").read_text(encoding="utf-8")
@@ -377,7 +379,7 @@ def test_scaffold_normalizes_pinned_no_std_compatibility(tmp_path: Path) -> None
     assert "chapters.sort_by_key(|item| core::cmp::Reverse(item.index));" in lib
 
 
-def test_scaffold_normalizes_pinned_request_error_and_borrow(tmp_path: Path) -> None:
+def test_effective_manifest_materializes_pinned_request_error_and_borrow(tmp_path: Path) -> None:
     manifest = _manifest()
     manifest.files[0].content = """#![no_std]
 use aidoku::imports::net::{Request, RequestError};
@@ -389,6 +391,7 @@ fn request() -> aidoku::Result<Request> {
 }
 """
     project, ir = scaffold_project(tmp_path)
+    manifest = normalize_generation_manifest(ir, manifest)
     apply_generation_manifest(project, ir, manifest, query=None)
 
     lib = (project / "src" / "lib.rs").read_text(encoding="utf-8")
@@ -790,6 +793,24 @@ fn parse_date(value: &str) -> Result<i64> {
     assert normalize_pinned_aidoku_rust(normalized) == normalized
 
 
+def test_normalizer_preserves_identical_if_let_branches() -> None:
+    content = """
+fn replace_host(url: &str) -> String {
+    if let Some(index) = url.find('/') {
+        format!("{}", url)
+    } else {
+        format!("{}", url)
+    }
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "if let Some(index)" in normalized
+    assert "let _ = let Some" not in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
 def test_normalizer_repairs_dynamic_header_and_option_date_fallback() -> None:
     content = """
 fn request(request: Request, cookie: String) -> Request {
@@ -830,6 +851,31 @@ fn manga(dto: Dto) -> Manga {
     assert "title: dto.title," in normalized
     assert "status: match dto.status.as_str()" in normalized
     assert "..Default::default()" in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
+def test_normalizer_folds_nested_default_model_assignments_before_use() -> None:
+    content = """
+fn chapters(items: Vec<(String, String)>) -> Vec<Chapter> {
+    let mut chapters = Vec::new();
+    for (key, title) in items {
+        let mut chapter = Chapter::default();
+        chapter.key = format!("/chapter/{}", key);
+        chapter.url = Some(absolute_url(&key));
+        chapter.title = Some(title);
+        chapters.push(chapter);
+    }
+    chapters
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "let mut chapter = Chapter::default();" not in normalized
+    assert "let chapter = Chapter {" in normalized
+    assert 'key: format!("/chapter/{}", key),' in normalized
+    assert "url: Some(absolute_url(&key))," in normalized
+    assert "chapters.push(chapter);" in normalized
     assert normalize_pinned_aidoku_rust(normalized) == normalized
 
 
@@ -1766,6 +1812,25 @@ fn normalize(value: &str) -> String {
 
     assert "if normalized.len() > 10" in normalized
     assert "if normalized.len() >= 20" in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
+def test_normalizer_advances_past_unicode_find_matches_by_utf8_length() -> None:
+    content = """
+fn parse_date(text: &str) {
+    if let Some(year_end) = text.find('年') {
+        let rest = &text[year_end + 1..];
+        if let Some(month_end) = rest.find('月') {
+            let day = &rest[month_end + 1..];
+        }
+    }
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "text[year_end + '年'.len_utf8()..]" in normalized
+    assert "rest[month_end + '月'.len_utf8()..]" in normalized
     assert normalize_pinned_aidoku_rust(normalized) == normalized
 
 
@@ -3423,7 +3488,7 @@ pub fn get_details() -> PrivateDetail { PrivateDetail }
     assert normalize_generation_manifest(ir, normalized) == normalized
 
 
-def test_scaffold_applies_declared_setting_default_to_rust_fallback(tmp_path: Path) -> None:
+def test_effective_manifest_materializes_declared_setting_default(tmp_path: Path) -> None:
     manifest = _manifest()
     manifest.files[0].content += """
 use aidoku::imports::defaults::defaults_get;
@@ -3447,6 +3512,7 @@ fn platform_with_stale_fallback() -> String {
     )
     project, ir = scaffold_project(tmp_path)
 
+    manifest = normalize_generation_manifest(ir, manifest)
     apply_generation_manifest(project, ir, manifest, query=None)
 
     lib = (project / "src" / "lib.rs").read_text(encoding="utf-8")
@@ -3455,7 +3521,7 @@ fn platform_with_stale_fallback() -> String {
     assert 'String::from("stale")' not in lib
 
 
-def test_scaffold_reconciles_unique_setting_suffix_aliases(tmp_path: Path) -> None:
+def test_effective_manifest_materializes_unique_setting_suffix_aliases(tmp_path: Path) -> None:
     manifest = _manifest()
     manifest.files[0].content += """
 use aidoku::imports::defaults::defaults_get;
@@ -3507,6 +3573,7 @@ fn resolution_already_mapped() -> String {
     )
     project, ir = scaffold_project(tmp_path)
 
+    manifest = normalize_generation_manifest(ir, manifest)
     apply_generation_manifest(project, ir, manifest, query=None)
 
     lib = (project / "src" / "lib.rs").read_text(encoding="utf-8")
@@ -3530,7 +3597,7 @@ fn resolution_already_mapped() -> String {
     assert '.unwrap_or_else(|| "1500".to_string())' in mapped
 
 
-def test_scaffold_maps_prefixed_platform_setting_to_protocol_header(tmp_path: Path) -> None:
+def test_effective_manifest_materializes_platform_protocol_header(tmp_path: Path) -> None:
     manifest = _manifest()
     manifest.files[0].content += """
 use aidoku::imports::defaults::defaults_get;
@@ -3556,6 +3623,7 @@ fn get_platform_header() -> Option<(&'static str, String)> {
     )
     project, ir = scaffold_project(tmp_path)
 
+    manifest = normalize_generation_manifest(ir, manifest)
     apply_generation_manifest(project, ir, manifest, query=None)
 
     lib = (project / "src" / "lib.rs").read_text(encoding="utf-8")
@@ -3571,7 +3639,7 @@ fn get_platform_header() -> Option<(&'static str, String)> {
         assert f'"platform.{word}" => Some(("platform", String::from("{number}")))' in lib
 
 
-def test_scaffold_maps_platform_setting_pushed_into_header_vector(tmp_path: Path) -> None:
+def test_effective_manifest_materializes_platform_header_vector(tmp_path: Path) -> None:
     manifest = _manifest()
     manifest.files[0].content += """
 use aidoku::imports::defaults::defaults_get;
@@ -3607,6 +3675,7 @@ fn listing_request(url: &str) -> aidoku::Result<aidoku::imports::net::Request> {
     )
     project, ir = scaffold_project(tmp_path)
 
+    manifest = normalize_generation_manifest(ir, manifest)
     apply_generation_manifest(project, ir, manifest, query=None)
 
     lib = (project / "src" / "lib.rs").read_text(encoding="utf-8")
@@ -3622,7 +3691,7 @@ fn listing_request(url: &str) -> aidoku::Result<aidoku::imports::net::Request> {
     assert "platform.map(" not in lib
 
 
-def test_scaffold_defaults_direct_platform_value_pushed_into_header_vector(
+def test_effective_manifest_materializes_direct_platform_header_vector(
     tmp_path: Path,
 ) -> None:
     manifest = _manifest()
@@ -3653,6 +3722,7 @@ fn api_headers() -> Vec<(String, String)> {
     )
     project, ir = scaffold_project(tmp_path)
 
+    manifest = normalize_generation_manifest(ir, manifest)
     apply_generation_manifest(project, ir, manifest, query=None)
 
     lib = (project / "src" / "lib.rs").read_text(encoding="utf-8")
@@ -3664,7 +3734,9 @@ fn api_headers() -> Vec<(String, String)> {
     assert 'headers.push(("platform".to_string(), platform));' in lib
 
 
-def test_scaffold_maps_prefixed_platform_binding_before_header_push(tmp_path: Path) -> None:
+def test_effective_manifest_materializes_platform_binding_before_header_push(
+    tmp_path: Path,
+) -> None:
     manifest = _manifest()
     manifest.files[0].content += """
 use aidoku::alloc::{String, Vec};
@@ -3693,6 +3765,7 @@ fn build_headers() -> Vec<(String, String)> {
     )
     project, ir = scaffold_project(tmp_path)
 
+    manifest = normalize_generation_manifest(ir, manifest)
     apply_generation_manifest(project, ir, manifest, query=None)
 
     lib = (project / "src" / "lib.rs").read_text(encoding="utf-8")
@@ -3704,7 +3777,7 @@ fn build_headers() -> Vec<(String, String)> {
     assert 'headers.push(("platform".into(), platform))' in lib
 
 
-def test_scaffold_maps_prefixed_resolution_setting_to_numeric_value(tmp_path: Path) -> None:
+def test_effective_manifest_materializes_numeric_resolution_setting(tmp_path: Path) -> None:
     manifest = _manifest()
     manifest.files[0].content += """
 use aidoku::imports::defaults::defaults_get;
@@ -3727,6 +3800,7 @@ fn resolution() -> String {
     )
     project, ir = scaffold_project(tmp_path)
 
+    manifest = normalize_generation_manifest(ir, manifest)
     apply_generation_manifest(project, ir, manifest, query=None)
 
     lib = (project / "src" / "lib.rs").read_text(encoding="utf-8")
@@ -3736,7 +3810,7 @@ fn resolution() -> String {
     assert '_ => String::from("1500")' in lib
 
 
-def test_scaffold_repairs_prequeried_helper_and_preserves_cover_url(tmp_path: Path) -> None:
+def test_effective_manifest_materializes_query_and_cover_repairs(tmp_path: Path) -> None:
     manifest = _manifest()
     manifest.files[0].content += """
 fn filtered_url(page: i32) -> String {
@@ -3779,6 +3853,7 @@ fn update_cover(mut manga: Manga, detail: Detail) -> Manga {
         }
     )
 
+    manifest = normalize_generation_manifest(ir, manifest)
     apply_generation_manifest(project, ir, manifest, query=None)
 
     lib = (project / "src" / "lib.rs").read_text(encoding="utf-8")
@@ -3791,7 +3866,7 @@ fn update_cover(mut manga: Manga, detail: Detail) -> Manga {
     assert "resolve_image_url(&detail.cover)" not in lib
 
 
-def test_scaffold_uses_public_source_base_for_generated_absolute_urls(tmp_path: Path) -> None:
+def test_effective_manifest_materializes_public_absolute_urls(tmp_path: Path) -> None:
     manifest = _manifest()
     manifest.files[0].content += """
 fn get_api_base() -> String { String::from("https://api.example/api/v3") }
@@ -3802,6 +3877,7 @@ fn absolute_url(relative: &str) -> String {
     project, ir = scaffold_project(tmp_path)
     ir = ir.model_copy(update={"relative_url_keys": True})
 
+    manifest = normalize_generation_manifest(ir, manifest)
     apply_generation_manifest(project, ir, manifest, query=None)
 
     lib = (project / "src" / "lib.rs").read_text(encoding="utf-8")
@@ -3825,6 +3901,7 @@ fn update_cover(mut manga: Manga, cover: String) -> Manga {
     project, ir = scaffold_project(tmp_path)
     ir = ir.model_copy(update={"relative_url_keys": True})
 
+    manifest = normalize_generation_manifest(ir, manifest)
     apply_generation_manifest(project, ir, manifest, query=None)
 
     lib = (project / "src" / "lib.rs").read_text(encoding="utf-8")
@@ -3860,7 +3937,7 @@ fn deep_link(key: String) -> DeepLinkResult {
     )
 
 
-def test_scaffold_projects_recovered_chapter_key_template(tmp_path: Path) -> None:
+def test_effective_manifest_materializes_recovered_chapter_key_template(tmp_path: Path) -> None:
     manifest = _manifest()
     manifest.files[0].content += """
 fn chapter_key(comic_path: &str, chapter_id: &str) -> String {
@@ -3887,6 +3964,7 @@ fn chapter_key(comic_path: &str, chapter_id: &str) -> String {
         }
     )
 
+    manifest = normalize_generation_manifest(ir, manifest)
     apply_generation_manifest(project, ir, manifest, query=None)
 
     lib = (project / "src" / "lib.rs").read_text(encoding="utf-8")
@@ -3917,7 +3995,7 @@ fn chapter_key(info: Info) -> String {
     assert normalize_pinned_aidoku_rust(normalized, **options) == normalized
 
 
-def test_scaffold_skips_unused_decompiled_dto_fields(tmp_path: Path) -> None:
+def test_effective_manifest_materializes_skipped_decompiled_dto_fields(tmp_path: Path) -> None:
     manifest = _manifest()
     manifest.files.append(
         GeneratedFile(
@@ -3943,6 +4021,7 @@ fn iterator_next(values: &mut impl Iterator<Item = String>) { let _ = values.nex
     project, ir = scaffold_project(tmp_path)
     ir = ir.model_copy(update={"source_format": "decompiled_apk"})
 
+    manifest = normalize_generation_manifest(ir, manifest)
     apply_generation_manifest(project, ir, manifest, query=None)
 
     dto = (project / "src" / "dto.rs").read_text(encoding="utf-8")
@@ -4217,6 +4296,33 @@ fn handle_deep_link(&self, url: String) -> Result<Option<DeepLinkResult>> {
 
     assert 'path.split_once("/comic/").map(|(_, rest)| rest)' in normalized
     assert 'parts.len() >= 3 && parts[1] == "chapter"' in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
+def test_normalizes_dynamic_domain_deep_links_and_specific_route_order() -> None:
+    rust = """
+fn handle_deep_link(&self, url: String) -> Result<Option<DeepLinkResult>> {
+    let path = url.as_str();
+    if path.starts_with("/comic/") {
+        return Ok(Some(DeepLinkResult::Manga { key: path.to_string() }));
+    }
+    if path.starts_with("/comic/chapter/") {
+        return Ok(Some(DeepLinkResult::Chapter {
+            manga_key: path.to_string(),
+            key: path.to_string(),
+        }));
+    }
+    Ok(None)
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(rust)
+
+    assert '.split_once("://")' in normalized
+    assert ".and_then(|(_, value)| value.find('/').map(|index| &value[index..]))" in normalized
+    assert normalized.index('path.starts_with("/comic/chapter/")') < normalized.index(
+        'path.starts_with("/comic/")'
+    )
     assert normalize_pinned_aidoku_rust(normalized) == normalized
 
 

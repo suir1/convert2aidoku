@@ -102,6 +102,7 @@ def test_manifest_projection_registry_preserves_deterministic_order() -> None:
         "project_recovered_nullable_dto_defaults",
         "project_recovered_kotlin_chapters",
         "project_recovered_request_headers",
+        "project_request_policy",
         "project_user_agent_setting",
         "project_recovered_detail_api_envelope",
         "project_recovered_chapter_page_variants",

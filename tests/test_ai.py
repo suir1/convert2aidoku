@@ -774,6 +774,36 @@ def test_initial_generation_stops_after_three_unsafe_full_outputs() -> None:
     )
 
 
+def test_initial_generation_retries_rust_syntax_errors() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        payload = json.loads(request.content)
+        if calls == 2:
+            retry = json.loads(payload["messages"][-1]["content"])
+            assert "invalid Rust syntax" in retry["validation_errors"][0]
+        manifest = _manifest()
+        if calls == 1:
+            manifest["files"][0]["content"] = "fn broken() { let _ = let Some(index) = value; }"
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(manifest)}}]},
+        )
+
+    ir = minimal_source_ir(
+        files=[SourceFile(path="src/Example.kt", content="class Example", sha256="0")]
+    )
+    with OpenAICompatibleClient(
+        provider_settings(), transport=httpx.MockTransport(handler)
+    ) as client:
+        result = client.generate(ir)
+
+    assert calls == 2
+    assert "fn broken" not in result.value.files[0].content
+
+
 def test_invalid_filter_shape_is_retried_with_field_diagnostic() -> None:
     calls = 0
 
@@ -1071,6 +1101,64 @@ def test_complete_source_with_deterministic_decompiled_settings_makes_no_request
         "res/settings.json",
     }
     assert initial_generation_request_characters(ir) == 0
+
+
+def test_ai_generated_rust_reuses_deterministic_decompiled_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    settings = GeneratedFile(
+        path="res/settings.json",
+        content=(
+            '[{"type":"group","items":['
+            '{"type":"select","key":"domain","values":["api.example"],'
+            '"titles":["Primary"],"default":"api.example"}]}]'
+        ),
+    )
+    monkeypatch.setattr("convert2aidoku.ai.deterministic_source_seed", lambda _ir: None)
+    monkeypatch.setattr(
+        "convert2aidoku.ai.deterministic_decompiled_settings",
+        lambda _ir: settings,
+        raising=False,
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": json.dumps(_manifest())}}],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120},
+            },
+        )
+
+    ir = minimal_source_ir(
+        source_format="decompiled_apk",
+        capabilities=[Capability.SETTINGS],
+        files=[
+            SourceFile(
+                path="sources/example/Example.java",
+                content="public final class Example {}",
+                sha256="0",
+            )
+        ],
+    )
+    with OpenAICompatibleClient(
+        provider_settings(),
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        result = client.generate(ir)
+
+    assert calls == 1
+    assert result.usage and result.usage.total_tokens == 120
+    generated_settings = json.loads(
+        next(item.content for item in result.value.files if item.path == "res/settings.json")
+    )
+    assert generated_settings[0]["items"][0]["key"] == "domain"
+    assert generated_settings[0]["items"][0]["values"] == ["api.example"]
+    assert generated_settings[0]["items"][0]["default"] == "api.example"
+    assert initial_generation_request_characters(ir) > 0
 
 
 def test_provider_configuration_is_required_before_a_real_ai_request() -> None:

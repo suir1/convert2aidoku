@@ -11,9 +11,7 @@ from .public_only_scope import (
 )
 
 _STRING_LITERAL = r'"(?:\\.|[^"\\])*"'
-_OPTION_VARIANT = re.compile(
-    r"(?m)^\s*(?P<name>[A-Z][A-Z0-9_]*)\s*\((?P<arguments>[^\n]*)\)\s*[,;]"
-)
+_OPTION_VARIANT = re.compile(r"(?m)^\s*(?P<name>[A-Za-z_]\w*)\s*\((?P<arguments>[^\n]*)\)\s*[,;]")
 _PREFERENCE_DECLARATION = re.compile(
     r"\b(?:final\s+)?(?:Preference|ListPreference|EditTextPreference|"
     r"SwitchPreferenceCompat)\s+(?P<name>[A-Za-z_]\w*)\s*=\s*new\s+"
@@ -138,60 +136,122 @@ def _constants(ir: SourceIR) -> dict[str, str]:
     return constants
 
 
+def _type_blocks(content: str) -> list[tuple[str, str]]:
+    blocks: list[tuple[str, str]] = []
+    declaration = re.compile(
+        r"\b(?:public|private|protected)?\s*(?:static\s+)?(?:final\s+)?"
+        r"(?:class|enum)\s+(?P<name>[A-Za-z_]\w*)\s*\{"
+    )
+    for found in declaration.finditer(content):
+        opening = content.find("{", found.start())
+        block = _balanced_content(
+            content,
+            opening,
+            open_character="{",
+            close_character="}",
+        )
+        if block is not None:
+            blocks.append((found.group("name"), block))
+    return blocks
+
+
+def _option_payload(arguments: list[str], variant_name: str) -> tuple[str, str] | None:
+    if len(arguments) >= 4 and _decode_string(arguments[0]) == variant_name:
+        value = _decode_string(arguments[2])
+        description = _decode_string(arguments[3]) or ""
+        return (value, description) if value is not None else None
+    if len(arguments) < 2:
+        return None
+    first = _decode_string(arguments[0])
+    second = _decode_string(arguments[1])
+    return (first, second) if first is not None and second is not None else None
+
+
+def _option_variants(type_name: str, block: str) -> list[tuple[str, str, str]]:
+    raw: list[tuple[int, str, tuple[str, str]]] = []
+    for found in _OPTION_VARIANT.finditer(block):
+        payload = _option_payload(_arguments(found.group("arguments")), found.group("name"))
+        if payload is not None:
+            raw.append((found.start(), found.group("name"), payload))
+    constructed = re.compile(
+        rf"(?m)^\s*(?:public\s+static\s+final\s+{re.escape(type_name)}\s+)?"
+        rf"(?P<name>[A-Za-z_]\w*)\s*=\s*new\s+{re.escape(type_name)}\s*"
+        r"\((?P<arguments>[^;]+)\)\s*;"
+    )
+    for found in constructed.finditer(block):
+        payload = _option_payload(_arguments(found.group("arguments")), found.group("name"))
+        if payload is not None:
+            raw.append((found.start(), found.group("name"), payload))
+
+    entry_key_titles = (
+        re.search(
+            r"\.entryKey\s*\+\s*' '\s*\+\s*[A-Za-z_]\w*\.description",
+            block,
+        )
+        is not None
+    )
+    variants: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for _position, name, (first, second) in sorted(raw):
+        if name in seen:
+            continue
+        if entry_key_titles:
+            value = first
+            title = f"{first} {second}" if second else first
+        else:
+            title = first
+            value = second
+        variants.append((name, title, value))
+        seen.add(name)
+    return variants
+
+
 def _option_facts(ir: SourceIR) -> dict[str, _OptionFacts]:
     facts: dict[str, _OptionFacts] = {}
     key_pattern = re.compile(
         rf"\bpublic\s+static\s+final\s+String\s+KEY\s*=\s*(?P<key>{_STRING_LITERAL})"
     )
     for source in ir.files:
-        class_name = source.path.rsplit("/", 1)[-1].removesuffix(".java")
-        key_match = key_pattern.search(source.content)
-        if key_match is None:
-            continue
-        key = _decode_string(key_match.group("key"))
-        if key is None:
-            continue
-        variants: dict[str, str] = {}
-        titles: list[str] = []
-        values: list[str] = []
-        decorated_titles = ".entry + '(' +" in source.content and ".description" in source.content
-        for found in _OPTION_VARIANT.finditer(source.content):
-            arguments = _arguments(found.group("arguments"))
-            decoded = [_decode_string(argument) for argument in arguments[:3]]
-            if len(decoded) < 2 or decoded[0] is None or decoded[1] is None:
+        for class_name, block in _type_blocks(source.content):
+            recovered = _option_variants(class_name, block)
+            if not recovered:
                 continue
-            title = decoded[0]
-            if decorated_titles and len(decoded) >= 3 and decoded[2] is not None:
-                title += f"({decoded[2]})"
-            titles.append(title)
-            values.append(decoded[1])
-            variants[found.group("name")] = decoded[1]
-        if not variants:
-            continue
-        default: str | None = None
-        constructed = re.search(
-            rf"\bDEFAULT(?:_KEY)?\s*=\s*new\s+{re.escape(class_name)}\s*"
-            rf"\((?P<arguments>[^;]+?)\)\.entryKey\s*;",
-            source.content,
-        )
-        if constructed is not None:
-            arguments = _arguments(constructed.group("arguments"))
-            if len(arguments) >= 2:
-                default = _decode_string(arguments[1])
-        if default is None:
-            selected = re.search(
-                r"\bDEFAULT(?:_KEY)?\s*=\s*(?P<variant>[A-Z][A-Z0-9_]*)\.entryKey\s*;",
-                source.content,
+            variants = {name: value for name, _title, value in recovered}
+            unique_options: list[tuple[str, str, str]] = []
+            seen_values: set[str] = set()
+            for option in recovered:
+                if option[2] in seen_values:
+                    continue
+                unique_options.append(option)
+                seen_values.add(option[2])
+            key_match = key_pattern.search(block)
+            key = _decode_string(key_match.group("key")) if key_match is not None else ""
+            default: str | None = None
+            constructed = re.search(
+                rf"\bDEFAULT(?:_KEY)?\s*=\s*new\s+{re.escape(class_name)}\s*"
+                rf"\((?P<arguments>[^;]+?)\)\.entryKey\s*;",
+                block,
             )
-            if selected is not None:
-                default = variants.get(selected.group("variant"))
-        facts[class_name] = _OptionFacts(
-            key=key,
-            titles=tuple(titles),
-            values=tuple(values),
-            default=default,
-            variants=variants,
-        )
+            if constructed is not None:
+                arguments = _arguments(constructed.group("arguments"))
+                if len(arguments) >= 4 and _decode_string(arguments[0]) is not None:
+                    default = _decode_string(arguments[2])
+                elif len(arguments) >= 2:
+                    default = _decode_string(arguments[1])
+            if default is None:
+                selected = re.search(
+                    r"\bDEFAULT(?:_KEY)?\s*=\s*(?P<variant>[A-Za-z_]\w*)\.entryKey\s*;",
+                    block,
+                )
+                if selected is not None:
+                    default = variants.get(selected.group("variant"))
+            facts[class_name] = _OptionFacts(
+                key=key or "",
+                titles=tuple(title for _name, title, _value in unique_options),
+                values=tuple(value for _name, _title, value in unique_options),
+                default=default,
+                variants=variants,
+            )
     return facts
 
 
@@ -248,7 +308,7 @@ def _select_option(
     if entries is None or values is None:
         return None
     entries_class = re.fullmatch(
-        r"(?P<class>[A-Za-z_]\w*)\.INSTANCE\.getENTRIES\(\)", entries.strip()
+        r"(?P<class>[A-Za-z_]\w*)\.INSTANCE\.getENTR(?:Y|IES)\(\)", entries.strip()
     )
     values_class = re.fullmatch(
         r"(?P<class>[A-Za-z_]\w*)\.INSTANCE\.getENTRY_KEYS\(\)", values.strip()
@@ -262,25 +322,27 @@ def _select_option(
     return options.get(entries_class.group("class"))
 
 
-def deterministic_decompiled_settings(ir: SourceIR) -> GeneratedFile | None:
-    """Recover a complete public settings resource or return None for AI fallback."""
-    if ir.source_format != "decompiled_apk" or Capability.SETTINGS not in ir.capabilities:
-        return None
-    preferences = next(
-        (
-            source.content
-            for source in ir.files
-            if source.path.endswith("PreferencesKt.java")
-            and re.search(r"\binitPreferences\s*\(", source.content)
-        ),
-        None,
-    )
-    body = _method_body(preferences, "initPreferences") if preferences is not None else None
-    if body is None:
-        return None
-    declarations = {
-        found.group("name"): found.group("kind") for found in _PREFERENCE_DECLARATION.finditer(body)
-    }
+def _returned_preference_variables(body: str) -> tuple[str, ...] | None:
+    inline = re.search(r"\breturn\s+new\s+Preference\s*\[\s*\]\s*\{", body)
+    if inline is not None:
+        opening = body.find("{", inline.start())
+        values = _balanced_content(
+            body,
+            opening,
+            open_character="{",
+            close_character="}",
+        )
+        if values is None:
+            return None
+        variables = tuple(
+            re.sub(r"^\(\s*Preference\s*\)\s*", "", value.strip()) for value in _arguments(values)
+        )
+        return (
+            variables
+            if variables and all(re.fullmatch(r"[A-Za-z_]\w*", item) for item in variables)
+            else None
+        )
+
     returned = re.search(r"\breturn\s+(?P<array>[A-Za-z_]\w*)\s*;", body)
     if returned is None:
         return None
@@ -303,12 +365,36 @@ def deterministic_decompiled_settings(ir: SourceIR) -> GeneratedFile | None:
         or set(assignments) != set(range(len(assignments)))
     ):
         return None
+    return tuple(assignments[index] for index in range(len(assignments)))
+
+
+def deterministic_decompiled_settings(ir: SourceIR) -> GeneratedFile | None:
+    """Recover a complete public settings resource or return None for AI fallback."""
+    if ir.source_format != "decompiled_apk" or Capability.SETTINGS not in ir.capabilities:
+        return None
+    preferences = next(
+        (
+            source.content
+            for source in ir.files
+            if re.search(r"(?:^|/)Preferences(?:Kt)?\.java$", source.path)
+            and re.search(r"\binitPreferences\s*\(", source.content)
+        ),
+        None,
+    )
+    body = _method_body(preferences, "initPreferences") if preferences is not None else None
+    if body is None:
+        return None
+    declarations = {
+        found.group("name"): found.group("kind") for found in _PREFERENCE_DECLARATION.finditer(body)
+    }
+    variables = _returned_preference_variables(body)
+    if variables is None:
+        return None
     constants = _constants(ir)
     options = _option_facts(ir)
     items: list[dict[str, object]] = []
     keys: set[str] = set()
-    for index in range(len(assignments)):
-        variable = assignments[index]
+    for variable in variables:
         kind = declarations.get(variable)
         key_expression = _call_argument(body, variable, "setKey")
         key = _resolve(

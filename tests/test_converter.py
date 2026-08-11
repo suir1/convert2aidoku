@@ -322,6 +322,99 @@ def test_blocked_live_validation_skips_ai_repair_and_preserves_checkpoint(
     assert any("resume the saved checkpoint" in item for item in outcome.report.warnings)
 
 
+def test_blocked_cover_request_uses_deterministic_cdn_remediation_before_skip(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    generation = _baseline_generation()
+    rust = generation.files[0]
+    generation = generation.model_copy(
+        update={
+            "files": [
+                rust.model_copy(
+                    update={
+                        "content": rust.content
+                        + """
+fn image_cdn_host() -> Option<String> {
+    match aidoku::imports::defaults::defaults_get::<String>("image_cdn") {
+        Some(value) => Some(value),
+        _ => "default".to_string().into(),
+    }
+}
+"""
+                    }
+                )
+            ]
+            + [
+                GeneratedFile(
+                    path="res/settings.json",
+                    content="""[{"type":"group","title":"Images","items":[
+                        {"type":"select","key":"image_cdn","title":"CDN",
+                         "default":"default",
+                         "values":["default","static.example.com","hk.images-cdn.net"],
+                         "titles":["Default","Static","HK"]}
+                    ]}]""",
+                )
+            ]
+        }
+    )
+    ai_calls = _install_ai_scenario(monkeypatch, generation=generation)
+    validations = iter(
+        [
+            ValidationResult(
+                build_ok=True,
+                package_ok=True,
+                blocked=True,
+                stages=[
+                    ValidationStage(
+                        name="core-live-smoke",
+                        kind="live_test",
+                        ok=False,
+                        blocked=True,
+                        output="cover image request failed after retry: RequestError",
+                    )
+                ],
+            ),
+            ValidationResult(build_ok=True, package_ok=True, live_ok=True),
+        ]
+    )
+    monkeypatch.setattr(
+        "convert2aidoku.converter.validate_project",
+        lambda *_args, **_kwargs: next(validations),
+    )
+    output = tmp_path / "generated" / "en.simple"
+
+    outcome = convert_source(
+        str(FIXTURE),
+        output=output,
+        settings=conversion_settings(),
+        live=True,
+    )
+
+    assert outcome.report.status is ConversionStatus.VERIFIED
+    assert ai_calls.repair == 0
+    assert outcome.report.ai_rounds[-1].purpose == "repair"
+    assert outcome.report.ai_rounds[-1].provider_called is False
+    assert GeneratedResources(
+        GenerationManifest(
+            source_struct="Simple",
+            files=[
+                GeneratedFile(
+                    path="src/lib.rs",
+                    content="#![no_std]",
+                ),
+                GeneratedFile(
+                    path="res/settings.json",
+                    content=(output / "res" / "settings.json").read_text(encoding="utf-8"),
+                ),
+            ],
+        )
+    ).setting_defaults() == {"image_cdn": "hk.images-cdn.net"}
+    assert 'String::from("hk.images-cdn.net")' in (output / "src" / "lib.rs").read_text(
+        encoding="utf-8"
+    )
+
+
 def test_interrupted_conversion_resumes_saved_manifest_without_regeneration(
     tmp_path: Path,
     monkeypatch,
@@ -353,7 +446,7 @@ def test_interrupted_conversion_resumes_saved_manifest_without_regeneration(
     outcome = convert_source(
         str(FIXTURE),
         output=output,
-        settings=settings,
+        settings=AISettings(),
         live=True,
         resume=True,
     )
@@ -615,6 +708,42 @@ def test_contract_incomplete_build_stays_in_resumable_workspace(
     assert "synthetic missing capability" in (workspace / "checkpoint.json").read_text(
         encoding="utf-8"
     )
+
+
+def test_zero_repair_resume_does_not_require_or_construct_an_ai_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_ai_scenario(monkeypatch)
+    monkeypatch.setattr(
+        "convert2aidoku.converter.validate_project",
+        lambda *_args, **_kwargs: ValidationResult(),
+    )
+    output = tmp_path / "generated" / "en.simple"
+    first = convert_source(
+        str(FIXTURE),
+        output=output,
+        settings=conversion_settings(max_repair_rounds=0),
+        live=False,
+    )
+    assert first.report.status is ConversionStatus.FAILED
+
+    class ForbiddenProvider:
+        def __init__(self, _settings: AISettings) -> None:
+            raise AssertionError("zero-repair resume constructed an AI provider")
+
+    monkeypatch.setattr("convert2aidoku.converter.OpenAICompatibleClient", ForbiddenProvider)
+
+    resumed = convert_source(
+        str(FIXTURE),
+        output=output,
+        settings=AISettings(max_repair_rounds=0),
+        live=False,
+        resume=True,
+    )
+
+    assert resumed.report.status is ConversionStatus.FAILED
+    assert len(resumed.report.ai_rounds) == 1
 
 
 def test_resolved_contract_gaps_are_not_reported_as_final_warnings(

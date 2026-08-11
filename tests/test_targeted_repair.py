@@ -265,6 +265,30 @@ def test_repair_patch_cannot_edit_text_outside_supplied_excerpts() -> None:
         )
 
 
+def test_repair_patch_rejects_invalid_rust_syntax() -> None:
+    rust = "fn apply_image_cdn() { old(); }\n"
+    manifest = generation_manifest(rust)
+    patch = RepairPatch.model_validate(
+        {
+            "edits": [
+                {
+                    "path": "src/lib.rs",
+                    "old_text": "old();",
+                    "new_text": "let _ = let Some(index) = value;",
+                }
+            ]
+        }
+    )
+
+    with pytest.raises(AIProviderError, match="invalid Rust syntax"):
+        apply_repair_patch(
+            manifest,
+            [{"path": "src/lib.rs", "content": rust}],
+            patch,
+            [{"path": "src/lib.rs", "content": rust}],
+        )
+
+
 def test_targeted_repair_applies_compiler_patch_without_loading_history(tmp_path: Path) -> None:
     store = CheckpointStore(tmp_path / "workspace")
     source = store.project / "src"
