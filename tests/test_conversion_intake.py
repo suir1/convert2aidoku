@@ -104,7 +104,7 @@ def test_resume_refreshes_legacy_source_ir(tmp_path: Path) -> None:
         output=output,
         settings=settings,
     )
-    intake.store.commit(source_ir=intake.source_ir.model_copy(update={"schema_version": 1}))
+    intake.store.commit(source_ir=intake.source_ir.model_copy(update={"schema_version": 7}))
 
     resumed = ConversionIntake.prepare(
         str(SIMPLE_FIXTURE),
@@ -113,8 +113,8 @@ def test_resume_refreshes_legacy_source_ir(tmp_path: Path) -> None:
         resume=True,
     )
 
-    assert resumed.source_ir.schema_version == 7
-    assert resumed.store.read_source_ir().schema_version == 7
+    assert resumed.source_ir.schema_version == 8
+    assert resumed.store.read_source_ir().schema_version == 8
 
 
 def test_resume_can_add_or_replace_live_test_query(tmp_path: Path) -> None:

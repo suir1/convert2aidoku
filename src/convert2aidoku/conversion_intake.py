@@ -152,7 +152,7 @@ def _refresh_source_ir(
     input_ref: str,
     store: CheckpointStore,
 ) -> SourceIR:
-    if source_ir.schema_version >= 7:
+    if source_ir.schema_version >= 8:
         return source_ir
     with resolve_source(input_ref) as resolved:
         refreshed = analyze_source(resolved)

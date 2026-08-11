@@ -182,7 +182,6 @@ def apply_generation_manifest(
     *,
     query: str | None,
 ) -> list[str]:
-    manifest = normalize_generation_manifest(ir, manifest)
     dependency_names = {item.name for item in manifest.dependencies}
     _write_cargo(destination, ir, dependency_names)
 

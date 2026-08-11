@@ -147,8 +147,20 @@ class RequestHeaderProfile(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
 
 
+class PageRequestBypass(BaseModel):
+    """Typed request rewrite recovered from a decompiled page interceptor."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    marker: str = Field(min_length=1)
+    path_prefix: str = Field(min_length=1)
+    hosts: list[str] = Field(min_length=1)
+    headers: dict[str, str] = Field(min_length=1)
+    excluded_header_names: list[str] = Field(default_factory=list)
+
+
 class SourceIR(BaseModel):
-    schema_version: Literal[1, 2, 3, 4, 5, 6, 7] = 7
+    schema_version: Literal[1, 2, 3, 4, 5, 6, 7, 8] = 8
     input_ref: str
     commit: str | None = None
     source_format: Literal["kotlin_module", "decompiled_apk"] = "kotlin_module"
@@ -161,6 +173,7 @@ class SourceIR(BaseModel):
     header_names: list[str] = Field(default_factory=list)
     request_header_profiles: list[RequestHeaderProfile] = Field(default_factory=list)
     shared_request_headers: dict[str, str] = Field(default_factory=dict)
+    page_bypass: PageRequestBypass | None = None
     relative_url_keys: bool = False
     chapter_page_routes: list[ChapterPageRoute] = Field(default_factory=list)
     image_url_policy: ImageUrlPolicy | None = None

@@ -710,6 +710,42 @@ def test_contract_incomplete_build_stays_in_resumable_workspace(
     )
 
 
+def test_zero_repair_resume_does_not_require_or_construct_an_ai_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_ai_scenario(monkeypatch)
+    monkeypatch.setattr(
+        "convert2aidoku.converter.validate_project",
+        lambda *_args, **_kwargs: ValidationResult(),
+    )
+    output = tmp_path / "generated" / "en.simple"
+    first = convert_source(
+        str(FIXTURE),
+        output=output,
+        settings=conversion_settings(max_repair_rounds=0),
+        live=False,
+    )
+    assert first.report.status is ConversionStatus.FAILED
+
+    class ForbiddenProvider:
+        def __init__(self, _settings: AISettings) -> None:
+            raise AssertionError("zero-repair resume constructed an AI provider")
+
+    monkeypatch.setattr("convert2aidoku.converter.OpenAICompatibleClient", ForbiddenProvider)
+
+    resumed = convert_source(
+        str(FIXTURE),
+        output=output,
+        settings=AISettings(max_repair_rounds=0),
+        live=False,
+        resume=True,
+    )
+
+    assert resumed.report.status is ConversionStatus.FAILED
+    assert len(resumed.report.ai_rounds) == 1
+
+
 def test_resolved_contract_gaps_are_not_reported_as_final_warnings(
     tmp_path: Path,
     monkeypatch,

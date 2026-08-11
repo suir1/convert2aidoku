@@ -5,7 +5,7 @@ from convert2aidoku.models import (
     GeneratedFile,
     GeneratedResources,
     GenerationManifest,
-    SourceFile,
+    PageRequestBypass,
     ValidationResult,
     ValidationStage,
 )
@@ -19,41 +19,15 @@ def _page_bypass_source_ir():
     return minimal_source_ir(
         source_format="decompiled_apk",
         relative_url_keys=True,
-        files=[
-            SourceFile(
-                path="HttpSourceRepo.java",
-                sha256="0",
-                content="""
-final class HttpSourceRepo {
-    private static final List<String> bypassHosts =
-        CollectionsKt.listOf(new String[]{"app-a.reader.test", "app-b.reader.test"});
-    public static final String lastChapterMark = "/last_chapter";
-}
-""",
-            ),
-            SourceFile(
-                path="PageBypassInterceptor.java",
-                sha256="1",
-                content="""
-final class PageBypassInterceptor implements Interceptor {
-    public Response intercept(Interceptor.Chain chain) {
-        Request request = chain.request();
-        if (HttpSourceRepo.INSTANCE.isPageListLink(request.url().toString()) &&
-            StringsKt.endsWith(request.url().toString(), HttpSourceRepo.lastChapterMark)) {
-            String route = "/readerapp" + StringsKt.removeSuffix(
-                request.url().encodedPath(), HttpSourceRepo.lastChapterMark);
-            Request.Builder app = request.newBuilder();
-            app.header("referer", "https://app.reader.test/");
-            app.header("app-version", "1.2.3");
-            return chain.proceed(app.url(request.url().newBuilder().host(host).encodedPath(route)
-                .build()).build());
-        }
-        return chain.proceed(request);
-    }
-}
-""",
-            ),
-        ],
+        page_bypass=PageRequestBypass(
+            marker="/last_chapter",
+            path_prefix="/readerapp",
+            hosts=["app-a.reader.test", "app-b.reader.test"],
+            headers={
+                "referer": "https://app.reader.test/",
+                "app-version": "1.2.3",
+            },
+        ),
     )
 
 
@@ -82,7 +56,7 @@ impl Example {
     projected = RequestPolicy.from_source_ir(ir).project(files)
     rust = projected[0].content
 
-    assert 'format!("{}/comic/{}", self.api_domain(), path)' in rust
+    assert 'format!("{}comic/{}", self.api_domain(), path)' in rust
     assert 'path.ends_with("/last_chapter")' in rust
     assert '"app-a.reader.test", "app-b.reader.test"' in rust
     assert '"/readerapp"' in rust
@@ -133,13 +107,39 @@ fn request_once(url: String) -> Result<Response> {
     assert renormalized == normalized
 
     project, ir = scaffold_project(tmp_path, transform=lambda _: _page_bypass_source_ir())
-    apply_generation_manifest(project, ir, manifest, query=None)
+    apply_generation_manifest(project, ir, normalized, query=None)
     materialized = (project / "src/lib.rs").read_text()
 
     assert 'path.ends_with("/last_chapter")' in materialized
 
 
-def test_request_policy_joins_only_named_base_providers_to_literal_paths() -> None:
+def test_apply_generation_manifest_only_materializes_the_effective_manifest(
+    tmp_path: Path,
+) -> None:
+    files = [
+        GeneratedFile(
+            path="src/lib.rs",
+            content="""
+fn absolute_url(path: &str) -> String {
+    format!("https://reader.test/{}", path)
+}
+fn request_once(url: String) -> Result<Response> {
+    Request::get(url)?.send()
+}
+""",
+        )
+    ]
+    raw = GenerationManifest(source_struct="Example", files=files)
+    project, ir = scaffold_project(tmp_path, transform=lambda _: _page_bypass_source_ir())
+
+    apply_generation_manifest(project, ir, raw, query=None)
+
+    materialized = (project / "src/lib.rs").read_text()
+    assert "c2a_page_bypass_url" not in materialized
+    assert 'path.ends_with("/last_chapter")' not in materialized
+
+
+def test_request_policy_does_not_guess_url_semantics_from_rust_names() -> None:
     content = r"""
 fn urls(&self, api_domain: String, name: &str) {
     let search = format!("{}search?q={}", api_domain, name);
@@ -155,16 +155,7 @@ fn urls(&self, api_domain: String, name: &str) {
     policy = RequestPolicy.from_source_ir(minimal_source_ir())
 
     projected = policy.project(files)
-    rust = projected[0].content
-
-    assert 'format!("{}/search?q={}", api_domain, name)' in rust
-    assert 'format!("{}/api/bzmhq/list?page={}", api_domain, 1)' in rust
-    assert 'format!("{}/list/new", self.api_domain())' in rust
-    assert 'format!("{}/comic", api_domain)' in rust
-    assert 'format!("{}{}", api_domain, name)' in rust
-    assert 'format!("{}?q={}", api_domain, name)' in rust
-    assert 'format!("{}suffix", name)' in rust
-    assert policy.project(projected) == projected
+    assert projected == files
 
 
 def test_request_policy_remediates_image_cdn_default_and_rust_fallback_atomically() -> None:

@@ -9,6 +9,7 @@ from .models import (
     GeneratedFile,
     GeneratedResources,
     GenerationManifest,
+    PageRequestBypass,
     SourceIR,
     ValidationResult,
 )
@@ -27,14 +28,6 @@ _HOST = re.compile(
 
 
 @dataclass(frozen=True)
-class _PageBypass:
-    marker: str
-    path_prefix: str
-    hosts: tuple[str, ...]
-    headers: tuple[tuple[str, str], ...]
-
-
-@dataclass(frozen=True)
 class RequestPolicyRemediation:
     manifest: GenerationManifest
     warning: str
@@ -48,30 +41,6 @@ def _decode(literal: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _balanced_block(content: str, opening: int) -> str | None:
-    depth = 0
-    quote = None
-    escaped = False
-    for index in range(opening, len(content)):
-        character = content[index]
-        if quote:
-            if escaped:
-                escaped = False
-            elif character == "\\":
-                escaped = True
-            elif character == quote:
-                quote = None
-        elif character in {'"', "'"}:
-            quote = character
-        elif character == "{":
-            depth += 1
-        elif character == "}":
-            depth -= 1
-            if depth == 0:
-                return content[opening + 1 : index]
-    return None
-
-
 def _literal_pairs(content: str) -> tuple[tuple[str, str], ...]:
     pairs = []
     for match in re.finditer(
@@ -82,67 +51,6 @@ def _literal_pairs(content: str) -> tuple[tuple[str, str], ...]:
         if name is not None and value is not None:
             pairs.append((name, value))
     return tuple(dict.fromkeys(pairs))
-
-
-def _recover_page_bypass(ir: SourceIR) -> _PageBypass | None:
-    java = "\n".join(source.content for source in ir.files)
-    marker_match = re.search(rf"\blast[A-Za-z0-9_]*Mark\s*=\s*(?P<value>{_STRING})\s*;", java, re.I)
-    hosts_match = re.search(
-        r"\b[A-Za-z_]*bypass[A-Za-z_]*hosts?\s*=\s*"
-        r"CollectionsKt\.listOf\(new\s+String\[\]\s*\{(?P<value>[^}]+)\}\)",
-        java,
-        re.I,
-    )
-    if marker_match is None or hosts_match is None:
-        return None
-    marker = _decode(marker_match.group("value"))
-    hosts = tuple(
-        value
-        for literal in re.findall(_STRING, hosts_match.group("value"))
-        if (value := _decode(literal)) is not None
-    )
-    if not marker or not hosts:
-        return None
-    for source in ir.files:
-        content = source.content
-        if not all(
-            token in content
-            for token in ("implements Interceptor", "isPageListLink", "removeSuffix", "encodedPath")
-        ):
-            continue
-        opening = content.find("{", content.find("isPageListLink"))
-        block = _balanced_block(content, opening) if opening >= 0 else None
-        if block is None:
-            continue
-        prefix_match = re.search(
-            rf"\bString\s+[A-Za-z_]\w*\s*=\s*(?P<value>{_STRING})\s*\+\s*"
-            r"StringsKt\.removeSuffix",
-            block,
-        )
-        prefix = _decode(prefix_match.group("value")) if prefix_match else None
-        headers = _literal_pairs(block)
-        if prefix and prefix.startswith("/") and headers:
-            return _PageBypass(marker, prefix.rstrip("/"), tuple(dict.fromkeys(hosts)), headers)
-    return None
-
-
-def _join_named_base_urls(content: str) -> str:
-    pattern = re.compile(
-        r'(?P<head>\bformat!\s*\(\s*")\{\}(?P<path>[A-Za-z0-9])'
-        r'(?P<tail>(?:\\.|[^"\\])*")(?P<separator>\s*,\s*)'
-        r"(?P<provider>(?:self\s*\.\s*)?[A-Za-z_]\w*(?:\s*\(\s*\))?)"
-        r"(?P<end>\s*(?=,|\)))"
-    )
-
-    def replace(match: re.Match[str]) -> str:
-        identifiers = re.findall(r"[A-Za-z_]\w*", match.group("provider"))
-        return (
-            match.expand(r"\g<head>{}/\g<path>\g<tail>\g<separator>\g<provider>\g<end>")
-            if identifiers and {"base", "domain", "origin"}.intersection(identifiers[-1].split("_"))
-            else match.group(0)
-        )
-
-    return pattern.sub(replace, content)
 
 
 def _site_suffix(host: str) -> tuple[str, ...]:
@@ -187,7 +95,7 @@ def _with_content(generated: GeneratedFile, content: str) -> GeneratedFile:
     return generated.model_copy(update={"content": content})
 
 
-def _bypass_helpers(policy: _PageBypass, normal_headers: tuple[tuple[str, str], ...]) -> str:
+def _bypass_helpers(policy: PageRequestBypass, normal_headers: tuple[tuple[str, str], ...]) -> str:
     hosts = ", ".join(json.dumps(host) for host in policy.hosts)
     normal = "\n".join(
         f"    request = request.header({json.dumps(name)}, {json.dumps(value)});"
@@ -195,7 +103,7 @@ def _bypass_helpers(policy: _PageBypass, normal_headers: tuple[tuple[str, str], 
     )
     bypass = "\n".join(
         f"        request = request.header({json.dumps(name)}, {json.dumps(value)});"
-        for name, value in policy.headers
+        for name, value in policy.headers.items()
     )
     return f"""const C2A_PAGE_BYPASS_HOSTS: &[&str] = &[{hosts}];
 
@@ -219,7 +127,7 @@ fn c2a_page_bypass_request(url: &str) -> Result<Request> {{
 
 
 def _project_page_bypass(
-    files: list[GeneratedFile], policy: _PageBypass | None
+    files: list[GeneratedFile], policy: PageRequestBypass | None
 ) -> list[GeneratedFile]:
     if policy is None:
         return files
@@ -299,20 +207,14 @@ def _project_page_bypass(
 @dataclass(frozen=True)
 class RequestPolicy:
     public_base_url: str
-    _page_bypass: _PageBypass | None
+    _page_bypass: PageRequestBypass | None
 
     @classmethod
     def from_source_ir(cls, ir: SourceIR) -> RequestPolicy:
-        return cls(ir.metadata.base_url, _recover_page_bypass(ir))
+        return cls(ir.metadata.base_url, ir.page_bypass)
 
     def project(self, files: list[GeneratedFile]) -> list[GeneratedFile]:
-        joined = [
-            _with_content(generated, _join_named_base_urls(generated.content))
-            if generated.path.endswith(".rs")
-            else generated
-            for generated in files
-        ]
-        return _project_page_bypass(joined, self._page_bypass)
+        return _project_page_bypass(files, self._page_bypass)
 
     def remediate(
         self,

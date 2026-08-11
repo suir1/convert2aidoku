@@ -237,12 +237,20 @@ class _ConversionRoundRunner:
             return
         if not repair_required(self.validation, self.capability_gaps, live=self.live):
             return
-        settings.require_provider()
         repair_number = sum(
             1
             for item in self.checkpoint.ai_rounds
             if item.purpose == "repair" and item.provider_called
         )
+        round_limit = repair_round_limit(
+            self.validation,
+            self.capability_gaps,
+            live=self.live,
+            configured_limit=settings.max_repair_rounds,
+        )
+        if repair_number >= round_limit:
+            return
+        settings.require_provider()
         with OpenAICompatibleClient(settings) as client:
             while repair_required(self.validation, self.capability_gaps, live=self.live):
                 round_limit = repair_round_limit(

@@ -513,6 +513,72 @@ def test_analyzes_decompiled_apk_as_public_only(
     assert any("library-update chapter hiding" in item for item in ir.unsupported_features)
 
 
+def test_decompiled_analysis_recovers_typed_page_request_bypass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    apk = tmp_path / "reader.apk"
+    apk.write_bytes(b"synthetic apk")
+
+    def fake_jadx(_apk: Path, destination: Path) -> None:
+        shutil.copytree(DECOMPILED_APK_FIXTURE, destination)
+        api_repo = next((destination / "sources").rglob("ApiRepo.java"))
+        api_repo.write_text(
+            api_repo.read_text(encoding="utf-8").replace(
+                "public final class ApiRepo {",
+                """public final class ApiRepo {
+    public static final String lastChapterMark = "/last_chapter";
+    private static final List<String> bypassHosts =
+        CollectionsKt.listOf(new String[]{"app-a.reader.test", "app-b.reader.test"});""",
+            ),
+            encoding="utf-8",
+        )
+        interceptor = api_repo.parent.parent / "HeadersInterceptor.java"
+        interceptor.write_text(
+            """
+final class HeadersInterceptor implements Interceptor {
+    public Response intercept(Interceptor.Chain chain) {
+        Request request = chain.request();
+        if (ApiRepo.INSTANCE.isPageListLink(request.url().toString())) {
+            String route = "/readerapp" + StringsKt.removeSuffix(
+                request.url().encodedPath(), ApiRepo.lastChapterMark);
+            Request.Builder app = request.newBuilder();
+            app.header("referer", "https://app.reader.test/");
+            app.header("app-version", "1.2.3");
+            app.header("Authorization", "Bearer fixture-credential");
+            app.header("device-id", "fixture-device");
+            app.header("tsid", "fixture.payload.signature");
+            return chain.proceed(app.build());
+        }
+        return chain.proceed(request);
+    }
+}
+""",
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(ingest, "_run_jadx", fake_jadx)
+
+    ir = analyze_path(str(apk))
+
+    assert ir.page_bypass is not None
+    assert ir.page_bypass.marker == "/last_chapter"
+    assert ir.page_bypass.path_prefix == "/readerapp"
+    assert ir.page_bypass.hosts == ["app-a.reader.test", "app-b.reader.test"]
+    assert ir.page_bypass.headers == {
+        "referer": "https://app.reader.test/",
+        "app-version": "1.2.3",
+    }
+    assert ir.page_bypass.excluded_header_names == [
+        "Authorization",
+        "device-id",
+        "tsid",
+    ]
+    serialized = ir.page_bypass.model_dump_json()
+    assert "fixture-credential" not in serialized
+    assert "fixture-device" not in serialized
+    assert "fixture.payload.signature" not in serialized
+
+
 def test_records_okhttp_interceptor_as_an_analysis_rule(tmp_path: Path) -> None:
     (tmp_path / "build.gradle.kts").write_text(
         'keiyoushi { name = "Interceptor"; source { lang = "en"; '
