@@ -15,7 +15,6 @@ from .generated_source_metadata import GeneratedSourceMetadata
 from .generation_projection import normalize_generation_manifest
 from .kotlin_settings import with_kotlin_settings
 from .listing_renderer import with_deterministic_search_listing
-from .live_remediation import remediate_failed_image_cdn
 from .manga_detail_renderer import with_deterministic_manga_detail
 from .manifest_contract import (
     ContractEvaluation,
@@ -37,6 +36,7 @@ from .models import (
 from .normalization_trace import NormalizationTrace
 from .page_renderer import with_deterministic_page_list
 from .reports import classify_status, write_report
+from .request_policy import RequestPolicy
 from .scaffold import apply_generation_manifest
 from .source_trait_renderer import (
     with_deterministic_source_shell,
@@ -215,12 +215,9 @@ class _ConversionRoundRunner:
             return
         if not repair_required(self.validation, self.capability_gaps, live=self.live):
             return
+        request_policy = RequestPolicy.from_source_ir(self.ir)
         while repair_required(self.validation, self.capability_gaps, live=self.live):
-            remediation = remediate_failed_image_cdn(
-                self.manifest,
-                self.validation,
-                public_base_url=self.ir.metadata.base_url,
-            )
+            remediation = request_policy.remediate(self.manifest, self.validation)
             if remediation is None:
                 break
             self.progress(remediation.warning + "; validating without AI")

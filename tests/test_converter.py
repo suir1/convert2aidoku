@@ -327,9 +327,24 @@ def test_cover_403_uses_deterministic_cdn_remediation_before_ai(
     monkeypatch,
 ) -> None:
     generation = _baseline_generation()
+    rust = generation.files[0]
     generation = generation.model_copy(
         update={
-            "files": [item for item in generation.files if item.path != "res/settings.json"]
+            "files": [
+                rust.model_copy(
+                    update={
+                        "content": rust.content
+                        + """
+fn image_cdn_host() -> Option<String> {
+    match aidoku::imports::defaults::defaults_get::<String>("image_cdn") {
+        Some(value) => Some(value),
+        _ => "default".to_string().into(),
+    }
+}
+"""
+                    }
+                )
+            ]
             + [
                 GeneratedFile(
                     path="res/settings.json",
@@ -393,6 +408,9 @@ def test_cover_403_uses_deterministic_cdn_remediation_before_ai(
             ],
         )
     ).setting_defaults() == {"image_cdn": "hk.images-cdn.net"}
+    assert 'String::from("hk.images-cdn.net")' in (output / "src" / "lib.rs").read_text(
+        encoding="utf-8"
+    )
 
 
 def test_interrupted_conversion_resumes_saved_manifest_without_regeneration(

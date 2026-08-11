@@ -455,33 +455,6 @@ def _normalize_chapter_route_double_slash(content: str) -> str:
     )
 
 
-def _normalize_named_base_literal_url_joins(content: str) -> str:
-    pattern = re.compile(
-        r'(?P<head>\bformat!\s*\(\s*")\{\}(?P<path>[A-Za-z0-9])'
-        r'(?P<literal>(?:\\.|[^"\\])*)"(?P<separator>\s*,\s*)'
-        r"(?P<provider>(?:self\s*\.\s*)?[A-Za-z_]\w*(?:\s*\(\s*\))?)"
-        r"(?P<end>\s*(?=,|\)))"
-    )
-
-    def replace(match: re.Match[str]) -> str:
-        identifiers = re.findall(r"[A-Za-z_]\w*", match.group("provider"))
-        provider_name = identifiers[-1] if identifiers else ""
-        if not {"base", "domain", "origin"}.intersection(provider_name.split("_")):
-            return match.group(0)
-        return (
-            match.group("head")
-            + "{}/"
-            + match.group("path")
-            + match.group("literal")
-            + '"'
-            + match.group("separator")
-            + match.group("provider")
-            + match.group("end")
-        )
-
-    return pattern.sub(replace, content)
-
-
 def normalize_deep_link_compatibility(content: str, *, trace: NormalizationTrace) -> str:
     for rewrite in (
         _normalize_deep_link_defaults,
@@ -494,11 +467,6 @@ def normalize_deep_link_compatibility(content: str, *, trace: NormalizationTrace
 def normalize_literal_url_compatibility(content: str, *, trace: NormalizationTrace) -> str:
     content = trace.apply(
         "clone_absolute_request_url", content, _normalize_clone_absolute_request_url
-    )
-    content = trace.apply(
-        "named_base_literal_url_joins",
-        content,
-        _normalize_named_base_literal_url_joins,
     )
     return trace.apply("chapter_route_double_slash", content, _normalize_chapter_route_double_slash)
 
