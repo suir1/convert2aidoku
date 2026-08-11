@@ -105,6 +105,19 @@ def _normalize_absolute_deep_link_paths(content: str) -> str:
         if '"/comic/"' not in function.text:
             continue
         normalized = function.text
+        normalized = re.sub(
+            r"(?m)^(?P<indent>[ \t]*)let\s+(?P<path>[A-Za-z_]\w*)\s*=\s*"
+            r"(?P<url>[A-Za-z_]\w*)\.as_str\(\);",
+            lambda match: (
+                f"{match.group('indent')}let {match.group('path')} = {match.group('url')}\n"
+                f'{match.group("indent")}    .split_once("://")\n'
+                f"{match.group('indent')}    .and_then(|(_, value)| "
+                "value.find('/').map(|index| &value[index..]))\n"
+                f"{match.group('indent')}    .unwrap_or({match.group('url')}.as_str());"
+            ),
+            normalized,
+            count=1,
+        )
         if "then_some(url.as_str())" not in normalized:
             normalized = re.sub(
                 r"(?P<url>[A-Za-z_]\w*)\.strip_prefix\("
@@ -147,6 +160,42 @@ def _normalize_absolute_deep_link_paths(content: str) -> str:
             'parts.len() >= 3 && parts[1] == "chapter"',
             normalized,
         )
+        route_nodes = []
+        for node in RustInspection.from_content(normalized).nodes("if_expression"):
+            condition = node.child_by_field_name("condition")
+            if condition is None:
+                continue
+            condition_text = RustInspection.compact_node(condition)
+            node_text = node.text.decode("utf-8", errors="replace")
+            if (
+                condition_text == 'path.starts_with("/comic/")'
+                and "DeepLinkResult::Manga" in node_text
+            ):
+                route_nodes.append(("manga", node))
+            elif (
+                condition_text == 'path.starts_with("/comic/chapter/")'
+                and "DeepLinkResult::Chapter" in node_text
+            ):
+                route_nodes.append(("chapter", node))
+        manga = next((node for kind, node in route_nodes if kind == "manga"), None)
+        chapter = next((node for kind, node in route_nodes if kind == "chapter"), None)
+        if (
+            manga is not None
+            and chapter is not None
+            and manga.start_byte < chapter.start_byte
+            and manga.parent is not None
+            and chapter.parent is not None
+            and manga.parent.parent == chapter.parent.parent
+        ):
+            encoded = normalized.encode("utf-8")
+            between = encoded[manga.end_byte : chapter.start_byte]
+            normalized = (
+                encoded[: manga.start_byte]
+                + encoded[chapter.start_byte : chapter.end_byte]
+                + between
+                + encoded[manga.start_byte : manga.end_byte]
+                + encoded[chapter.end_byte :]
+            ).decode("utf-8")
         if normalized != function.text:
             replacements.append((function.text, normalized))
     for original, normalized in replacements:
@@ -406,6 +455,33 @@ def _normalize_chapter_route_double_slash(content: str) -> str:
     )
 
 
+def _normalize_named_base_literal_url_joins(content: str) -> str:
+    pattern = re.compile(
+        r'(?P<head>\bformat!\s*\(\s*")\{\}(?P<path>[A-Za-z0-9])'
+        r'(?P<literal>(?:\\.|[^"\\])*)"(?P<separator>\s*,\s*)'
+        r"(?P<provider>(?:self\s*\.\s*)?[A-Za-z_]\w*(?:\s*\(\s*\))?)"
+        r"(?P<end>\s*(?=,|\)))"
+    )
+
+    def replace(match: re.Match[str]) -> str:
+        identifiers = re.findall(r"[A-Za-z_]\w*", match.group("provider"))
+        provider_name = identifiers[-1] if identifiers else ""
+        if not {"base", "domain", "origin"}.intersection(provider_name.split("_")):
+            return match.group(0)
+        return (
+            match.group("head")
+            + "{}/"
+            + match.group("path")
+            + match.group("literal")
+            + '"'
+            + match.group("separator")
+            + match.group("provider")
+            + match.group("end")
+        )
+
+    return pattern.sub(replace, content)
+
+
 def normalize_deep_link_compatibility(content: str, *, trace: NormalizationTrace) -> str:
     for rewrite in (
         _normalize_deep_link_defaults,
@@ -418,6 +494,11 @@ def normalize_deep_link_compatibility(content: str, *, trace: NormalizationTrace
 def normalize_literal_url_compatibility(content: str, *, trace: NormalizationTrace) -> str:
     content = trace.apply(
         "clone_absolute_request_url", content, _normalize_clone_absolute_request_url
+    )
+    content = trace.apply(
+        "named_base_literal_url_joins",
+        content,
+        _normalize_named_base_literal_url_joins,
     )
     return trace.apply("chapter_route_double_slash", content, _normalize_chapter_route_double_slash)
 

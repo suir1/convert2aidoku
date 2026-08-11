@@ -249,8 +249,6 @@ def _normalize_generated_setting_defaults(
                 rf"\g<prefix>{default_literal}\g<suffix>",
                 content,
             )
-        if key.rsplit(".", 1)[-1] != "api_domain":
-            continue
         function_replacements: list[tuple[str, str]] = []
         for function in RustInspection.from_content(content).functions:
             if (
@@ -274,13 +272,19 @@ def _normalize_generated_setting_defaults(
             for match_node in RustInspection.from_content(function.text).nodes("match_expression"):
                 match_text = match_node.text.decode("utf-8", errors="replace")
                 scrutinee = match_text.split("{", 1)[0]
-                uses_setting = re.search(
-                    rf"defaults_get(?:::<String>)?\(\s*{key_reference}\s*\)",
-                    scrutinee,
-                ) is not None or any(
+                uses_setting_directly = (
+                    re.fullmatch(
+                        rf"\s*match\s+(?:aidoku::imports::defaults::)?"
+                        rf"defaults_get(?:::<String>)?\(\s*{key_reference}\s*\)\s*",
+                        scrutinee,
+                    )
+                    is not None
+                )
+                uses_api_domain_binding = key.rsplit(".", 1)[-1] == "api_domain" and any(
                     re.search(rf"\bmatch\s+{re.escape(variable)}\b", scrutinee)
                     for variable in setting_variables
                 )
+                uses_setting = uses_setting_directly or uses_api_domain_binding
                 if not uses_setting:
                     continue
                 normalized_match = re.sub(

@@ -3811,6 +3811,65 @@ fn absolute_url(relative: &str) -> String {
     assert "aidoku::alloc::String::from(relative)" in lib
 
 
+def test_normalizer_applies_recovered_default_to_string_match_binding() -> None:
+    content = """
+fn image_cdn_host() -> Option<String> {
+    let pref = match defaults_get::<String>("v1.key.image_cdn_option") {
+        Some(value) => value,
+        _ => "default".to_string(),
+    };
+    match pref.as_str() {
+        "default" => None,
+        other => Some(other.to_string()),
+    }
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(
+        content,
+        setting_defaults={"v1.key.image_cdn_option": "hk.images-cdn.net"},
+    )
+
+    assert '_ => String::from("hk.images-cdn.net"),' in normalized
+    assert '"default" => None' in normalized
+    assert (
+        normalize_pinned_aidoku_rust(
+            normalized,
+            setting_defaults={"v1.key.image_cdn_option": "hk.images-cdn.net"},
+        )
+        == normalized
+    )
+
+
+def test_normalizer_joins_named_base_providers_to_literal_paths() -> None:
+    content = r"""
+fn urls(&self, api_domain: String, name: &str) {
+    let search = format!("{}search?q={}", api_domain, name);
+    let api = format!(
+        "{}api/bzmhq/list?page={}",
+        api_domain,
+        1,
+    );
+    let latest = format!("{}list/new", self.api_domain());
+    let already_joined = format!("{}/comic", api_domain);
+    let dynamic_path = format!("{}{}", api_domain, name);
+    let query = format!("{}?q={}", api_domain, name);
+    let unrelated = format!("{}suffix", name);
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert 'format!("{}/search?q={}", api_domain, name)' in normalized
+    assert '"{}/api/bzmhq/list?page={}",' in normalized
+    assert 'format!("{}/list/new", self.api_domain())' in normalized
+    assert 'format!("{}/comic", api_domain)' in normalized
+    assert 'format!("{}{}", api_domain, name)' in normalized
+    assert 'format!("{}?q={}", api_domain, name)' in normalized
+    assert 'format!("{}suffix", name)' in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
 def test_public_absolute_url_helper_preserves_generated_absolute_cover(tmp_path: Path) -> None:
     manifest = _manifest()
     manifest.files[0].content += """
@@ -4217,6 +4276,33 @@ fn handle_deep_link(&self, url: String) -> Result<Option<DeepLinkResult>> {
 
     assert 'path.split_once("/comic/").map(|(_, rest)| rest)' in normalized
     assert 'parts.len() >= 3 && parts[1] == "chapter"' in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
+def test_normalizes_dynamic_domain_deep_links_and_specific_route_order() -> None:
+    rust = """
+fn handle_deep_link(&self, url: String) -> Result<Option<DeepLinkResult>> {
+    let path = url.as_str();
+    if path.starts_with("/comic/") {
+        return Ok(Some(DeepLinkResult::Manga { key: path.to_string() }));
+    }
+    if path.starts_with("/comic/chapter/") {
+        return Ok(Some(DeepLinkResult::Chapter {
+            manga_key: path.to_string(),
+            key: path.to_string(),
+        }));
+    }
+    Ok(None)
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(rust)
+
+    assert '.split_once("://")' in normalized
+    assert ".and_then(|(_, value)| value.find('/').map(|index| &value[index..]))" in normalized
+    assert normalized.index('path.starts_with("/comic/chapter/")') < normalized.index(
+        'path.starts_with("/comic/")'
+    )
     assert normalize_pinned_aidoku_rust(normalized) == normalized
 
 

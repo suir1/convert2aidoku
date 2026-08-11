@@ -33,6 +33,7 @@ from .generation_setting_compatibility import (
 )
 from .models import Capability, GeneratedFile, GeneratedResources, GenerationManifest, SourceIR
 from .normalization_trace import NormalizationTrace
+from .page_bypass_projection import project_recovered_page_bypass as _project_recovered_page_bypass
 from .rust_compatibility import normalize_pinned_aidoku_rust as _normalize_pinned_aidoku_rust
 from .rust_inspection import RustInspection
 from .rust_inspection import last_rust_identifier as _last_rust_identifier
@@ -694,6 +695,16 @@ def _project_request_headers(
     )
 
 
+def _project_page_bypass(
+    context: _ProjectionContext,
+    state: _ProjectionState,
+) -> _ProjectionState:
+    return _with_files(
+        state,
+        _project_recovered_page_bypass(context.ir, state.files),
+    )
+
+
 def _project_user_agent(
     context: _ProjectionContext,
     state: _ProjectionState,
@@ -813,6 +824,7 @@ _PROJECTION_PASSES = (
     ),
     _ProjectionPass("project_recovered_kotlin_chapters", _project_kotlin_chapters),
     _ProjectionPass("project_recovered_request_headers", _project_request_headers),
+    _ProjectionPass("project_recovered_page_bypass", _project_page_bypass, _decompiled_apk),
     _ProjectionPass("project_user_agent_setting", _project_user_agent),
     _ProjectionPass("project_recovered_detail_api_envelope", _project_detail_envelope),
     _ProjectionPass(

@@ -623,6 +623,34 @@ class GeneratedResources:
                 values_by_key[key] = tuple(values)
         return values_by_key
 
+    def with_setting_default(self, key: str, default: str) -> GenerationManifest:
+        updated_files: list[GeneratedFile] = []
+        changed = False
+        for generated in self._manifest.files:
+            if generated.path != self.SETTINGS:
+                updated_files.append(generated)
+                continue
+            data = deepcopy(self._data.get(self.SETTINGS))
+            pending = list(data or [])
+            while pending:
+                item = pending.pop()
+                if not isinstance(item, dict):
+                    continue
+                children = item.get("items")
+                if item.get("type") in {"group", "page"} and isinstance(children, list):
+                    pending.extend(children)
+                elif item.get("key") == key and item.get("default") != default:
+                    item["default"] = default
+                    changed = True
+            if changed:
+                content = json.dumps(data, ensure_ascii=False, indent="\t") + "\n"
+                updated_files.append(generated.model_copy(update={"content": content}))
+            else:
+                updated_files.append(generated)
+        if not changed:
+            return self._manifest
+        return self._manifest.model_copy(update={"files": updated_files})
+
     def with_source_filters(self, specs: list[SourceFilterSpec]) -> GenerationManifest:
         if not specs:
             return self._manifest

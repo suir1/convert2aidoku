@@ -322,6 +322,79 @@ def test_blocked_live_validation_skips_ai_repair_and_preserves_checkpoint(
     assert any("resume the saved checkpoint" in item for item in outcome.report.warnings)
 
 
+def test_cover_403_uses_deterministic_cdn_remediation_before_ai(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    generation = _baseline_generation()
+    generation = generation.model_copy(
+        update={
+            "files": [item for item in generation.files if item.path != "res/settings.json"]
+            + [
+                GeneratedFile(
+                    path="res/settings.json",
+                    content="""[{"type":"group","title":"Images","items":[
+                        {"type":"select","key":"image_cdn","title":"CDN",
+                         "default":"default",
+                         "values":["default","static.example.com","hk.images-cdn.net"],
+                         "titles":["Default","Static","HK"]}
+                    ]}]""",
+                )
+            ]
+        }
+    )
+    ai_calls = _install_ai_scenario(monkeypatch, generation=generation)
+    validations = iter(
+        [
+            ValidationResult(
+                build_ok=True,
+                package_ok=True,
+                stages=[
+                    ValidationStage(
+                        name="core-live-smoke",
+                        kind="live_test",
+                        ok=False,
+                        output="cover image returned HTTP 403",
+                    )
+                ],
+            ),
+            ValidationResult(build_ok=True, package_ok=True, live_ok=True),
+        ]
+    )
+    monkeypatch.setattr(
+        "convert2aidoku.converter.validate_project",
+        lambda *_args, **_kwargs: next(validations),
+    )
+    output = tmp_path / "generated" / "en.simple"
+
+    outcome = convert_source(
+        str(FIXTURE),
+        output=output,
+        settings=conversion_settings(),
+        live=True,
+    )
+
+    assert outcome.report.status is ConversionStatus.VERIFIED
+    assert ai_calls.repair == 0
+    assert outcome.report.ai_rounds[-1].purpose == "repair"
+    assert outcome.report.ai_rounds[-1].provider_called is False
+    assert GeneratedResources(
+        GenerationManifest(
+            source_struct="Simple",
+            files=[
+                GeneratedFile(
+                    path="src/lib.rs",
+                    content="#![no_std]",
+                ),
+                GeneratedFile(
+                    path="res/settings.json",
+                    content=(output / "res" / "settings.json").read_text(encoding="utf-8"),
+                ),
+            ],
+        )
+    ).setting_defaults() == {"image_cdn": "hk.images-cdn.net"}
+
+
 def test_interrupted_conversion_resumes_saved_manifest_without_regeneration(
     tmp_path: Path,
     monkeypatch,
@@ -353,7 +426,7 @@ def test_interrupted_conversion_resumes_saved_manifest_without_regeneration(
     outcome = convert_source(
         str(FIXTURE),
         output=output,
-        settings=settings,
+        settings=AISettings(),
         live=True,
         resume=True,
     )

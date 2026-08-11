@@ -51,5 +51,5 @@ def test_pinned_rust_normalizer_registers_all_reviewed_rules() -> None:
 
     normalize_pinned_aidoku_rust("", trace=trace)
 
-    assert len(trace.rule_ids) == 89
+    assert len(trace.rule_ids) == 90
     assert "normalize_json_envelope_helper" in trace.rule_ids
