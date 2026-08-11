@@ -774,6 +774,36 @@ def test_initial_generation_stops_after_three_unsafe_full_outputs() -> None:
     )
 
 
+def test_initial_generation_retries_rust_syntax_errors() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        payload = json.loads(request.content)
+        if calls == 2:
+            retry = json.loads(payload["messages"][-1]["content"])
+            assert "invalid Rust syntax" in retry["validation_errors"][0]
+        manifest = _manifest()
+        if calls == 1:
+            manifest["files"][0]["content"] = "fn broken() { let _ = let Some(index) = value; }"
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(manifest)}}]},
+        )
+
+    ir = minimal_source_ir(
+        files=[SourceFile(path="src/Example.kt", content="class Example", sha256="0")]
+    )
+    with OpenAICompatibleClient(
+        provider_settings(), transport=httpx.MockTransport(handler)
+    ) as client:
+        result = client.generate(ir)
+
+    assert calls == 2
+    assert "fn broken" not in result.value.files[0].content
+
+
 def test_invalid_filter_shape_is_retried_with_field_diagnostic() -> None:
     calls = 0
 

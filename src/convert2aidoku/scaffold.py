@@ -16,10 +16,6 @@ from .dependency_policy import (
 )
 from .errors import SecurityError
 from .generated_source_metadata import GeneratedSourceMetadata
-from .generation_request_projection import (
-    _prequeried_url_helpers,
-    _request_builder_helpers,
-)
 from .icons import create_aidoku_icon
 from .ingest import ResolvedSource, copy_input_license, find_icon
 from .models import (
@@ -32,8 +28,10 @@ from .models import (
 from .normalization_trace import NormalizationTrace
 from .rust_compatibility import (
     _remove_reserved_smoke_marker,
-    normalize_pinned_aidoku_rust,
     validate_generated_content,
+)
+from .rust_compatibility import (
+    normalize_pinned_aidoku_rust as normalize_pinned_aidoku_rust,
 )
 
 
@@ -186,9 +184,6 @@ def apply_generation_manifest(
 ) -> list[str]:
     manifest = normalize_generation_manifest(ir, manifest)
     dependency_names = {item.name for item in manifest.dependencies}
-    resources = GeneratedResources(manifest)
-    setting_defaults = resources.setting_defaults()
-    setting_values = resources.setting_values()
     _write_cargo(destination, ir, dependency_names)
 
     manifest_paths = {item.path for item in manifest.files}
@@ -207,22 +202,6 @@ def apply_generation_manifest(
             content = _remove_reserved_smoke_marker(content)
             if not re.match(r"\s*#!\[no_std\]", content):
                 content = "#![no_std]\n\n" + content.lstrip()
-        if generated.path.endswith(".rs"):
-            content = normalize_pinned_aidoku_rust(
-                content,
-                allow_dead_code=generated.path != "src/lib.rs",
-                setting_defaults=setting_defaults,
-                setting_values=setting_values,
-                prequeried_url_helpers=_prequeried_url_helpers(manifest),
-                preserve_cover_urls=bool(
-                    ir.image_url_policy and ir.image_url_policy.preserve_cover_urls
-                ),
-                public_base_url=ir.metadata.base_url if ir.relative_url_keys else None,
-                chapter_key_templates=tuple(
-                    route.chapter_key_template for route in ir.chapter_page_routes
-                ),
-                request_builder_helpers=_request_builder_helpers(manifest),
-            )
         validate_generated_content(generated.path, content)
         target = _safe_destination(destination, generated.path)
         target.write_text(content.rstrip() + "\n", encoding="utf-8")

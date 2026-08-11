@@ -15,7 +15,10 @@ from .models import (
 from .rust_inspection import RustInspection
 
 _STRING = r'"(?:\\.|[^"\\])*"'
-_IMAGE_CDN_FAILURE = re.compile(r"\b(?:cover image|first image) returned HTTP 403\b")
+_IMAGE_CDN_FAILURE = re.compile(
+    r"\b(?:cover image|first image) "
+    r"(?:returned HTTP 403|request failed after retry: RequestError)\b"
+)
 _HOST = re.compile(
     r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
     r"[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?",
@@ -148,6 +151,15 @@ def _site_suffix(host: str) -> tuple[str, ...]:
 
 def _rewrite_direct_setting_fallback(content: str, key: str, default: str) -> str:
     key_literal, default_literal = json.dumps(key), json.dumps(default)
+    content = re.sub(
+        rf"(?P<call>(?:aidoku::imports::defaults::)?defaults_get(?:::<String>)?"
+        rf"\(\s*{re.escape(key_literal)}\s*\))\s*"
+        rf"(?:\.unwrap_or_default\(\)|\.unwrap_or_else\(\|\|\s*"
+        rf"(?:String::from\(\s*{_STRING}\s*\)|{_STRING}\.to_string\(\)|"
+        rf"{_STRING}\.into\(\))\s*\))",
+        rf"\g<call>.unwrap_or_else(|| String::from({default_literal}))",
+        content,
+    )
     for node in RustInspection.from_content(content).nodes("match_expression"):
         match_text = node.text.decode("utf-8", errors="replace")
         scrutinee = match_text.split("{", 1)[0]
@@ -213,10 +225,39 @@ def _project_page_bypass(
         return files
     for index, generated in enumerate(files):
         content = generated.content
-        if not generated.path.endswith(".rs") or "c2a_page_bypass_url" in content:
+        if not generated.path.endswith(".rs"):
             continue
         functions = RustInspection.from_content(content).functions
         absolute = next((item for item in functions if item.name == "absolute_url"), None)
+        if absolute is None:
+            continue
+        absolute_open = absolute.text.find("{")
+        path = re.search(
+            r"\(\s*(?:&self\s*,\s*)?(?P<name>[A-Za-z_]\w*)\s*:\s*&str\b",
+            absolute.text[:absolute_open],
+        )
+        if path is None:
+            continue
+        path_name = path.group("name")
+        marker_check = f"{path_name}.ends_with({json.dumps(policy.marker)})"
+        absolute_text = (
+            absolute.text[: absolute_open + 1]
+            + f"\n        if {path_name}.ends_with({json.dumps(policy.marker)}) {{\n"
+            + f"            return c2a_page_bypass_url({path_name});\n        }}"
+            + absolute.text[absolute_open + 1 :]
+            if marker_check not in absolute.text
+            else absolute.text
+        )
+        function_names = {item.name for item in functions}
+        if {"c2a_page_bypass_url", "c2a_page_bypass_request"} <= function_names:
+            updated = content.replace(absolute.text, absolute_text, 1)
+            if updated != content:
+                return [
+                    *files[:index],
+                    _with_content(generated, updated),
+                    *files[index + 1 :],
+                ]
+            continue
         request = next(
             (
                 item
@@ -228,27 +269,16 @@ def _project_page_bypass(
             ),
             None,
         )
-        if absolute is None or request is None:
+        if request is None:
             continue
-        absolute_open = absolute.text.find("{")
         request_open = request.text.find("{")
-        path = re.search(
-            r"\(\s*&self\s*,\s*(?P<name>[A-Za-z_]\w*)\s*:\s*&str\b",
-            absolute.text[:absolute_open],
-        )
         url = re.search(
-            r"\(\s*&self\s*,\s*(?P<name>[A-Za-z_]\w*)\s*:\s*String\b",
+            r"\(\s*(?:&self\s*,\s*)?(?P<name>[A-Za-z_]\w*)\s*:\s*String\b",
             request.text[:request_open],
         )
-        if path is None or url is None:
+        if url is None:
             continue
-        path_name, url_name = path.group("name"), url.group("name")
-        absolute_text = (
-            absolute.text[: absolute_open + 1]
-            + f"\n        if {path_name}.ends_with({json.dumps(policy.marker)}) {{\n"
-            + f"            return c2a_page_bypass_url({path_name});\n        }}"
-            + absolute.text[absolute_open + 1 :]
-        )
+        url_name = url.group("name")
         request_text = (
             request.text[:request_open].rstrip()
             + " {\n"

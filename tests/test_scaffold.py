@@ -20,10 +20,10 @@ from convert2aidoku.models import (
     SourceFilterSpec,
 )
 from convert2aidoku.normalization_trace import NormalizationTrace
+from convert2aidoku.rust_compatibility import normalize_pinned_aidoku_rust
 from convert2aidoku.scaffold import (
     apply_generation_manifest,
     normalize_generation_manifest,
-    normalize_pinned_aidoku_rust,
     render_generated_lib_rs,
     validate_generated_content,
 )
@@ -790,6 +790,24 @@ fn parse_date(value: &str) -> Result<i64> {
     assert normalize_pinned_aidoku_rust(normalized) == normalized
 
 
+def test_normalizer_preserves_identical_if_let_branches() -> None:
+    content = """
+fn replace_host(url: &str) -> String {
+    if let Some(index) = url.find('/') {
+        format!("{}", url)
+    } else {
+        format!("{}", url)
+    }
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "if let Some(index)" in normalized
+    assert "let _ = let Some" not in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
 def test_normalizer_repairs_dynamic_header_and_option_date_fallback() -> None:
     content = """
 fn request(request: Request, cookie: String) -> Request {
@@ -830,6 +848,31 @@ fn manga(dto: Dto) -> Manga {
     assert "title: dto.title," in normalized
     assert "status: match dto.status.as_str()" in normalized
     assert "..Default::default()" in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
+def test_normalizer_folds_nested_default_model_assignments_before_use() -> None:
+    content = """
+fn chapters(items: Vec<(String, String)>) -> Vec<Chapter> {
+    let mut chapters = Vec::new();
+    for (key, title) in items {
+        let mut chapter = Chapter::default();
+        chapter.key = format!("/chapter/{}", key);
+        chapter.url = Some(absolute_url(&key));
+        chapter.title = Some(title);
+        chapters.push(chapter);
+    }
+    chapters
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "let mut chapter = Chapter::default();" not in normalized
+    assert "let chapter = Chapter {" in normalized
+    assert 'key: format!("/chapter/{}", key),' in normalized
+    assert "url: Some(absolute_url(&key))," in normalized
+    assert "chapters.push(chapter);" in normalized
     assert normalize_pinned_aidoku_rust(normalized) == normalized
 
 
@@ -1766,6 +1809,25 @@ fn normalize(value: &str) -> String {
 
     assert "if normalized.len() > 10" in normalized
     assert "if normalized.len() >= 20" in normalized
+    assert normalize_pinned_aidoku_rust(normalized) == normalized
+
+
+def test_normalizer_advances_past_unicode_find_matches_by_utf8_length() -> None:
+    content = """
+fn parse_date(text: &str) {
+    if let Some(year_end) = text.find('年') {
+        let rest = &text[year_end + 1..];
+        if let Some(month_end) = rest.find('月') {
+            let day = &rest[month_end + 1..];
+        }
+    }
+}
+"""
+
+    normalized = normalize_pinned_aidoku_rust(content)
+
+    assert "text[year_end + '年'.len_utf8()..]" in normalized
+    assert "rest[month_end + '月'.len_utf8()..]" in normalized
     assert normalize_pinned_aidoku_rust(normalized) == normalized
 
 

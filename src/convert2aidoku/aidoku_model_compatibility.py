@@ -95,11 +95,8 @@ def _normalize_mutated_aidoku_models(content: str) -> str:
 def _normalize_default_model_assignments(content: str) -> str:
     encoded = content.encode("utf-8")
     edits: list[tuple[int, int, bytes]] = []
-    for function in RustInspection.from_content(content).functions:
-        body = function.node.child_by_field_name("body")
-        if body is None:
-            continue
-        children = body.named_children
+    for block in RustInspection.from_content(content).nodes("block"):
+        children = block.named_children
         for index, child in enumerate(children):
             declaration = child.text.decode("utf-8", errors="replace")
             match = re.fullmatch(
@@ -125,29 +122,42 @@ def _normalize_default_model_assignments(content: str) -> str:
                 cursor += 1
             if (
                 not fields
-                or cursor >= len(children)
-                or children[cursor].text.decode("utf-8", errors="replace").strip() != variable
                 or len({field for field, _expression in fields}) != len(fields)
+                or any(
+                    any(
+                        node.text == variable.encode()
+                        for node in RustInspection.from_content(expression).nodes("identifier")
+                    )
+                    for _, expression in fields
+                )
             ):
                 continue
             line_start = encoded.rfind(b"\n", 0, child.start_byte) + 1
             indent = encoded[line_start : child.start_byte].decode("utf-8", errors="replace")
+            end = children[cursor - 1].end_byte
+            remaining = encoded[end : block.end_byte].decode("utf-8", errors="replace")
+            mutable = (
+                re.search(
+                    rf"(?:\b{re.escape(variable)}\.[A-Za-z_]\w*\s*=(?!=)|"
+                    rf"&mut\s+{re.escape(variable)}\b)",
+                    remaining,
+                )
+                is not None
+            )
             lines = [
-                f"{indent}let {variable} = {match.group('model')} {{",
+                f"{indent}let {'mut ' if mutable else ''}{variable} = {match.group('model')} {{",
                 *[f"{indent}    {field}: {expression}," for field, expression in fields],
                 f"{indent}    ..Default::default()",
                 f"{indent}}};",
-                f"{indent}{variable}",
             ]
             edits.append(
                 (
                     child.start_byte,
-                    children[cursor].end_byte,
+                    end,
                     "\n".join(lines).encode("utf-8"),
                 )
             )
-            break
-    for start, end, replacement in reversed(edits):
+    for start, end, replacement in sorted(edits, reverse=True):
         encoded = encoded[:start] + replacement + encoded[end:]
     return encoded.decode("utf-8")
 

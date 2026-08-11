@@ -72,6 +72,7 @@ from .rust_compatibility import (
     normalize_pinned_aidoku_rust,
     validate_generated_content,
 )
+from .rust_inspection import RustInspection
 from .scaffold import render_generated_lib_rs
 from .source_trait_renderer import (
     deterministic_source_seed,
@@ -640,6 +641,8 @@ def _validate_rust_manifest(manifest: _RustGenerationManifest) -> None:
             trace=trace,
         )
         validate_generated_content(generated.path, generated.content)
+        if RustInspection.from_content(generated.content).has_syntax_errors:
+            raise ValueError(f"generated file has invalid Rust syntax: {generated.path}")
     manifest._normalization_rewrites = trace.counts
 
 

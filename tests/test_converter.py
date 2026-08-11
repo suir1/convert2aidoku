@@ -322,7 +322,7 @@ def test_blocked_live_validation_skips_ai_repair_and_preserves_checkpoint(
     assert any("resume the saved checkpoint" in item for item in outcome.report.warnings)
 
 
-def test_cover_403_uses_deterministic_cdn_remediation_before_ai(
+def test_blocked_cover_request_uses_deterministic_cdn_remediation_before_skip(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -364,12 +364,14 @@ fn image_cdn_host() -> Option<String> {
             ValidationResult(
                 build_ok=True,
                 package_ok=True,
+                blocked=True,
                 stages=[
                     ValidationStage(
                         name="core-live-smoke",
                         kind="live_test",
                         ok=False,
-                        output="cover image returned HTTP 403",
+                        blocked=True,
+                        output="cover image request failed after retry: RequestError",
                     )
                 ],
             ),

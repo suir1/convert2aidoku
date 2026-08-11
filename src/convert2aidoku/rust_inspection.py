@@ -173,6 +173,10 @@ class RustInspection:
                     yield node
                 stack.extend(reversed(node.children))
 
+    @property
+    def has_syntax_errors(self) -> bool:
+        return any(tree.root_node.has_error for tree in self._trees)
+
     def named(self, name: str) -> tuple[RustFunction, ...]:
         return self._by_name.get(name, ())
 

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from convert2aidoku.generation_projection import normalize_generation_manifest
 from convert2aidoku.models import (
     GeneratedFile,
@@ -9,12 +11,14 @@ from convert2aidoku.models import (
 )
 from convert2aidoku.normalization_trace import NormalizationTrace
 from convert2aidoku.request_policy import RequestPolicy
-from tests.scenarios import minimal_source_ir
+from convert2aidoku.scaffold import apply_generation_manifest
+from tests.scenarios import minimal_source_ir, scaffold_project
 
 
-def test_request_policy_projects_recovered_request_behavior() -> None:
-    ir = minimal_source_ir(
+def _page_bypass_source_ir():
+    return minimal_source_ir(
         source_format="decompiled_apk",
+        relative_url_keys=True,
         files=[
             SourceFile(
                 path="HttpSourceRepo.java",
@@ -51,6 +55,10 @@ final class PageBypassInterceptor implements Interceptor {
             ),
         ],
     )
+
+
+def test_request_policy_projects_recovered_request_behavior() -> None:
+    ir = _page_bypass_source_ir()
     files = [
         GeneratedFile(
             path="src/lib.rs",
@@ -78,6 +86,7 @@ impl Example {
     assert 'path.ends_with("/last_chapter")' in rust
     assert '"app-a.reader.test", "app-b.reader.test"' in rust
     assert '"/readerapp"' in rust
+
     assert '.header("app-version", "1.2.3")' in rust
     assert '.header("User-Agent", "browser")' in rust
     assert "c2a_page_bypass_request(&url)?.send()" in rust
@@ -90,6 +99,44 @@ impl Example {
         trace=trace,
     )
     assert trace.counts["project_request_policy"] == 1
+
+
+def test_request_policy_projects_page_bypass_into_free_functions(tmp_path: Path) -> None:
+    files = [
+        GeneratedFile(
+            path="src/lib.rs",
+            content="""
+use aidoku::imports::net::{Request, Response};
+fn absolute_url(path: &str) -> String {
+    format!("https://reader.test/{}", path)
+}
+fn request_once(url: String) -> Result<Response> {
+    Request::get(url)?.send()
+}
+""",
+        )
+    ]
+
+    projected = RequestPolicy.from_source_ir(_page_bypass_source_ir()).project(files)
+    rust = projected[0].content
+
+    assert 'path.ends_with("/last_chapter")' in rust
+    assert "c2a_page_bypass_request(&url)?.send()" in rust
+    assert "fn c2a_page_bypass_url(path: &str)" in rust
+    assert '"app-a.reader.test", "app-b.reader.test"' in rust
+    assert '"/readerapp"' in rust
+
+    manifest = GenerationManifest(source_struct="Example", files=files)
+    normalized = normalize_generation_manifest(_page_bypass_source_ir(), manifest)
+    renormalized = normalize_generation_manifest(_page_bypass_source_ir(), normalized)
+
+    assert renormalized == normalized
+
+    project, ir = scaffold_project(tmp_path, transform=lambda _: _page_bypass_source_ir())
+    apply_generation_manifest(project, ir, manifest, query=None)
+    materialized = (project / "src/lib.rs").read_text()
+
+    assert 'path.ends_with("/last_chapter")' in materialized
 
 
 def test_request_policy_joins_only_named_base_providers_to_literal_paths() -> None:
@@ -189,3 +236,47 @@ fn image_cdn_host() -> Option<String> {
         }
     )
     assert policy.remediate(manifest, server_error) is None
+
+
+def test_request_policy_remediates_image_request_error_with_unwrap_fallback() -> None:
+    key = "v1.key.image_cdn_option"
+    manifest = GenerationManifest(
+        source_struct="Example",
+        files=[
+            GeneratedFile(
+                path="src/lib.rs",
+                content=f'''
+fn apply_image_cdn(url: &str) -> String {{
+    let cdn = defaults_get::<String>("{key}")
+        .unwrap_or_else(|| String::from("default"));
+    format!("https://{{}}/{{}}", cdn, url)
+}}
+''',
+            ),
+            GeneratedFile(
+                path="res/settings.json",
+                content=f'''[{{"type":"group","items":[{{
+                    "type":"select","key":"{key}","default":"default",
+                    "values":["default","random","static.example.com","hk.images-cdn.net"]
+                }}]}}]''',
+            ),
+        ],
+    )
+    validation = ValidationResult(
+        blocked=True,
+        stages=[
+            ValidationStage(
+                name="core-live-smoke",
+                kind="live_test",
+                ok=False,
+                blocked=True,
+                output="cover image request failed after retry: RequestError",
+            )
+        ],
+    )
+
+    remediation = RequestPolicy.from_source_ir(minimal_source_ir()).remediate(manifest, validation)
+
+    assert remediation is not None
+    assert GeneratedResources(remediation.manifest).setting_defaults()[key] == "hk.images-cdn.net"
+    assert 'String::from("hk.images-cdn.net")' in remediation.manifest.files[0].content

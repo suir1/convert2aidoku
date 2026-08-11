@@ -44,8 +44,8 @@ def _normalize_if_expression_arithmetic(content: str) -> str:
 
 
 def _normalize_utf8_slice_loops(content: str) -> str:
-    """Iterate valid UTF-8 boundaries before slicing a string by an index."""
-    return re.sub(
+    """Keep generated string indexes on valid UTF-8 boundaries."""
+    content = re.sub(
         r"(?m)^(?P<indent>[ \t]*)let\s+(?P<bytes>[A-Za-z_]\w*)\s*=\s*"
         r"(?P<text>[A-Za-z_]\w*)\.as_bytes\(\);\s*\n"
         r"(?P=indent)for\s+(?P<index>[A-Za-z_]\w*)\s+in\s+0\.\."
@@ -53,6 +53,28 @@ def _normalize_utf8_slice_loops(content: str) -> str:
         r"\g<indent>for (\g<index>, _) in \g<text>.char_indices() {",
         content,
     )
+    replacements: list[tuple[str, str]] = []
+    for function in RustInspection.from_content(content).functions:
+        normalized = function.text
+        for found in re.finditer(
+            r"if\s+let\s+Some\(\s*(?P<index>[A-Za-z_]\w*)\s*\)\s*=\s*"
+            r"(?P<text>[A-Za-z_]\w*)\.find\(\s*(?P<literal>'[^'\\]')\s*\)",
+            function.text,
+        ):
+            literal = found.group("literal")
+            if len(literal[1:-1].encode("utf-8")) == 1:
+                continue
+            normalized = re.sub(
+                rf"(?P<prefix>\b{re.escape(found.group('text'))}\s*\[\s*"
+                rf"{re.escape(found.group('index'))}\s*\+\s*)1(?P<suffix>\s*\.\.\s*\])",
+                rf"\g<prefix>{literal}.len_utf8()\g<suffix>",
+                normalized,
+            )
+        if normalized != function.text:
+            replacements.append((function.text, normalized))
+    for original, normalized in replacements:
+        content = content.replace(original, normalized, 1)
+    return content
 
 
 def _normalize_index_length_guards(content: str) -> str:
@@ -245,6 +267,8 @@ def _normalize_identical_if_branches(content: str) -> str:
             if RustInspection.compact_node(consequence) != RustInspection.compact_node(
                 alternative_block
             ):
+                continue
+            if re.search(r"\blet\b", condition_text):
                 continue
             branch = consequence.text.decode("utf-8", errors="replace")[1:-1].strip()
             replacement = (original, f"{{ let _ = {condition_text}; {branch} }}")

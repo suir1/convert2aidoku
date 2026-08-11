@@ -211,12 +211,14 @@ class _ConversionRoundRunner:
         return False
 
     def repair(self, settings: AISettings) -> None:
-        if self._skip_blocked_repair():
-            return
-        if not repair_required(self.validation, self.capability_gaps, live=self.live):
+        if not self.validation.blocked and not repair_required(
+            self.validation, self.capability_gaps, live=self.live
+        ):
             return
         request_policy = RequestPolicy.from_source_ir(self.ir)
-        while repair_required(self.validation, self.capability_gaps, live=self.live):
+        while self.validation.blocked or repair_required(
+            self.validation, self.capability_gaps, live=self.live
+        ):
             remediation = request_policy.remediate(self.manifest, self.validation)
             if remediation is None:
                 break
@@ -230,8 +232,9 @@ class _ConversionRoundRunner:
                 ),
                 purpose="repair",
             )
-            if self._skip_blocked_repair():
-                return
+        if self.validation.blocked:
+            self._skip_blocked_repair()
+            return
         if not repair_required(self.validation, self.capability_gaps, live=self.live):
             return
         settings.require_provider()
