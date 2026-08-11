@@ -470,6 +470,213 @@ def _normalize_json_envelope_helper(content: str) -> str:
     return content
 
 
+def _normalize_generic_deserialize(content: str) -> str:
+    pattern = re.compile(
+        r"(?P<derive>#\[derive\([^\]]*\bDeserialize\b[^\]]*\)\]\s*)"
+        r"(?P<attributes>(?:#\[[^\]]+\]\s*)*)"
+        r"(?P<header>struct\s+(?P<name>[A-Za-z_]\w*)\s*<(?P<params>[^>{}]+)>\s*\{)"
+        r"(?P<body>[\s\S]*?\n\})"
+    )
+
+    def add_bound(match: re.Match[str]) -> str:
+        attributes = match.group("attributes")
+        if "serde(bound" in attributes or "serde(default)" not in match.group("body"):
+            return match.group(0)
+        params = [item.strip() for item in match.group("params").split(",")]
+        names = [item.split(":", 1)[0].strip() for item in params]
+        if not names or not all(re.fullmatch(r"[A-Za-z_]\w*", name) for name in names):
+            return match.group(0)
+        bound = ", ".join(f"{name}: aidoku::serde::Deserialize<'de>" for name in names)
+        return (
+            match.group("derive")
+            + f'#[serde(bound(deserialize = "{bound}"))]\n'
+            + attributes
+            + match.group("header")
+            + match.group("body")
+        )
+
+    content = pattern.sub(add_bound, content)
+    content = re.sub(
+        r"(?P<type>[A-Za-z_]\w*)\s*:\s*Deserialize\s*<\s*'static\s*>",
+        r"\g<type>: for<'de> Deserialize<'de>",
+        content,
+    )
+    content = re.sub(
+        r"fn\s+(?P<name>[A-Za-z_]\w*)\s*<\s*'(?P<lifetime>[A-Za-z_]\w*)\s*,\s*"
+        r"(?P<type>[A-Za-z_]\w*)\s*:\s*Deserialize\s*<\s*'(?P=lifetime)\s*>\s*>",
+        r"fn \g<name><\g<type>: for<'de> Deserialize<'de>>",
+        content,
+    )
+    generic_structs = re.findall(
+        r"\bstruct\s+(?P<name>[A-Za-z_]\w*)\s*<(?P<params>[^>{}]+)>\s*\{",
+        content,
+    )
+    for name, params in generic_structs:
+        declarations = [item.strip() for item in params.split(",")]
+        arguments = [item.split(":", 1)[0].strip() for item in declarations]
+        if not arguments or not all(
+            re.fullmatch(r"[A-Za-z_]\w*", argument) for argument in arguments
+        ):
+            continue
+        content = re.sub(
+            rf"\bimpl\s+{re.escape(name)}\s*\{{",
+            f"impl<{', '.join(declarations)}> {name}<{', '.join(arguments)}> {{",
+            content,
+        )
+    return content
+
+
+def _normalize_html_element_text(content: str) -> str:
+    content = re.sub(
+        r"\.map\(\s*\|(?P<value>[A-Za-z_]\w*)\|\s*"
+        r"(?P=value)\.text\(\)\s*\)",
+        r".and_then(|\g<value>| \g<value>.text())",
+        content,
+    )
+    content = re.sub(
+        r"(?P<element>[A-Za-z_]\w*)\.text\(\)\.as_str\(\)",
+        r"\g<element>.text().as_deref().unwrap_or_default()",
+        content,
+    )
+    content = re.sub(
+        r"(?P<element>[A-Za-z_]\w*)\s*\.text\(\)(?P<space>\s*)(?P<method>\."
+        r"(?:chars|find|is_empty|len|parse|split|trim|contains|starts_with|ends_with))"
+        r"(?P<generic>::\s*<[^>]+>)?\(",
+        r"\g<element>.text().unwrap_or_default()\g<space>\g<method>\g<generic>(",
+        content,
+    )
+    content = re.sub(
+        r"&(?P<element>[A-Za-z_]\w*)\.text\(\)(?!\.unwrap_or_default\(\))",
+        r"&\g<element>.text().unwrap_or_default()",
+        content,
+    )
+    content = re.sub(
+        r"(?P<element>[A-Za-z_]\w*)\.text\(\)\s*(?P<operator>==|!=)\s*"
+        r"(?P<literal>\"(?:\\.|[^\"\\])*\")",
+        r"\g<element>.text().as_deref() \g<operator> Some(\g<literal>)",
+        content,
+    )
+    content = re.sub(
+        r"(?P<callee>(?:self\.)?normalized_text|(?:aidoku::)?AidokuError::message)"
+        r"\(\s*(?P<element>[A-Za-z_]\w*)\.text\(\)(?!\.unwrap_or_default\(\))",
+        r"\g<callee>(\g<element>.text().unwrap_or_default()",
+        content,
+    )
+    content = re.sub(
+        r"(?P<target>\bmanga\.title)\s*=\s*"
+        r"(?P<element>[A-Za-z_]\w*)\.text\(\)\s*;",
+        r"\g<target> = \g<element>.text().unwrap_or_default();",
+        content,
+    )
+    content = re.sub(
+        r"(?P<values>\b[A-Za-z_]\w*)\.push\("
+        r"(?P<element>[A-Za-z_]\w*)\.text\(\)\)\s*;",
+        r"\g<values>.extend(\g<element>.text());",
+        content,
+    )
+    replacements: list[tuple[str, str]] = []
+    binding_pattern = re.compile(
+        r"\blet\s+(?:mut\s+)?(?P<name>[A-Za-z_]\w*)\s*=\s*"
+        r"(?P<element>[A-Za-z_]\w*)\.text\(\)\s*;"
+    )
+    for function in RustInspection.from_content(content).functions:
+        normalized = function.text
+        for binding in binding_pattern.finditer(function.text):
+            name = binding.group("name")
+            remaining = function.text[binding.end() :]
+            preserves_option = re.search(
+                rf"\b{re.escape(name)}\.(?:as_deref|as_ref|and_then|map|is_some|is_none|"
+                r"unwrap|unwrap_or|unwrap_or_default|take)\b"
+                rf"|\b(?:if|while)\s+let\s+Some\([^)]*\)\s*=\s*{re.escape(name)}\b"
+                r"(?!\s*\.)"
+                rf"|\bmatch\s+{re.escape(name)}\b",
+                remaining,
+            )
+            if preserves_option is not None:
+                continue
+            normalized = normalized.replace(
+                binding.group(0),
+                binding.group(0).replace(".text()", ".text().unwrap_or_default()"),
+                1,
+            )
+        if normalized != function.text:
+            replacements.append((function.text, normalized))
+    for original, normalized in replacements:
+        content = content.replace(original, normalized, 1)
+    return content
+
+
+def _normalize_pagination_result_impls(content: str) -> str:
+    additions = []
+    inspection = RustInspection.from_content(content)
+    for struct in inspection.structs:
+        fields = {field.name for field in struct.fields}
+        if not {"total", "limit", "offset"}.issubset(fields):
+            continue
+        has_impl = re.search(
+            rf"\bimpl(?:\s*<[^>]+>)?\s+{re.escape(struct.name)}"
+            r"(?:\s*<[^>]+>)?\s*\{[\s\S]*?"
+            r"\bfn\s+has_next\s*\(",
+            content,
+        )
+        if has_impl is not None:
+            continue
+        generic = re.search(
+            rf"\bstruct\s+{re.escape(struct.name)}\s*<(?P<params>[^>]+)>",
+            struct.text,
+        )
+        header = f"impl {struct.name}"
+        if generic is not None:
+            declarations = [item.strip() for item in generic.group("params").split(",")]
+            arguments = [item.split(":", 1)[0].strip() for item in declarations]
+            if arguments and all(re.fullmatch(r"[A-Za-z_]\w*", argument) for argument in arguments):
+                header = f"impl<{', '.join(declarations)}> {struct.name}<{', '.join(arguments)}>"
+        additions.append(
+            f"{header} {{\n"
+            "    pub fn has_next(&self) -> bool {\n"
+            "        self.total >= self.offset + self.limit\n"
+            "    }\n"
+            "}"
+        )
+    if additions:
+        content = content.rstrip() + "\n\n" + "\n\n".join(additions) + "\n"
+    return content
+
+
+def _borrow_header_values(content: str) -> str:
+    content = content.replace(
+        '.header("User-Agent", get_user_agent())',
+        '.header("User-Agent", &get_user_agent())',
+    )
+    content = content.replace(".header(key, val)", ".header(key, &val)")
+    return re.sub(
+        r'(?P<prefix>\.header\(\s*"(?:\\.|[^"\\])*"\s*,\s*)'
+        r"(?P<value>[A-Za-z_]\w*)(?P<suffix>\s*\))",
+        r"\g<prefix>&\g<value>\g<suffix>",
+        content,
+    )
+
+
+def normalize_generic_response_models(content: str, *, trace: NormalizationTrace) -> str:
+    return trace.apply("normalize_generic_deserialize", content, _normalize_generic_deserialize)
+
+
+def normalize_html_response_values(content: str, *, trace: NormalizationTrace) -> str:
+    return trace.apply("normalize_html_element_text", content, _normalize_html_element_text)
+
+
+def normalize_pagination_response_models(content: str, *, trace: NormalizationTrace) -> str:
+    return trace.apply(
+        "normalize_pagination_result_impls",
+        content,
+        _normalize_pagination_result_impls,
+    )
+
+
+def normalize_request_header_values(content: str, *, trace: NormalizationTrace) -> str:
+    return trace.apply("borrow_header_values", content, _borrow_header_values)
+
+
 def normalize_request_result_tails(content: str, *, trace: NormalizationTrace) -> str:
     return trace.apply("normalize_result_request_tails", content, _normalize_result_request_tails)
 

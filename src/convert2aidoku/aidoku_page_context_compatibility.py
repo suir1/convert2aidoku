@@ -335,6 +335,49 @@ def _normalize_page_context_maps(content: str) -> str:
     return content
 
 
+def _normalize_resolution_regex(content: str) -> str:
+    replacements: list[tuple[str, str]] = []
+    for function in RustInspection.from_content(content).functions:
+        pattern = r"\d+(?=x\.(?:jpg|webp)$)"
+        escaped_pattern = pattern.replace("\\", "\\\\")
+        if (
+            pattern not in function.text and escaped_pattern not in function.text
+        ) or "resolution" not in function.text:
+            continue
+        opening = function.text.find("{")
+        if opening < 0:
+            continue
+        replacement = (
+            function.text[:opening].rstrip()
+            + """ {
+    let suffix_start = if url.ends_with(".jpg") {
+        Some(url.len() - 4)
+    } else if url.ends_with(".webp") {
+        Some(url.len() - 5)
+    } else {
+        None
+    };
+    if let Some(suffix_start) = suffix_start {
+        let before_suffix = &url[..suffix_start];
+        if let Some(x_pos) = before_suffix.rfind('x') {
+            let before_x = &before_suffix[..x_pos];
+            let digits_start = before_x
+                .rfind(|character: char| !character.is_ascii_digit())
+                .map_or(0, |position| position + 1);
+            if digits_start < x_pos {
+                return format!("{}{}{}", &url[..digits_start], resolution, &url[x_pos..]);
+            }
+        }
+    }
+    url.to_string()
+}"""
+        )
+        replacements.append((function.text, replacement))
+    for original, replacement in replacements:
+        content = content.replace(original, replacement, 1)
+    return content
+
+
 def _apply_rewrites(
     content: str,
     *,
@@ -351,6 +394,14 @@ def normalize_image_request_compatibility(content: str, *, trace: NormalizationT
         content,
         trace=trace,
         rewrites=(_normalize_image_request_result,),
+    )
+
+
+def normalize_image_url_compatibility(content: str, *, trace: NormalizationTrace) -> str:
+    return _apply_rewrites(
+        content,
+        trace=trace,
+        rewrites=(_normalize_resolution_regex,),
     )
 
 
