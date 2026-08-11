@@ -26,7 +26,11 @@ from .dynamic_filter_compatibility import (
 )
 from .generated_rust_safety import _remove_reserved_smoke_marker as _remove_reserved_smoke_marker
 from .generated_rust_safety import validate_generated_content as validate_generated_content
-from .generation_setting_compatibility import normalize_generation_settings
+from .generation_setting_compatibility import (
+    normalize_generation_settings,
+    normalize_runtime_setting_access,
+    normalize_typed_domain_setting,
+)
 from .graphql_compatibility import (
     normalize_graphql_fragment_compatibility,
     normalize_graphql_projection_compatibility,
@@ -60,79 +64,6 @@ from .source_url_compatibility import (
     normalize_preserved_source_urls,
     normalize_source_path_helpers,
 )
-
-
-def _normalize_defaults_get_bindings(content: str) -> str:
-    """Unwrap defaults into explicitly non-optional local bindings."""
-    pattern = re.compile(
-        r"(?P<prefix>\blet\s+(?:mut\s+)?[A-Za-z_]\w*\s*:\s*)"
-        r"(?P<type>String|bool|i(?:8|16|32|64|128|size)|u(?:8|16|32|64|128|size)|f(?:32|64))"
-        r"(?P<equals>\s*=\s*)"
-        r"(?P<path>(?:aidoku::imports::defaults::)?defaults_get)"
-        r"(?:\s*::\s*<[^>]+>)?\s*\(\s*(?P<key>[^()]+?)\s*\)\s*;"
-    )
-
-    def replace(match: re.Match[str]) -> str:
-        value_type = match.group("type")
-        return (
-            f"{match.group('prefix')}{value_type}{match.group('equals')}"
-            f"{match.group('path')}::<{value_type}>({match.group('key')})"
-            ".unwrap_or_default();"
-        )
-
-    return pattern.sub(replace, content)
-
-
-def _normalize_owned_setting_routes(content: str) -> str:
-    """Keep a selected setting-owned route alive after its branch closes."""
-    replacements: list[tuple[str, str]] = []
-    for function in RustInspection.from_content(content).functions:
-        saved = re.search(
-            r"\blet\s+(?P<name>[A-Za-z_]\w*)\s*=\s*"
-            r"(?:aidoku::imports::defaults::)?defaults_get\s*::\s*<\s*String\s*>",
-            function.text,
-        )
-        if saved is None or f"=> {saved.group('name')}.as_str()," not in function.text:
-            continue
-        normalized = function.text.replace(
-            f"=> {saved.group('name')}.as_str(),",
-            f"=> {saved.group('name')}.clone(),",
-        )
-        normalized = re.sub(
-            r"(?P<prefix>\blet\s+[A-Za-z_]\w*\s*=\s*if\s+[^\{]{1,300}\{\s*)"
-            r"(?P<literal>\"(?:\\.|[^\"\\])*\")(?P<suffix>\s*\}\s*else\s*\{)",
-            r"\g<prefix>String::from(\g<literal>)\g<suffix>",
-            normalized,
-            count=1,
-        )
-        normalized = re.sub(
-            r"(?P<prefix>=>\s*)(?P<literal>\"(?:\\.|[^\"\\])*\")(?P<suffix>\s*,)",
-            r"\g<prefix>String::from(\g<literal>)\g<suffix>",
-            normalized,
-        )
-        replacements.append((function.text, normalized))
-    for original, normalized in replacements:
-        content = content.replace(original, normalized, 1)
-    return content
-
-
-def _normalize_defaults_set_string_values(content: str) -> str:
-    """Wrap obvious owned String expressions for the pinned defaults_set API."""
-    pattern = re.compile(
-        r"(?P<prefix>\bdefaults_set\(\s*\"(?:\\.|[^\"\\])*\"\s*,\s*)"
-        r"(?P<value>[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\.(?:clone|to_string)\(\))"
-        r"(?P<suffix>\s*\);)"
-    )
-    return pattern.sub(
-        lambda found: (
-            found.group("prefix")
-            + "aidoku::imports::defaults::DefaultValue::String("
-            + found.group("value")
-            + ")"
-            + found.group("suffix")
-        ),
-        content,
-    )
 
 
 def _normalize_mutated_aidoku_models(content: str) -> str:
@@ -646,9 +577,7 @@ def normalize_pinned_aidoku_rust(
     content = normalize_request_result_tails(content, trace=active_trace)
     content = normalize_detail_ownership(content, trace=active_trace)
     content = normalize_legacy_request_compatibility(content, trace=active_trace)
-    apply(_normalize_defaults_get_bindings)
-    apply(_normalize_owned_setting_routes)
-    apply(_normalize_defaults_set_string_values)
+    content = normalize_runtime_setting_access(content, trace=active_trace)
     content = normalize_source_bootstrap_compatibility(content, trace=active_trace)
     content = normalize_request_response_compatibility(
         content,
@@ -694,17 +623,7 @@ def normalize_pinned_aidoku_rust(
         preserve_cover_urls=preserve_cover_urls,
         trace=active_trace,
     )
-    before = content
-    content = re.sub(
-        r"\blet\s+domain\s*=\s*defaults_get\(",
-        "let domain: String = defaults_get(",
-        content,
-    )
-    content = content.replace(
-        "let domain: String = defaults_get(",
-        "let domain: String = defaults_get::<String>(",
-    )
-    record("typed_domain_default", before)
+    content = normalize_typed_domain_setting(content, trace=active_trace)
     before = content
     content = re.sub(
         r"(?P<prefix>\b(?:id|title):\s*(?:Some\()?)"
